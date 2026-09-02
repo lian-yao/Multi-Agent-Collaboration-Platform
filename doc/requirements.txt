@@ -1,0 +1,38 @@
+# 依赖清单（供查看与了解）
+# 环境安装请使用 UV：uv sync
+# 实际环境以 pyproject.toml + uv.lock 为准
+
+# Python 3.12.10
+langgraph==1.2.11
+dapr==1.18.3
+dapr-ext-fastapi==1.18.3
+dapr-ext-workflow==1.18.3
+
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+
+mcp==1.29.1
+openai==2.54.0
+ollama==0.6.2
+langchain-openai==1.6.0
+langchain-ollama==1.1.0
+
+redis==8.1.0
+psycopg[binary]==3.3.5
+sqlalchemy==2.0.52
+asyncpg==0.31.0
+
+opentelemetry-sdk==1.44.0
+opentelemetry-exporter-otlp-proto-http==1.44.0
+
+pydantic==2.12.5
+pydantic-settings==2.15.0
+python-dotenv==1.2.3
+
+pytest==9.1.1
+pytest-asyncio==1.4.0
+httpx==0.28.1
+
+# 待引入：crewai 与 dapr-agents 因 OpenTelemetry 约束冲突暂缓
+# crewai==1.15.18
+# dapr-agents==1.0.6
