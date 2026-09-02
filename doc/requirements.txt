@@ -33,6 +33,5 @@ pytest==9.1.1
 pytest-asyncio==1.4.0
 httpx==0.28.1
 
-# 待引入：crewai 与 dapr-agents 因 OpenTelemetry 约束冲突暂缓
-# crewai==1.15.18
+# 待引入：dapr-agents 因 OpenTelemetry 约束暂缓
 # dapr-agents==1.0.6

@@ -5,13 +5,13 @@
 
 ## 1. 项目定位
 
-本仓库实现 **AI Native 多智能体协作平台**：基于 LangGraph/CrewAI 与 Dapr Agents 构建 Agent 间任务分配、协作执行与持久化编排，支持多模型接入（OpenAI/Claude/Ollama）、MCP 工具集成和全链路可观测。
+本仓库实现 **AI Native 多智能体协作平台**：基于 LangGraph 与 Dapr Agents 构建 Agent 间任务分配、协作执行与持久化编排，支持多模型接入（OpenAI/Claude/Ollama）、MCP 工具集成和全链路可观测。
 
 完整设计、模块说明与路线图以 [doc/15 AI Native多智能体协作平台.md](<doc/15 AI Native多智能体协作平台.md>) 为唯一事实源。
 
 ### 技术栈（以文档和依赖清单为准）
 
-- 编排：LangGraph 1.2.11 / CrewAI 1.15.18 / Dapr Agents 1.0.6
+- 编排：LangGraph 1.2.11；Dapr Agents 1.0.6（待引入）
 - 运行时：Dapr 1.18.3 + Dapr Workflows
 - API：FastAPI + Uvicorn
 - 存储：Redis + PostgreSQL（SQLAlchemy）
@@ -22,10 +22,42 @@
 
 ### 已定架构决策（不要自由发挥）
 
-- 当前阶段先以 LangGraph 深度实现；CrewAI 与 Dapr Agents 因 OpenTelemetry 约束冲突暂缓引入，作为后续阶段补充。
+- 编排框架固定为 LangGraph，不引入 CrewAI；Dapr Agents 因 OpenTelemetry 约束暂缓引入。
 - 优先集成持久化执行与状态管理，暂不深入 Service Invocation 与 Actor 模型。
 - 模型优先 Ollama 本地小模型，OpenAI 作为备选。
 - 代码执行等敏感工具必须沙箱隔离（Docker 或 Wasm）。
+
+### 目录结构
+
+- `app/api`：REST API
+- `app/orchestration`：LangGraph 编排图
+- `app/agents`：Agent 角色与团队定义
+- `app/workflows`：Dapr Workflow
+- `app/memory`：会话与长期记忆
+- `app/mcp`：MCP 工具注册与调用
+- `app/tools`：内置工具
+- `app/sandbox`：工具沙箱隔离
+- `app/observability`：OpenTelemetry 与指标
+- `app/core`：配置与公共组件
+- `tests/`：unit、integration、e2e 三层测试
+- `frontend/`：Web 可视化界面（规划）
+- `deploy/`：Docker 与 Dapr 部署（规划）
+- `scripts/`：本地开发脚本（规划）
+- `doc/`：项目文档
+
+### 文档地图
+
+| 文档 | 用途 |
+| --- | --- |
+| `doc/15 AI Native多智能体协作平台.md` | 设计事实源 |
+| `doc/architecture.md` | 架构与模块边界 |
+| `doc/conventions.md` | 工程规范 |
+| `doc/api.md` | API 规划 |
+| `doc/data-model.md` | 数据模型规划 |
+| `doc/testing.md` | 测试策略 |
+| `doc/deployment.md` | 部署方案 |
+| `doc/roadmap.md` | 开发路线图 |
+| `doc/decisions/` | 架构决策记录 |
 
 ## 2. 硬性约束
 
@@ -37,6 +69,7 @@
 6. 不删除或回退用户已有的未提交改动。
 7. 禁止破坏性 git 操作（`git reset --hard`、`git checkout --` 等），除非用户明确要求。
 8. 不新增未在文档中出现的能力或抽象。
+9. 每次任务结束前要清理临时文件
 
 ## 3. 上下文管理
 
@@ -58,6 +91,8 @@
 - 搜索优先 `rg` / `rg --files`；读取文件时优先并行。
 - 安装/同步依赖：`uv sync`
 - 运行测试：`uv run pytest`
+- Dapr 初始化：`dapr init`；Docker Hub 不可达时使用 `DAPR_DEFAULT_IMAGE_REGISTRY=ghcr dapr init --runtime-version 1.18.2`
+- 一键部署：`cd deploy; .\start.ps1`；停止：`.\stop.ps1`
 - 结构化解析优先使用成熟库/API，避免 ad-hoc 字符串处理。
 - 敏感命令（删除、移动、数据库写入、部署）先确认目标路径与影响范围。
 - 每个任务完成前必须给出可复现的验证结果，不能以“看起来正确”代替。

@@ -1,0 +1,128 @@
+name: multi-agent-collaboration-platform
+
+services:
+  backend:
+    build:
+      context: ..
+      dockerfile: deploy/docker/backend.Dockerfile
+    image: multi-agent-collaboration-platform-backend:latest
+    environment:
+      AGENT_LLM_PROVIDER: ${AGENT_LLM_PROVIDER:-ollama}
+      AGENT_OLLAMA_BASE_URL: ${AGENT_OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      AGENT_OLLAMA_MODEL: ${AGENT_OLLAMA_MODEL:-qwen2.5-coder:7b}
+      REDIS_URL: redis://redis:6379/0
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/multi_agent
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health').status==200 else 1)"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  dapr-sidecar:
+    image: ghcr.io/dapr/daprd:1.18.2
+    command:
+      - ./daprd
+      - --app-id
+      - backend
+      - --app-channel-address
+      - backend
+      - --app-port
+      - "8000"
+      - --resources-path
+      - /components
+      - --placement-host-address
+      - placement:50005
+      - --scheduler-host-address
+      - scheduler:50006
+      - --dapr-http-port
+      - "3500"
+    volumes:
+      - ./dapr/components:/components
+    ports:
+      - "3500:3500"
+    depends_on:
+      backend:
+        condition: service_healthy
+      placement:
+        condition: service_started
+      scheduler:
+        condition: service_started
+
+  placement:
+    image: ghcr.io/dapr/placement:1.18.2
+    command:
+      - ./placement
+      - --port
+      - "50005"
+
+  scheduler:
+    image: ghcr.io/dapr/scheduler:1.18.2
+    command:
+      - ./scheduler
+      - --etcd-data-dir
+      - /tmp/dapr-scheduler
+      - --override-broadcast-host-port
+      - scheduler:50006
+      - --etcd-client-listen-address
+      - 0.0.0.0
+
+  redis:
+    image: docker.m.daocloud.io/library/redis:7-alpine
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  postgres:
+    image: docker.m.daocloud.io/library/postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: multi_agent
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d multi_agent"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  jaeger:
+    image: docker.m.daocloud.io/jaegertracing/all-in-one:1.60
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"
+      - "4317:4317"
+      - "4318:4318"
+
+  prometheus:
+    image: docker.m.daocloud.io/prom/prometheus:latest
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+volumes:
+  postgres-data:
