@@ -63,7 +63,7 @@ flowchart TB
 ## 架构决策
 
 - 编排框架固定为 LangGraph，不引入 CrewAI。
-- Dapr Agents 因 OpenTelemetry 约束暂缓引入，先使用 Dapr 原生能力。
+- Dapr Agents 1.0.6 已引入，使用 OpenTelemetry 1.39.1 以兼容其语义约定约束。
 - 从单 Agent 模式起步，再扩展多 Agent 协作。
 - 优先集成持久化执行与状态管理。
 - 敏感工具执行必须沙箱隔离。

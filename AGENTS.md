@@ -7,11 +7,11 @@
 
 本仓库实现 **AI Native 多智能体协作平台**：基于 LangGraph 与 Dapr Agents 构建 Agent 间任务分配、协作执行与持久化编排，支持多模型接入（OpenAI/Claude/Ollama）、MCP 工具集成和全链路可观测。
 
-完整设计、模块说明与路线图以 [doc/15 AI Native多智能体协作平台.md](<doc/15 AI Native多智能体协作平台.md>) 为唯一事实源。
+完整设计、模块说明与路线图以 [doc/15 AI Native多智能体协作平台.md](<doc/15 AI Native多智能体协作平台.md>) 为唯一事实源，改文件不允许自动修改，需要同意。
 
 ### 技术栈（以文档和依赖清单为准）
 
-- 编排：LangGraph 1.2.11；Dapr Agents 1.0.6（待引入）
+- 编排：LangGraph 1.2.11；Dapr Agents 1.0.6
 - 运行时：Dapr 1.18.3 + Dapr Workflows
 - API：FastAPI + Uvicorn
 - 存储：Redis + PostgreSQL（SQLAlchemy）
@@ -22,7 +22,7 @@
 
 ### 已定架构决策（不要自由发挥）
 
-- 编排框架固定为 LangGraph，不引入 CrewAI；Dapr Agents 因 OpenTelemetry 约束暂缓引入。
+- 编排框架固定为 LangGraph，不引入 CrewAI；Dapr Agents 1.0.6 已引入，使用 OpenTelemetry 1.39.1 兼容组合。
 - 优先集成持久化执行与状态管理，暂不深入 Service Invocation 与 Actor 模型。
 - 模型优先 Ollama 本地小模型，OpenAI 作为备选。
 - 代码执行等敏感工具必须沙箱隔离（Docker 或 Wasm）。
