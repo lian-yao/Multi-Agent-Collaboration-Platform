@@ -94,7 +94,7 @@ erDiagram
 | session_id | UUID | FK → sessions.id，CASCADE | 所属会话 |
 | instance_id | VARCHAR(100) | NULL | Dapr Workflow 实例 ID |
 | status | VARCHAR(20) | `pending` | `pending` / `running` / `paused` / `completed` / `failed` / `cancelled` |
-| checkpoint | JSONB | NULL | 最近一次 LangGraph/Agent 状态快照 |
+| checkpoint | JSONB | NULL | 最近一次进度摘要（展示/审计用，不作为恢复依据） |
 | current_step | VARCHAR(100) | NULL | 当前执行阶段，如 `collect` / `analyze` / `report` |
 | error | TEXT | NULL | 失败原因 |
 | created_at | TIMESTAMPTZ | `now()` | 创建时间 |
