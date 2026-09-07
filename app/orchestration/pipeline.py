@@ -44,6 +44,7 @@ class PipelineState(BaseModel):
     current_step: PipelineStage | None = None
     completed_steps: list[PipelineStage] = Field(default_factory=list)
     results: dict[str, Any] = Field(default_factory=dict)
+    error: str | None = None
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -107,6 +108,55 @@ def complete_step(
     )
 
 
+def pause(state: PipelineState) -> PipelineState:
+    """将 running 状态置为 paused，保留当前步骤供恢复。"""
+
+    if state.status is not PipelineStatus.RUNNING:
+        raise ValueError(
+            f"只能从 running 暂停，当前状态是 {state.status.value}"
+        )
+    return state.model_copy(
+        update={
+            "status": PipelineStatus.PAUSED,
+            "updated_at": _now(),
+        }
+    )
+
+
+def resume(state: PipelineState) -> PipelineState:
+    """将 paused 状态恢复为 running，并从当前/下一未完成步骤继续。"""
+
+    if state.status is not PipelineStatus.PAUSED:
+        raise ValueError(
+            f"只能从 paused 恢复，当前状态是 {state.status.value}"
+        )
+    remaining = [
+        step for step in PIPELINE_STEPS if step not in state.completed_steps
+    ]
+    current_step = state.current_step or (remaining[0] if remaining else None)
+    return state.model_copy(
+        update={
+            "status": PipelineStatus.RUNNING,
+            "current_step": current_step,
+            "updated_at": _now(),
+        }
+    )
+
+
+def fail(state: PipelineState, error: str) -> PipelineState:
+    """将未终止的执行置为 failed 并记录失败原因。"""
+
+    if state.status in (PipelineStatus.COMPLETED, PipelineStatus.FAILED):
+        raise ValueError(f"终态 {state.status.value} 不能再标记失败")
+    return state.model_copy(
+        update={
+            "status": PipelineStatus.FAILED,
+            "error": error,
+            "updated_at": _now(),
+        }
+    )
+
+
 def serialize_pipeline_state(state: PipelineState) -> dict[str, Any]:
     """输出可跨进程传输/持久化的 JSON 载荷。"""
 
@@ -131,4 +181,42 @@ def pipeline_checkpoint_summary(state: PipelineState) -> dict[str, Any]:
         "current_step": state.current_step.value if state.current_step else None,
         "completed_steps": [step.value for step in state.completed_steps],
         "updated_at": state.updated_at.isoformat(),
+    }
+
+
+def build_step_payload(
+    step: PipelineStage | str,
+    state: PipelineState,
+    attempt: int = 1,
+) -> dict[str, Any]:
+    """构造单个 Workflow 活动的输入载荷：步骤名 + 完整状态 + 尝试次数。"""
+
+    if attempt < 1:
+        raise ValueError(f"attempt 必须大于等于 1，当前是 {attempt}")
+    stage = PipelineStage(step) if isinstance(step, str) else step
+    return {
+        "step": stage.value,
+        "state": serialize_pipeline_state(state),
+        "attempt": attempt,
+    }
+
+
+def parse_step_payload(
+    payload: dict[str, Any],
+) -> tuple[PipelineStage, PipelineState, int]:
+    """还原 Workflow 活动输入载荷。"""
+
+    return (
+        PipelineStage(payload["step"]),
+        deserialize_pipeline_state(payload["state"]),
+        int(payload["attempt"]),
+    )
+
+
+def build_step_result(state: PipelineState) -> dict[str, Any]:
+    """构造单个 Workflow 活动的输出载荷：更新后状态 + checkpoint 摘要。"""
+
+    return {
+        "state": serialize_pipeline_state(state),
+        "checkpoint": pipeline_checkpoint_summary(state),
     }
