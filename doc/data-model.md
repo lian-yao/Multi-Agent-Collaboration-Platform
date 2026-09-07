@@ -1,29 +1,161 @@
-# 数据模型（规划）
+# 数据模型（开发基线）
 
-> 当前为规划文档，表和 Key 尚未落地。实际以 SQLAlchemy 模型和 Redis 结构为准，并同步更新本文件。
+> 本文档将原“数据模型规划”细化为可指导 SQLAlchemy 模型与 Redis 结构落地的开发基线。
+> 实际落地后以模型代码为准，结构变化需同步更新本文件。
 
-## PostgreSQL
+## 1. 通用约定
 
-| 表 | 用途 | 关键字段 |
-| --- | --- | --- |
-| `sessions` | 会话持久化 | id、user_id、status、created_at |
-| `messages` | 消息历史 | id、session_id、role、content、created_at |
-| `agents` | Agent 角色配置 | id、name、role、model、temperature |
-| `workflow_runs` | Workflow 执行记录 | id、session_id、status、checkpoint |
-| `tool_calls` | 工具调用审计 | id、run_id、tool_name、input、output、status |
-| `metrics` | 指标聚合 | id、metric_name、value、labels、recorded_at |
+- PostgreSQL 16，表名小写下划线，主键默认 `UUID DEFAULT gen_random_uuid()`。
+- 时间统一 `TIMESTAMPTZ`，写入 UTC。
+- 状态字段统一字符串类型，并配合应用层枚举约束（不再使用 CHECK 强约束，避免演进成本）。
+- JSONB 用于保存结构化载荷（checkpoint、labels、工具调用输入输出）。
+- Redis 只承担缓存与高频状态；PostgreSQL 是会话、审计与持久化记录的最终事实源。
 
-## Redis
+## 2. 对象关系
 
-| Key | 用途 | 说明 |
-| --- | --- | --- |
-| `session:{id}:messages` | 会话上下文 | 多轮对话消息 |
-| `workflow:{id}:state` | Workflow 状态 | Dapr State Store 后端 |
-| `agent:{id}:memory` | Agent 长期记忆 | 跨会话偏好与知识 |
-| `pubsub:agent-events` | Agent 间事件 | Dapr Pub/Sub 主题 |
+```mermaid
+erDiagram
+    SESSION ||--o{ MESSAGE : contains
+    SESSION ||--o{ AGENT_RUN : contains
+    AGENT_RUN ||--o| WORKFLOW_RUN : may_have
+    AGENT_RUN ||--o{ TOOL_CALL : records
+    SESSION ||--o{ AGENT_RUN : contains
+    AGENTS ||--o{ AGENT_RUN : executes
+    WORKFLOW_RUN ||--o{ TOOL_CALL : records
+    METRICS }o--|| METRICS : aggregated
+```
 
-## 一致性
+说明：
 
-- Redis 保存高频状态与临时上下文。
-- PostgreSQL 保存会话、审计和持久化记录。
-- Dapr Workflow 在状态变更持久化后才推进下一步。
+- 一次用户消息产生一个 `agent_runs`（可关联 `workflow_runs`）。
+- `tool_calls.run_id` 指向触发该工具调用的 `agent_runs.id`；若由 Dapr Workflow 活动直接产生，
+  同一记录再冗余 `workflow_runs.id` 到 `workflow_run_id`。
+- `workflow_runs.agent_run_id` 为可空唯一外键：AgentRun 不一定需要 Dapr Workflow。
+
+## 3. PostgreSQL 表结构
+
+### sessions（会话）
+
+| 字段 | 类型 | 约束/默认 | 说明 |
+| --- | --- | --- | --- |
+| id | UUID | PK | 会话 ID |
+| user_id | TEXT | NULL | 预留用户标识，本期无鉴权可为空 |
+| status | VARCHAR(20) | `active` | `active` / `paused` |
+| created_at | TIMESTAMPTZ | `now()` | 创建时间 |
+| updated_at | TIMESTAMPTZ | `now()` | 更新时间 |
+
+索引：`idx_sessions_user_id (user_id)`。
+
+### messages（消息历史）
+
+| 字段 | 类型 | 约束/默认 | 说明 |
+| --- | --- | --- | --- |
+| id | UUID | PK | 消息 ID |
+| session_id | UUID | FK → sessions.id，CASCADE | 所属会话 |
+| role | VARCHAR(20) | 非空 | `user` / `assistant` / `system` / `tool` |
+| content | TEXT | 非空 | 消息内容 |
+| agent_run_id | UUID | FK → agent_runs.id，NULL | 触发该消息的执行记录 |
+| status | VARCHAR(20) | `queued` | `queued` / `running` / `completed` / `failed` |
+| created_at | TIMESTAMPTZ | `now()` | 创建时间 |
+
+索引：`idx_messages_session_id_created (session_id, created_at DESC)`。
+
+### agents（Agent 角色配置）
+
+| 字段 | 类型 | 约束/默认 | 说明 |
+| --- | --- | --- | --- |
+| id | UUID | PK | Agent 内部 ID |
+| name | VARCHAR(100) | 非空、UNIQUE | Agent 名称（展示用） |
+| role | VARCHAR(50) | 非空 | 角色标识：`collector` / `analyst` / `reporter` 等 |
+| model | VARCHAR(100) | 非空 | 模型名 |
+| temperature | DOUBLE PRECISION | `0.2` | 模型温度 |
+| created_at | TIMESTAMPTZ | `now()` | 创建时间 |
+| updated_at | TIMESTAMPTZ | `now()` | 更新时间 |
+
+### agent_runs（Agent 执行记录）
+
+| 字段 | 类型 | 约束/默认 | 说明 |
+| --- | --- | --- | --- |
+| id | UUID | PK | 执行 ID |
+| session_id | UUID | FK → sessions.id，CASCADE | 所属会话 |
+| agent_id | UUID | FK → agents.id，NULL | 实际执行的 Agent；空表示编排层自动分工 |
+| status | VARCHAR(20) | `queued` | `queued` / `running` / `paused` / `completed` / `failed` |
+| created_at | TIMESTAMPTZ | `now()` | 创建时间 |
+| updated_at | TIMESTAMPTZ | `now()` | 更新时间 |
+
+索引：`idx_agent_runs_session (session_id, created_at DESC)`。
+
+### workflow_runs（Dapr Workflow 执行记录）
+
+| 字段 | 类型 | 约束/默认 | 说明 |
+| --- | --- | --- | --- |
+| id | UUID | PK | 业务侧 Workflow ID |
+| agent_run_id | UUID | FK → agent_runs.id，NULL、UNIQUE | 关联的 AgentRun |
+| session_id | UUID | FK → sessions.id，CASCADE | 所属会话 |
+| instance_id | VARCHAR(100) | NULL | Dapr Workflow 实例 ID |
+| status | VARCHAR(20) | `pending` | `pending` / `running` / `paused` / `completed` / `failed` / `cancelled` |
+| checkpoint | JSONB | NULL | 最近一次 LangGraph/Agent 状态快照 |
+| current_step | VARCHAR(100) | NULL | 当前执行阶段，如 `collect` / `analyze` / `report` |
+| error | TEXT | NULL | 失败原因 |
+| created_at | TIMESTAMPTZ | `now()` | 创建时间 |
+| updated_at | TIMESTAMPTZ | `now()` | 更新时间 |
+| completed_at | TIMESTAMPTZ | NULL | 完成/终止时间 |
+
+索引：`idx_workflow_runs_session (session_id, created_at DESC)`、`idx_workflow_runs_instance (instance_id)`。
+
+### tool_calls（工具调用审计）
+
+| 字段 | 类型 | 约束/默认 | 说明 |
+| --- | --- | --- | --- |
+| id | UUID | PK | 调用 ID |
+| run_id | UUID | FK → agent_runs.id，CASCADE | 所属 AgentRun |
+| workflow_run_id | UUID | FK → workflow_runs.id，NULL | 经 Workflow 执行时的冗余关联 |
+| tool_name | VARCHAR(100) | 非空 | 工具名，如 `calculator` / `web_search` |
+| input | JSONB | 非空 | 工具入参 |
+| output | JSONB | NULL | 工具返回 |
+| status | VARCHAR(20) | `running` | `running` / `succeeded` / `failed` |
+| error | TEXT | NULL | 失败原因 |
+| created_at | TIMESTAMPTZ | `now()` | 创建时间 |
+| updated_at | TIMESTAMPTZ | `now()` | 更新时间 |
+
+索引：`idx_tool_calls_run (run_id, created_at)`。
+
+### metrics（指标聚合）
+
+| 字段 | 类型 | 约束/默认 | 说明 |
+| --- | --- | --- | --- |
+| id | BIGSERIAL | PK | 自增 ID |
+| metric_name | VARCHAR(100) | 非空 | 指标名 |
+| value | DOUBLE PRECISION | 非空 | 指标值 |
+| labels | JSONB | `{}` | 标签，如 `{"model": "qwen2.5-coder:7b"}` |
+| recorded_at | TIMESTAMPTZ | `now()` | 记录时间 |
+
+索引：`idx_metrics_name_time (metric_name, recorded_at DESC)`。
+
+## 4. Redis 结构
+
+| Key | 类型 | TTL | 用途 | 一致性说明 |
+| --- | --- | --- | --- | --- |
+| `session:{id}:messages` | List（JSON 消息） | 7 天 | 会话上下文缓存 | 可丢失，PostgreSQL 为事实源 |
+| `agent:{id}:memory` | Hash/向量记录 | 无 | 跨会话长期记忆 | 记忆层写入前先落审计 |
+| `workflow:{id}:state` | Hash | 与 Workflow 生命周期一致 | Dapr State Store 状态 | 由 Dapr state store 组件管理，应用不直接改写 |
+| `pubsub:agent-events` | Stream | 消息保留策略 | Agent 间事件 | Dapr Pub/Sub 管理 |
+
+## 5. 一致性规则
+
+1. 收到消息请求时，先写 `messages` + `agent_runs`（事务），再调度 Workflow；
+   调度失败时 `agent_runs` 置为 `failed`。
+2. Dapr Workflow 状态变更完成后回写 `workflow_runs.status`，不允许应用直接改 `instance` 侧状态。
+3. Redis 消息缓存只服务会话上下文读取；删除 Redis 不删除 PostgreSQL。
+4. 工具调用先插 `tool_calls(status=running)` 再执行，执行完成或失败后更新，保证审计可追踪。
+5. 暂停/恢复只更新允许的状态转换，冲突状态返回错误码（见 `doc/api.md`）。
+
+## 6. 与既有 API 对象的关系
+
+- `Session` ↔ `sessions`
+- `Message` ↔ `messages`
+- `AgentRun` ↔ `agent_runs`
+- `WorkflowRun` ↔ `workflow_runs`
+- `ToolCall` ↔ `tool_calls`
+- `AgentInfo` / Agent 配置 ↔ `agents`
+- `metrics` 接口 ↔ `metrics`

@@ -7,6 +7,7 @@
 | [15 AI Native多智能体协作平台.md](<15 AI Native多智能体协作平台.md>) | 选题、完整设计、模块与路线图 |
 | [requirements.txt](requirements.txt) | 依赖清单，供查看与了解 |
 | [architecture.md](architecture.md) | 系统架构与模块边界 |
+| [dapr-integration.md](dapr-integration.md) | Dapr × LangGraph 集成设计（开发基线草案） |
 | [conventions.md](conventions.md) | 工程规范 |
 | [api.md](api.md) | REST API 规划 |
 | [data-model.md](data-model.md) | 数据模型规划 |
