@@ -3,6 +3,8 @@ import pytest
 from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_ollama import ChatOllama
+from langchain_openai import ChatOpenAI
 
 from app.config import AgentSettings
 from app.orchestration.graph import build_langgraph_agent, run_agent
@@ -68,4 +70,45 @@ def test_openai_requires_explicit_model():
     settings = AgentSettings(llm_provider="openai", _env_file=None)
 
     with pytest.raises(ValueError, match="AGENT_OPENAI_MODEL"):
+        build_chat_model(settings)
+
+
+def test_factory_ollama_branch_builds_chat_ollama():
+    settings = AgentSettings(
+        llm_provider="ollama",
+        ollama_base_url="http://ollama.test:11434",
+        ollama_model="qwen2.5-coder:7b",
+        temperature=0.4,
+        _env_file=None,
+    )
+
+    model = build_chat_model(settings)
+
+    assert isinstance(model, ChatOllama)
+    assert model.base_url == "http://ollama.test:11434"
+    assert model.model == "qwen2.5-coder:7b"
+    assert model.temperature == 0.4
+
+
+def test_factory_openai_branch_builds_chat_openai(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    settings = AgentSettings(
+        llm_provider="openai",
+        openai_model="gpt-4o-mini",
+        temperature=0.3,
+        _env_file=None,
+    )
+
+    model = build_chat_model(settings)
+
+    assert isinstance(model, ChatOpenAI)
+    assert model.model_name == "gpt-4o-mini"
+    assert model.temperature == 0.3
+
+
+def test_factory_rejects_unknown_provider():
+    settings = AgentSettings(_env_file=None)
+    settings.llm_provider = "anthropic"  # 绕过 Literal 校验，测试工厂自身防御
+
+    with pytest.raises(ValueError, match="不支持的模型提供方"):
         build_chat_model(settings)
