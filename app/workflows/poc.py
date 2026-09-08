@@ -9,6 +9,10 @@ from app.core.checkpoint import (
     init_checkpoint_schema,
     update_workflow_run,
 )
+from app.orchestration.pipeline import (
+    deserialize_pipeline_state,
+    pipeline_checkpoint_summary,
+)
 from app.workflows.pipeline import WORKFLOW_NAME, WorkflowTask
 
 
@@ -52,15 +56,21 @@ def schedule(hold_seconds: int, wait: bool, workflow_id: str | None = None) -> N
         if state is None:
             update_workflow_run(workflow_id, status="failed", error="state not found")
             raise SystemExit("workflow state not found")
-        output = json.loads(state.serialized_output or "null")
+        workflow_result = json.loads(state.serialized_output or "null")
+        final_state = deserialize_pipeline_state(workflow_result["state"])
         update_workflow_run(
             workflow_id,
             status="completed",
-            current_step="report",
-            checkpoint={"output": output},
+            checkpoint=pipeline_checkpoint_summary(final_state),
         )
         print(f"workflow_status={state.runtime_status.name}")
-        print(json.dumps(output, ensure_ascii=False, indent=2))
+        print(
+            json.dumps(
+                workflow_result["output"],
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
     finally:
         client.close()
 
