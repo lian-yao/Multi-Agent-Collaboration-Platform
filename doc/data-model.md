@@ -137,9 +137,23 @@ erDiagram
 | Key | 类型 | TTL | 用途 | 一致性说明 |
 | --- | --- | --- | --- | --- |
 | `session:{id}:messages` | List（JSON 消息） | 7 天 | 会话上下文缓存 | 可丢失，PostgreSQL 为事实源 |
-| `agent:{id}:memory` | Hash/向量记录 | 无 | 跨会话长期记忆 | 记忆层写入前先落审计 |
+| `agent:{id}:memory` | Hash | 无 | 跨会话长期记忆 | 记忆层写入前先落审计 |
 | `workflow:{id}:state` | Hash | 与 Workflow 生命周期一致 | Dapr State Store 状态 | 由 Dapr state store 组件管理，应用不直接改写 |
 | `pubsub:agent-events` | Stream | 消息保留策略 | Agent 间事件 | Dapr Pub/Sub 管理 |
+
+### 4.1 记忆结构明细（角色 C 定义，2026-09-08）
+
+数据结构落地于 `app/memory/schemas.py`，读写接口契约见 `app/memory/store.py`，决策见 ADR-005。
+
+- **会话记忆** `session:{id}:messages`：List，元素为 `SessionMessage` 的 JSON（含
+  `session_id/role/content/id/agent_run_id/status/created_at`）。`role` ∈
+  `user/assistant/system/tool`，`status` ∈ `queued/running/completed/failed`
+  （对齐 §3 messages 表与 `doc/api.md` §2）。仅服务会话上下文读取，TTL 7 天，可丢失；
+  PostgreSQL `messages` 为最终事实源，删除 Redis 不删除 PostgreSQL。
+- **长期记忆** `agent:{id}:memory`：Hash，field=记忆项 key，value=JSON
+  `{content, agent_id, updated_at}`（不含 key）。写前先落审计；无 TTL。
+  **本期不引入向量检索**：设计文档将向量库标记为「可选」，故长期记忆为结构化偏好记录，
+  后续如需语义检索再增量引入 embedding 与索引。
 
 ## 5. 一致性规则
 
