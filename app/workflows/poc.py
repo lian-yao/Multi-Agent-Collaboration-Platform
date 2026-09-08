@@ -1,0 +1,82 @@
+import argparse
+import json
+import uuid
+
+import dapr.ext.workflow as wf
+
+from app.core.checkpoint import (
+    create_workflow_run,
+    init_checkpoint_schema,
+    update_workflow_run,
+)
+from app.workflows.pipeline import WORKFLOW_NAME, WorkflowTask
+
+
+def schedule(hold_seconds: int, wait: bool, workflow_id: str | None = None) -> None:
+    if workflow_id is None:
+        init_checkpoint_schema()
+        workflow_id = str(uuid.uuid4())
+        task = WorkflowTask(
+            workflow_id=workflow_id,
+            task="分析技术文章并生成报告",
+            session_id="demo-session",
+            agent_run_id=f"agent-run-{workflow_id[:8]}",
+            hold_seconds=hold_seconds,
+        )
+        create_workflow_run(
+            workflow_id=workflow_id,
+            session_id=None,
+            agent_run_id=None,
+        )
+        client = wf.DaprWorkflowClient()
+        try:
+            client.schedule_new_workflow(
+                WORKFLOW_NAME,
+                input=task.asdict(),
+                instance_id=workflow_id,
+            )
+            update_workflow_run(workflow_id, status="running", instance_id=workflow_id)
+            print(f"scheduled workflow_id={workflow_id} instance_id={workflow_id}")
+        finally:
+            client.close()
+        if not wait:
+            return
+    else:
+        print(f"waiting existing workflow_id={workflow_id}")
+
+    client = wf.DaprWorkflowClient()
+    try:
+        state = client.wait_for_workflow_completion(
+            workflow_id, timeout_in_seconds=180
+        )
+        if state is None:
+            update_workflow_run(workflow_id, status="failed", error="state not found")
+            raise SystemExit("workflow state not found")
+        output = json.loads(state.serialized_output or "null")
+        update_workflow_run(
+            workflow_id,
+            status="completed",
+            current_step="report",
+            checkpoint={"output": output},
+        )
+        print(f"workflow_status={state.runtime_status.name}")
+        print(json.dumps(output, ensure_ascii=False, indent=2))
+    finally:
+        client.close()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--hold-seconds", type=int, default=0)
+    parser.add_argument("--no-wait", action="store_true")
+    parser.add_argument("--workflow-id", default=None)
+    args = parser.parse_args()
+    schedule(
+        hold_seconds=args.hold_seconds,
+        wait=not args.no_wait,
+        workflow_id=args.workflow_id,
+    )
+
+
+if __name__ == "__main__":
+    main()
