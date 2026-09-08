@@ -12,6 +12,8 @@ services:
       AGENT_OLLAMA_MODEL: ${AGENT_OLLAMA_MODEL:-qwen2.5-coder:7b}
       REDIS_URL: redis://redis:6379/0
       DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/multi_agent
+      DAPR_HTTP_ENDPOINT: http://dapr-sidecar:3500
+      DAPR_GRPC_ENDPOINT: dapr-sidecar:50001
     extra_hosts:
       - host.docker.internal:host-gateway
     ports:
