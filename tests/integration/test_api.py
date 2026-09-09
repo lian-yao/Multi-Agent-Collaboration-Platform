@@ -93,3 +93,16 @@ def test_missing_session_uses_contract_error(monkeypatch) -> None:
 
     assert response.status_code == 404
     assert response.json()["code"] == "SESSION_NOT_FOUND"
+
+
+def test_agent_team_matches_d5_d6_pipeline() -> None:
+    client = TestClient(app)
+
+    response = client.get("/api/v1/agents")
+
+    assert response.status_code == 200
+    assert [item["role"] for item in response.json()["items"]] == [
+        "collector",
+        "analyst",
+        "reporter",
+    ]

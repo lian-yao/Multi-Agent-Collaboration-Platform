@@ -78,6 +78,18 @@ class SessionActionResponse(BaseModel):
     workflow: WorkflowResponse | None = None
 
 
+class AgentResponse(BaseModel):
+    id: str
+    name: str
+    role: str
+    model: str
+    status: str
+
+
+class AgentListResponse(BaseModel):
+    items: list[AgentResponse]
+
+
 app = FastAPI(
     title="Multi-Agent Collaboration Platform",
     version="0.1.0",
@@ -258,3 +270,34 @@ def get_workflow(workflow_id: str) -> WorkflowResponse:
     if workflow is None:
         raise ApiError("WORKFLOW_NOT_FOUND", "Workflow 不存在", status.HTTP_404_NOT_FOUND)
     return _workflow_response(workflow)
+
+
+@app.get("/api/v1/agents", response_model=AgentListResponse)
+def list_agents() -> AgentListResponse:
+    """Return the fixed D5-D6 team represented by the three pipeline roles."""
+    model = "qwen2.5-coder:7b"
+    return AgentListResponse(
+        items=[
+            AgentResponse(
+                id="collector",
+                name="信息收集 Agent",
+                role="collector",
+                model=model,
+                status="idle",
+            ),
+            AgentResponse(
+                id="analyst",
+                name="数据分析 Agent",
+                role="analyst",
+                model=model,
+                status="idle",
+            ),
+            AgentResponse(
+                id="reporter",
+                name="报告生成 Agent",
+                role="reporter",
+                model=model,
+                status="idle",
+            ),
+        ]
+    )
