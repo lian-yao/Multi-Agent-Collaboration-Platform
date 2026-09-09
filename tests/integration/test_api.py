@@ -17,11 +17,13 @@ def test_health_endpoint() -> None:
 class FakeWorkflowService:
     def __init__(self) -> None:
         self.scheduled: list[str] = []
+        self.scheduled_tasks: list[object] = []
         self.paused: list[str] = []
         self.resumed: list[str] = []
 
     def schedule(self, task) -> str:
         self.scheduled.append(task.workflow_id)
+        self.scheduled_tasks.append(task)
         return task.workflow_id
 
     def pause(self, workflow_id: str) -> None:
@@ -51,6 +53,7 @@ def test_session_message_and_workflow_lifecycle(monkeypatch) -> None:
     assert accepted_payload["status"] == "pending"
     workflow_id = accepted_payload["workflow_id"]
     assert workflow_service.scheduled == [workflow_id]
+    assert workflow_service.scheduled_tasks[0].message_id == accepted_payload["message_id"]
 
     workflow = client.get(f"/api/v1/workflows/{workflow_id}")
     assert workflow.status_code == 200
@@ -60,6 +63,7 @@ def test_session_message_and_workflow_lifecycle(monkeypatch) -> None:
     assert messages.status_code == 200
     assert messages.json()["total"] == 1
     assert messages.json()["items"][0]["content"] == "执行三步流水线"
+    assert messages.json()["items"][0]["status"] == "running"
 
     paused = client.post(f"/api/v1/sessions/{session_id}/pause")
     assert paused.status_code == 200

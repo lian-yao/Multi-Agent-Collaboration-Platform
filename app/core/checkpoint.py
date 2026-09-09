@@ -230,6 +230,22 @@ def update_agent_run_status(
         return _agent_run_to_dict(row)
 
 
+def update_message_status(
+    message_id: str | uuid.UUID,
+    status: str,
+) -> dict[str, Any]:
+    if status not in {"queued", "running", "completed", "failed"}:
+        raise ValueError(f"unknown message status: {status}")
+    with get_session_factory()() as session:
+        row = session.get(Message, _as_uuid(message_id))
+        if row is None:
+            raise KeyError(f"message not found: {message_id}")
+        row.status = status
+        session.commit()
+        session.refresh(row)
+        return _message_to_dict(row)
+
+
 def create_message(
     session_id: str | uuid.UUID,
     *,

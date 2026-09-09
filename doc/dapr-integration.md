@@ -65,16 +65,21 @@
 
 ```text
 POST message
-  → 事务写入 messages(queued) + agent_runs(queued)
-  → 创建/调度 Dapr Workflow 实例
-  → agent_runs/status = running
+  → 写入 messages(queued) + agent_runs(queued) + workflow_runs(pending)
+  → workflow_runs/agent_runs/messages 置为 running
+  → 创建/调度 Dapr Workflow 实例（调度失败则三者回写 failed）
   → 每完成一个阶段：
       → Dapr Workflow 持久化该阶段结果
-      → 回写 workflow_runs.status/current_step/checkpoint
-  → 完成：workflow_runs/completed + agent_runs/completed + message/completed
+      → 回写 workflow_runs.status/current_step/checkpoint（仍为 running）
+  → 终态回写活动执行：workflow_runs/completed|failed
+    + agent_runs/completed|failed + message/completed|failed
 ```
 
 失败与暂停同理：先由 Dapr 侧持久化事实，再回写业务表；两者不一致时以 Dapr 状态为准并告警。
+
+> 修订（2026-09-09）：业务行先置 `running` 再调度，避免“终态回写活动先于 API 的
+> running 回写完成”导致状态机竞态；终态回写作为 Workflow 内的持久化活动
+> （`finalize_activity`）执行，进程重启后仍能补齐 `completed` / `failed`。
 
 ## 5. 故障恢复主链路
 

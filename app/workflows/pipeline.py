@@ -17,7 +17,11 @@ from typing import Any
 
 import dapr.ext.workflow as wf
 
-from app.core.checkpoint import update_workflow_run
+from app.core.checkpoint import (
+    update_agent_run_status,
+    update_message_status,
+    update_workflow_run,
+)
 from app.orchestration.pipeline import (
     PIPELINE_STEPS as PIPELINE_CONTRACT_STEPS,
     PipelineStage,
@@ -48,6 +52,7 @@ class WorkflowTask:
     task: str
     session_id: str | None = None
     agent_run_id: str | None = None
+    message_id: str | None = None
     hold_seconds: int = 0
 
     def asdict(self) -> dict[str, Any]:
@@ -159,47 +164,103 @@ def report_activity(
     return _run_stage_activity(ctx, activity_input, PipelineStage.REPORT)
 
 
+def finalize_activity(
+    ctx: wf.WorkflowActivityContext,
+    activity_input: dict[str, Any],
+) -> dict[str, Any]:
+    """Back-fill terminal state to workflow_runs / agent_runs / messages.
+
+    The stage activities only ever report ``running`` progress. Without this
+    durable activity, an API-scheduled workflow completes inside Dapr but the
+    business rows stay ``running`` forever because nothing waits for completion.
+    Executed inside the workflow makes the back-fill survive process restarts.
+    """
+    status = activity_input["status"]
+    if status not in {"completed", "failed"}:
+        raise ValueError(f"unsupported terminal status: {status}")
+
+    workflow_id = activity_input["workflow_id"]
+    update_workflow_run(
+        workflow_id,
+        status=status,
+        checkpoint=activity_input.get("checkpoint"),
+        error=activity_input.get("error"),
+    )
+    agent_run_id = activity_input.get("agent_run_id")
+    if agent_run_id:
+        update_agent_run_status(agent_run_id, status)
+    message_id = activity_input.get("message_id")
+    if message_id:
+        update_message_status(message_id, status)
+    return {"workflow_id": workflow_id, "status": status}
+
+
 def agent_pipeline_workflow(
     ctx: wf.DaprWorkflowContext,
     task: dict[str, Any],
 ) -> dict[str, Any]:
     state = start(new_pipeline_state(task=task["task"]))
 
-    ctx.set_custom_status(COLLECT_STEP)
-    collected = yield ctx.call_activity(
-        collect_activity,
-        input={
-            "task": task,
-            "payload": build_step_payload(PipelineStage.COLLECT, state),
-        },
-    )
-    state = deserialize_pipeline_state(collected["state"])
+    terminal_input: dict[str, Any] = {
+        "workflow_id": task.get("workflow_id") or ctx.instance_id,
+        "agent_run_id": task.get("agent_run_id"),
+        "message_id": task.get("message_id"),
+    }
+    try:
+        ctx.set_custom_status(COLLECT_STEP)
+        collected = yield ctx.call_activity(
+            collect_activity,
+            input={
+                "task": task,
+                "payload": build_step_payload(PipelineStage.COLLECT, state),
+            },
+        )
+        state = deserialize_pipeline_state(collected["state"])
 
-    hold_seconds = int(task.get("hold_seconds") or 0)
-    if hold_seconds > 0:
-        yield ctx.create_timer(timedelta(seconds=hold_seconds))
+        hold_seconds = int(task.get("hold_seconds") or 0)
+        if hold_seconds > 0:
+            yield ctx.create_timer(timedelta(seconds=hold_seconds))
 
-    ctx.set_custom_status(ANALYZE_STEP)
-    analyzed = yield ctx.call_activity(
-        analyze_activity,
-        input={
-            "task": task,
-            "payload": build_step_payload(PipelineStage.ANALYZE, state),
-        },
-    )
-    state = deserialize_pipeline_state(analyzed["state"])
+        ctx.set_custom_status(ANALYZE_STEP)
+        analyzed = yield ctx.call_activity(
+            analyze_activity,
+            input={
+                "task": task,
+                "payload": build_step_payload(PipelineStage.ANALYZE, state),
+            },
+        )
+        state = deserialize_pipeline_state(analyzed["state"])
 
-    ctx.set_custom_status(REPORT_STEP)
-    reported = yield ctx.call_activity(
-        report_activity,
-        input={
-            "task": task,
-            "payload": build_step_payload(PipelineStage.REPORT, state),
-        },
-    )
-    state = deserialize_pipeline_state(reported["state"])
+        ctx.set_custom_status(REPORT_STEP)
+        reported = yield ctx.call_activity(
+            report_activity,
+            input={
+                "task": task,
+                "payload": build_step_payload(PipelineStage.REPORT, state),
+            },
+        )
+        state = deserialize_pipeline_state(reported["state"])
+    except Exception as exc:
+        ctx.set_custom_status("failed")
+        yield ctx.call_activity(
+            finalize_activity,
+            input={
+                **terminal_input,
+                "status": "failed",
+                "error": str(exc),
+            },
+        )
+        raise
 
     ctx.set_custom_status("completed")
+    yield ctx.call_activity(
+        finalize_activity,
+        input={
+            **terminal_input,
+            "status": "completed",
+            "checkpoint": pipeline_checkpoint_summary(state),
+        },
+    )
     return {
         "output": state.results[PipelineStage.REPORT.value],
         "state": serialize_pipeline_state(state),

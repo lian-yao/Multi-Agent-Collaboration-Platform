@@ -24,7 +24,6 @@ def schedule(hold_seconds: int, wait: bool, workflow_id: str | None = None) -> N
             workflow_id=workflow_id,
             task="分析技术文章并生成报告",
             session_id="demo-session",
-            agent_run_id=f"agent-run-{workflow_id[:8]}",
             hold_seconds=hold_seconds,
         )
         create_workflow_run(

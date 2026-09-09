@@ -30,6 +30,9 @@ class SqlApiStore:
     def update_agent_run_status(self, agent_run_id: str, status: str) -> dict[str, Any]:
         return checkpoint.update_agent_run_status(agent_run_id, status)
 
+    def update_message_status(self, message_id: str, status: str) -> dict[str, Any]:
+        return checkpoint.update_message_status(message_id, status)
+
     def create_message(
         self,
         session_id: str,
@@ -133,6 +136,11 @@ class InMemoryApiStore:
         row = self.agent_runs[agent_run_id]
         row["status"] = status
         row["updated_at"] = self._now()
+        return row.copy()
+
+    def update_message_status(self, message_id: str, status: str) -> dict[str, Any]:
+        row = self.messages[message_id]
+        row["status"] = status
         return row.copy()
 
     def create_message(

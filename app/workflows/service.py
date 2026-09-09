@@ -10,6 +10,7 @@ from app.workflows.pipeline import (
     agent_pipeline_workflow,
     analyze_activity,
     collect_activity,
+    finalize_activity,
     report_activity,
 )
 
@@ -34,6 +35,7 @@ class WorkflowService:
         self._runtime.register_activity(collect_activity)
         self._runtime.register_activity(analyze_activity)
         self._runtime.register_activity(report_activity)
+        self._runtime.register_activity(finalize_activity)
         self._registered = True
 
     def start(self) -> None:

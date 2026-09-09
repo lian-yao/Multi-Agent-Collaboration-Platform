@@ -159,19 +159,22 @@ def send_message(session_id: str, payload: MessageRequest) -> MessageAcceptedRes
         agent_run_id=agent_run["id"],
     )
     try:
+        api_store.update_workflow(workflow_id, status="running")
+        api_store.update_agent_run_status(agent_run["id"], "running")
+        api_store.update_message_status(message["id"], "running")
         get_workflow_service().schedule(
             WorkflowTask(
                 workflow_id=workflow_id,
                 task=payload.content,
                 session_id=session_id,
                 agent_run_id=agent_run["id"],
+                message_id=message["id"],
             )
         )
-        api_store.update_workflow(workflow_id, status="running")
-        api_store.update_agent_run_status(agent_run["id"], "running")
     except Exception as exc:
         api_store.update_agent_run_status(agent_run["id"], "failed")
         api_store.update_workflow(workflow_id, status="failed")
+        api_store.update_message_status(message["id"], "failed")
         raise ApiError("INTERNAL_ERROR", "Workflow 调度失败", status.HTTP_500_INTERNAL_SERVER_ERROR) from exc
 
     return MessageAcceptedResponse(
