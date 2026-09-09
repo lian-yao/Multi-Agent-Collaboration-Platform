@@ -136,7 +136,8 @@ pending → running ⇄ paused → completed
 
 Web UI 若需要实时刷新，先采用轮询；事件流（SSE）等实时通道不作为本期 REST 契约范围。
 
-> 现有 `app/api/main.py` 中的同步单 Agent 端点是过渡实现，按本契约开发时同步迁移为异步流程。
+> `app/api/main.py` 已按本契约异步落地：会话、消息、暂停/恢复与 Workflow 状态接口已在 D3–D4 完成，
+> 多 Agent 编排、工具与指标端点随 M3/M4 里程碑补充。
 
 ## 4. 接口清单
 

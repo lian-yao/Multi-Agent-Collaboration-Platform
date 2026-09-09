@@ -31,8 +31,8 @@
 ├── app/                      # FastAPI 后端与编排层
 ├── frontend/                 # Web 可视化界面（规划）
 ├── tests/                    # 单元、集成、端到端测试
-├── deploy/                   # Docker 与 Dapr 部署资源（规划）
-├── scripts/                  # 本地开发脚本（规划）
+├── deploy/                   # Docker 与 Dapr 部署资源
+├── scripts/                  # 本地开发脚本
 ├── examples/                 # 示例场景（规划）
 ├── doc/                      # 项目文档
 │   ├── 15 AI Native多智能体协作平台.md
