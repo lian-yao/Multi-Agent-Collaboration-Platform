@@ -7,6 +7,9 @@
 - LangGraph 单 Agent 原型已完成，包含基础图结构与测试。
 - 编排框架固定为 LangGraph，不引入 CrewAI。
 - Dapr 本地运行时已完成初始化，Redis、Placement、Scheduler、Zipkin 容器可用。
+- D3-D4（里程碑 M2）已完成：固定三步 Dapr Workflow + State Management 持久化、
+  断点续跑演练脚本、会话/记忆数据结构与 REST API（会话、消息、Workflow 暂停/恢复）。
+- API 发起的 Workflow 执行完成后会由 durable 活动回写终态，轮询可观察到 completed。
 - Python 环境由 UV 管理，实际环境以 `pyproject.toml + uv.lock` 为准。
 
 ## 技术栈

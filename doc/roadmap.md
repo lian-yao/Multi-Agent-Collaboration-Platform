@@ -12,8 +12,9 @@
 
 ## 当前进度
 
-- 已完成：Dapr CLI 初始化、Python 虚拟环境、LangGraph 单 Agent 原型与测试。
-- 下一步：集成 Dapr Workflow 与 State Management。
-- 进行中（D3-D4）：成员 A 的编排状态 Schema、序列化与 Checkpoint 摘要接口已完成；
-  成员 B 按固定三步模式 B 接入 Dapr Workflow 与 State Management。
+- 已完成（D1-D2）：Dapr CLI 初始化、Python 虚拟环境、LangGraph 单 Agent 原型与测试、Ollama 模型验证。
+- 已完成（D3-D4，里程碑 M2）：固定三步 Dapr Workflow + State Management、断点续跑演练脚本、
+  编排状态契约与 Checkpoint 摘要、会话/记忆数据结构、会话与 Workflow REST API；
+  API 发起的执行完成后由 durable 终态活动回写 completed/failed。
+- 下一步（D5-D6）：多 Agent 编排流水线（LangGraph 多节点图）与示例场景。
 - 范围说明：D3-D4 不含动态并行分派、依赖 DAG 与人工介入（HITL），后续版本单独评估。

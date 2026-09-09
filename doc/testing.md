@@ -76,7 +76,7 @@ cd deploy; .\start.ps1                     # 起完整环境
 5. 轮询 `GET /workflows/{id}`，断言从 `analysis` 阶段继续并最终 `completed`；
 6. 记录从服务可用到实例恢复执行的耗时，目标 `< 5s`。
 
-自动化路线：先用 `scripts/fault_recovery.ps1`（待建）固化手工步骤；D7 前改为 pytest 集成用例。
+自动化路线：已提供 `scripts/fault_recovery.ps1` 固化手工演练步骤；D7 前改为 pytest 集成用例。
 
 ### 3.2 并发会话测试（E 系列性能）
 
