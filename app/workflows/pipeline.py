@@ -5,6 +5,8 @@ PipelineState。本文件把每一步活动改为：
 
 - 输入使用 ``app.orchestration.pipeline.build_step_payload``；
 - 状态推进使用 ``PipelineState`` 与 ``complete_step``；
+- 阶段内容由 ``app.orchestration.pipeline_graph.run_role_stage`` 调用对应角色的
+  真实模型生成（ADR-007，替换 D3-D4 的 Fake 阶段结果）；
 - 落库/展示只写 ``pipeline_checkpoint_summary``，完整结果保留在活动输出与
   Dapr State Store 中。
 """
@@ -16,6 +18,7 @@ from datetime import timedelta
 from typing import Any
 
 import dapr.ext.workflow as wf
+from langchain_core.language_models.chat_models import BaseChatModel
 
 from app.core.checkpoint import (
     update_agent_run_status,
@@ -37,6 +40,7 @@ from app.orchestration.pipeline import (
     serialize_pipeline_state,
     start,
 )
+from app.orchestration.pipeline_graph import run_role_stage
 from app.workflows.state import save_step_result
 
 WORKFLOW_NAME = "agent_pipeline"
@@ -57,28 +61,6 @@ class WorkflowTask:
 
     def asdict(self) -> dict[str, Any]:
         return asdict(self)
-
-
-def fake_stage_result(
-    step: str,
-    task: str,
-    previous: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Deterministic fake LLM output used by the D3-D4 workflow POC."""
-    if step == COLLECT_STEP:
-        content = f"collected task: {task}"
-    elif step == ANALYZE_STEP:
-        content = f"analyzed task: {task} (chars={len(task)})"
-    elif step == REPORT_STEP:
-        content = f"report: {task}"
-    else:
-        raise ValueError(f"unknown pipeline step: {step}")
-    return {
-        "step": step,
-        "status": "completed",
-        "content": content,
-        "previous": previous,
-    }
 
 
 def _to_stage(step: PipelineStage | str) -> PipelineStage:
@@ -103,8 +85,14 @@ def advance_pipeline_stage(
     state: PipelineState,
     step: PipelineStage | str,
     task: str,
+    *,
+    llm: BaseChatModel | None = None,
 ) -> dict[str, Any]:
-    """用编排契约推进一个阶段，返回活动输出所需的状态与 checkpoint。"""
+    """用编排契约推进一个阶段，返回活动输出所需的状态与 checkpoint。
+
+    阶段内容来自该阶段对应角色的模型调用；``llm`` 为空时按 ``AgentSettings``
+    构建模型（生产路径），测试与本地替身通过注入 FakeChatModel 避免真实调用。
+    """
 
     stage = _to_stage(step)
     if stage != state.current_step:
@@ -117,7 +105,7 @@ def advance_pipeline_stage(
     elif stage is PipelineStage.REPORT:
         previous = state.results.get(PipelineStage.ANALYZE.value)
 
-    result = fake_stage_result(stage.value, task, previous=previous)
+    result = run_role_stage(stage, task, previous, llm=llm)
     updated = complete_step(state, stage, result)
     return {**build_step_result(updated), "result": result}
 

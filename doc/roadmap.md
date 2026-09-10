@@ -16,5 +16,7 @@
 - 已完成（D3-D4，里程碑 M2）：固定三步 Dapr Workflow + State Management、断点续跑演练脚本、
   编排状态契约与 Checkpoint 摘要、会话/记忆数据结构、会话与 Workflow REST API；
   API 发起的执行完成后由 durable 终态活动回写 completed/failed。
-- 下一步（D5-D6）：多 Agent 编排流水线（LangGraph 多节点图）与示例场景。
+- 已完成（D5-D6 接线）：多 Agent 流水线的 LangGraph 图与角色分配、角色 Prompt 与示例场景、
+  Workflow 阶段活动接入真实 Ollama 模型（替换 D3-D4 的 Fake 阶段结果，见 ADR-007）。
+- 下一步（D5-D6）：把最终报告落库为 assistant 消息并在 Web 展示，补齐端到端演示。
 - 范围说明：D3-D4 不含动态并行分派、依赖 DAG 与人工介入（HITL），后续版本单独评估。

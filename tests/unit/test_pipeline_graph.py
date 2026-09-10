@@ -121,7 +121,7 @@ def test_graph_terminal_state_roundtrips_through_json():
     assert restored.results == state.results
 
 
-def test_run_role_stage_is_drop_in_for_fake_stage_result():
+def test_run_role_stage_returns_workflow_stage_payload():
     fake = ScriptedChatModel(replies=["关键风险：延迟"])
     previous = {"step": "collect", "status": "completed", "content": "要点"}
 
