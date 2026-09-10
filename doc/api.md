@@ -128,7 +128,8 @@ pending → running ⇄ paused → completed
 
 - `POST /sessions/{id}/messages` 立即持久化 Message 与 AgentRun、调度 Workflow，返回 `202`；
 - 客户端通过 `GET /workflows/{workflow_id}` 轮询执行状态；
-- 执行完成后通过 `GET /sessions/{id}/messages` 获取结果；
+- 执行完成后通过 `GET /sessions/{id}/messages` 获取结果：终态活动会追加一条
+  `role=assistant` 的报告消息（ID 由 workflow_id 派生，重放不重复），失败任务不写；
 - 暂停/恢复接口作用于会话及其运行中的 Workflow。
 
 理由：LLM 推理与工具调用耗时不可控，HTTP 同步连接不适合长任务；统一异步可让多 Agent 流水线、
