@@ -19,5 +19,7 @@
 - 已完成（D5-D6 接线）：多 Agent 流水线的 LangGraph 图与角色分配、角色 Prompt 与示例场景、
   可恢复的多 Agent 子任务 Workflow、Workflow 阶段活动默认调用真实 Ollama 模型
   （Fake 仅保留为恢复演练开关，见 ADR-007）。
-- 下一步（D5-D6）：把最终报告落库为 assistant 消息并在 Web 展示，补齐端到端演示。
+- 已完成（D5-D6 收尾）：最终报告作为 `messages(role=assistant)` 在终态回写并经
+  `GET /messages` 返回，Web 消息记录直接可见（见 ADR-008）。
+- 下一步：M4 的工具生态与可观测（MCP 工具注册与调用、Jaeger/Prometheus 指标）。
 - 范围说明：D3-D4 不含动态并行分派、依赖 DAG 与人工介入（HITL），后续版本单独评估。

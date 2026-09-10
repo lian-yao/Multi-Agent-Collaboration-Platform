@@ -22,6 +22,7 @@ from app.workflows.pipeline import (
     agent_pipeline_workflow,
     agent_subtask_workflow,
     fake_stage_result,
+    report_message_id,
     subtask_instance_id,
 )
 
@@ -321,6 +322,139 @@ def test_subtask_workflow_wraps_stage_in_one_activity():
 def test_subtask_instance_id_is_stable_per_stage():
     assert subtask_instance_id("wf-1", PipelineStage.COLLECT) == "wf-1:collect"
     assert subtask_instance_id("wf-1", PipelineStage.REPORT) == "wf-1:report"
+
+
+def test_report_message_id_is_stable_and_workflow_scoped():
+    """报告消息 ID 由 workflow_id 派生：同一次执行稳定，不同执行不同（ADR-008）。"""
+    assert report_message_id("wf-1") == report_message_id("wf-1")
+    assert report_message_id("wf-1") != report_message_id("wf-2")
+
+
+def test_completed_workflow_passes_report_and_session_to_finalize():
+    """完成路径必须把会话与报告正文交给终态活动，才能落 assistant 消息（ADR-008）。"""
+    ctx = _ScriptedWorkflowContext(instance_id="wf-1")
+    task = {
+        "workflow_id": "wf-1",
+        "session_id": "session-1",
+        "agent_run_id": "run-1",
+        "message_id": "msg-1",
+        "task": "演示任务",
+        "hold_seconds": 0,
+        "use_fake_model": True,
+    }
+    gen = agent_pipeline_workflow(ctx, task)
+
+    gen.send(None)
+    for output in _stage_outputs("演示任务"):
+        gen.send(output)
+
+    finalize_input = ctx.calls[-1][2]
+    assert finalize_input["status"] == "completed"
+    assert finalize_input["session_id"] == "session-1"
+    assert finalize_input["report"] == "report: 演示任务"
+
+    try:
+        gen.send(None)
+    except StopIteration:
+        pass
+
+
+def test_finalize_activity_writes_assistant_report_message(monkeypatch):
+    """completed 终态写一条幂等的 assistant 报告消息（ADR-008）。"""
+    from app.workflows.pipeline import finalize_activity
+
+    saved: dict[str, Any] = {}
+
+    def fake_upsert_message(session_id, **kwargs) -> dict[str, Any]:
+        saved["session_id"] = session_id
+        saved.update(kwargs)
+        return {}
+
+    monkeypatch.setattr(
+        "app.workflows.pipeline.update_workflow_run",
+        lambda *args, **kwargs: {},
+    )
+    monkeypatch.setattr(
+        "app.workflows.pipeline.update_agent_run_status",
+        lambda *args, **kwargs: {},
+    )
+    monkeypatch.setattr(
+        "app.workflows.pipeline.update_message_status",
+        lambda *args, **kwargs: {},
+    )
+    monkeypatch.setattr(
+        "app.workflows.pipeline.upsert_message",
+        fake_upsert_message,
+    )
+
+    class FakeActivityContext:
+        workflow_id = "wf-1"
+
+    finalize_activity(
+        FakeActivityContext(),
+        {
+            "workflow_id": "wf-1",
+            "session_id": "session-1",
+            "agent_run_id": "run-1",
+            "message_id": "msg-1",
+            "status": "completed",
+            "checkpoint": {"status": "completed"},
+            "report": "# 报告正文",
+        },
+    )
+
+    assert saved["session_id"] == "session-1"
+    assert saved["message_id"] == report_message_id("wf-1")
+    assert saved["content"] == "# 报告正文"
+    assert saved["role"] == "assistant"
+    assert saved["status"] == "completed"
+    assert saved["agent_run_id"] == "run-1"
+
+
+def test_finalize_activity_skips_report_message_on_failure(monkeypatch):
+    """失败任务不写 assistant 消息，避免把半成品当结果（ADR-008）。"""
+    from app.workflows.pipeline import finalize_activity
+
+    calls: list[dict[str, Any]] = []
+
+    def fake_upsert_message(session_id, **kwargs) -> dict[str, Any]:
+        calls.append({"session_id": session_id, **kwargs})
+        return {}
+
+    monkeypatch.setattr(
+        "app.workflows.pipeline.update_workflow_run",
+        lambda *args, **kwargs: {},
+    )
+    monkeypatch.setattr(
+        "app.workflows.pipeline.update_agent_run_status",
+        lambda *args, **kwargs: {},
+    )
+    monkeypatch.setattr(
+        "app.workflows.pipeline.update_message_status",
+        lambda *args, **kwargs: {},
+    )
+    monkeypatch.setattr(
+        "app.workflows.pipeline.upsert_message",
+        fake_upsert_message,
+    )
+
+    class FakeActivityContext:
+        workflow_id = "wf-1"
+
+    finalize_activity(
+        FakeActivityContext(),
+        {
+            "workflow_id": "wf-1",
+            "session_id": "session-1",
+            "agent_run_id": "run-1",
+            "message_id": "msg-1",
+            "status": "failed",
+            "error": "model down",
+            "report": "# 半成品",
+        },
+    )
+
+    assert calls == []
 
 
 def test_failed_stage_schedules_failure_finalize_before_reraise():

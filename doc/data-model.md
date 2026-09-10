@@ -163,6 +163,9 @@ erDiagram
 3. Redis 消息缓存只服务会话上下文读取；删除 Redis 不删除 PostgreSQL。
 4. 工具调用先插 `tool_calls(status=running)` 再执行，执行完成或失败后更新，保证审计可追踪。
 5. 暂停/恢复只更新允许的状态转换，冲突状态返回错误码（见 `doc/api.md`）。
+6. Workflow 终态活动在 `completed` 时追加一条 `messages(role=assistant)` 报告消息：
+   ID 由 `workflow_id` 派生（uuid5），写入使用 `ON CONFLICT (id) DO NOTHING`，
+   保证活动重放不产生重复消息；`failed` 时不写（见 ADR-008）。
 
 ## 6. 与既有 API 对象的关系
 

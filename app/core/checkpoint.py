@@ -269,6 +269,44 @@ def create_message(
         return _message_to_dict(row)
 
 
+def upsert_message(
+    session_id: str | uuid.UUID,
+    *,
+    message_id: str | uuid.UUID,
+    content: str,
+    role: str,
+    status: str = "queued",
+    agent_run_id: str | uuid.UUID | None = None,
+) -> dict[str, Any]:
+    """按固定 ID 写入消息，重复调用返回已有记录。
+
+    Dapr 活动允许重放，因此终态写入的报告消息必须幂等：ID 由调用方按
+    Workflow 派生，这里用 ``ON CONFLICT DO NOTHING`` 保证同一执行只留一条
+    （见 ADR-008）。
+    """
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    message_uuid = _as_uuid(message_id)
+    with get_session_factory()() as session:
+        session.execute(
+            pg_insert(Message)
+            .values(
+                id=message_uuid,
+                session_id=_as_uuid(session_id),
+                role=role,
+                content=content,
+                status=status,
+                agent_run_id=_as_uuid(agent_run_id) if agent_run_id else None,
+            )
+            .on_conflict_do_nothing(index_elements=["id"])
+        )
+        session.commit()
+        row = session.get(Message, message_uuid)
+        if row is None:
+            raise KeyError(f"message upsert failed: {message_id}")
+        return _message_to_dict(row)
+
+
 def list_messages(
     session_id: str | uuid.UUID,
     *,

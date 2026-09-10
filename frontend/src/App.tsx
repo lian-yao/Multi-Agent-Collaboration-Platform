@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api/client";
 import type { Agent, Message, Session, Workflow } from "./types/api";
 
@@ -16,6 +16,8 @@ export function App() {
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
+  // 终态后只补刷一次消息，避免 workflow 对象每次刷新都触发新一轮定时器。
+  const finalRefreshDone = useRef<string | null>(null);
 
   const refresh = useCallback(async () => {
     if (!session) return;
@@ -37,7 +39,14 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (!workflow || workflow.status === "completed" || workflow.status === "failed") return;
+    if (!workflow) return;
+    if (workflow.status === "completed" || workflow.status === "failed") {
+      // 终态活动刚把报告落库，补一次延迟刷新，避免最后一次轮询早于落库（ADR-008）。
+      if (finalRefreshDone.current === workflow.id) return;
+      finalRefreshDone.current = workflow.id;
+      const timer = window.setTimeout(() => void refresh(), 1500);
+      return () => window.clearTimeout(timer);
+    }
     const timer = window.setInterval(() => void refresh(), 2000);
     return () => window.clearInterval(timer);
   }, [workflow, refresh]);
@@ -73,7 +82,7 @@ export function App() {
           <div className="task-board"><div className="task-board-head"><span>{workflow ? `任务 ${workflow.id.slice(0, 8)}` : "还没有活动任务"}</span><span>{workflow ? `更新于 ${formatTime(workflow.updated_at)}` : "提交任务后将在这里显示执行进度"}</span></div><div className="pipeline-row">{stages.map((stage, index) => { const active = workflow?.current_step === stage; const done = completed.has(stage); return <div className={`pipeline-step ${done ? "done" : ""} ${active ? "active" : ""}`} key={stage}><div className="step-index">{done ? "✓" : index + 1}</div><div><strong>{labels[stage]}</strong><small>{done ? "已完成" : active ? "正在处理" : "等待开始"}</small></div>{index < stages.length - 1 && <span className="step-connector" />}</div>; })}</div><div className="task-details"><div><span>当前步骤</span><strong>{workflow?.current_step ? labels[workflow.current_step] ?? workflow.current_step : "—"}</strong></div><div><span>已完成步骤</span><strong>{workflow?.checkpoint?.completed_steps?.length ?? 0} / 3</strong></div><div><span>Workflow ID</span><strong className="mono">{workflow?.id ? `${workflow.id.slice(0, 8)}…` : "—"}</strong></div></div></div>
           <form className="composer" onSubmit={submit}><div className="composer-heading"><div><span className="section-kicker">NEW TASK</span><h2>提交协作任务</h2></div><span>自动按固定三步流水线执行</span></div><textarea value={content} onChange={(event) => setContent(event.target.value)} placeholder="输入任务内容，例如：分析一篇技术文章并生成结构化报告" disabled={!session || session.status === "paused"} /><div className="composer-actions"><span>{session?.status === "paused" ? "会话已暂停，恢复后可提交" : "任务提交后可在上方查看实时进度"}</span><button className="primary-button" disabled={sending || !content.trim() || session?.status === "paused"}>{sending ? "提交中" : "提交任务"}<b>↗</b></button></div></form>
         </section>
-        <aside className="right-column"><section className="side-section"><div className="section-heading compact"><div><span className="section-kicker">AGENT TEAM</span><h2>团队成员</h2></div><span className="count-label">{agents.length} 人</span></div><div className="agent-table">{agents.map((agent, index) => <div className="agent-row" key={agent.id}><span className={`agent-number n${index + 1}`}>{String(index + 1).padStart(2, "0")}</span><div className="agent-info"><strong>{agent.name}</strong><span>{agent.role} · {agent.model}</span></div><span className="idle-state"><i />{agent.status === "idle" ? "空闲" : agent.status}</span></div>)}</div></section><section className="side-section history-section"><div className="section-heading compact"><div><span className="section-kicker">MESSAGE LOG</span><h2>消息记录</h2></div><span className="count-label">{messages.length} 条</span></div><div className="message-log">{messages.length === 0 ? <p className="empty-state">提交任务后，消息会显示在这里。</p> : messages.map((message) => <div className="log-row" key={message.id}><span className={`log-marker ${message.role}`} /><div><strong>{message.role === "user" ? "你" : message.role}</strong><p>{message.content}</p></div><time>{formatTime(message.created_at)}</time></div>)}</div></section></aside>
+        <aside className="right-column"><section className="side-section"><div className="section-heading compact"><div><span className="section-kicker">AGENT TEAM</span><h2>团队成员</h2></div><span className="count-label">{agents.length} 人</span></div><div className="agent-table">{agents.map((agent, index) => <div className="agent-row" key={agent.id}><span className={`agent-number n${index + 1}`}>{String(index + 1).padStart(2, "0")}</span><div className="agent-info"><strong>{agent.name}</strong><span>{agent.role} · {agent.model}</span></div><span className="idle-state"><i />{agent.status === "idle" ? "空闲" : agent.status}</span></div>)}</div></section><section className="side-section history-section"><div className="section-heading compact"><div><span className="section-kicker">MESSAGE LOG</span><h2>消息记录</h2></div><span className="count-label">{messages.length} 条</span></div><div className="message-log">{messages.length === 0 ? <p className="empty-state">提交任务后，消息会显示在这里。</p> : messages.map((message) => <div className="log-row" key={message.id}><span className={`log-marker ${message.role}`} /><div><strong>{message.role === "user" ? "你" : message.role === "assistant" ? "Agent" : message.role}</strong><p>{message.content}</p></div><time>{formatTime(message.created_at)}</time></div>)}</div></section></aside>
       </main>
       <footer className="page-footer"><span>Multi-Agent Collaboration Platform</span><span>API /api/v1 · 自动刷新 2 秒</span></footer>
     </div>
