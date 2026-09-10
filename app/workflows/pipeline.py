@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import uuid
 from dataclasses import asdict, dataclass
 from datetime import timedelta
 from typing import Any
@@ -24,6 +25,7 @@ from app.core.checkpoint import (
     update_agent_run_status,
     update_message_status,
     update_workflow_run,
+    upsert_message,
 )
 from app.orchestration.pipeline import (
     PIPELINE_STEPS as PIPELINE_CONTRACT_STEPS,
@@ -49,6 +51,7 @@ COLLECT_STEP = PipelineStage.COLLECT.value
 ANALYZE_STEP = PipelineStage.ANALYZE.value
 REPORT_STEP = PipelineStage.REPORT.value
 PIPELINE_STEPS = tuple(stage.value for stage in PIPELINE_CONTRACT_STEPS)
+REPORT_MESSAGE_NAMESPACE = uuid.NAMESPACE_URL
 
 SUBTASK_RETRY_POLICY = wf.RetryPolicy(
     first_retry_interval=timedelta(seconds=1),
@@ -238,6 +241,19 @@ def finalize_activity(
     message_id = activity_input.get("message_id")
     if message_id:
         update_message_status(message_id, status)
+
+    # 只有成功的执行才落报告正文：失败时保留 workflow_runs.error，不写半成品（ADR-008）。
+    session_id = activity_input.get("session_id")
+    report = activity_input.get("report")
+    if status == "completed" and session_id and report:
+        upsert_message(
+            session_id,
+            message_id=report_message_id(workflow_id),
+            content=report,
+            role="assistant",
+            status="completed",
+            agent_run_id=agent_run_id,
+        )
     return {"workflow_id": workflow_id, "status": status}
 
 
@@ -260,6 +276,23 @@ def build_subtask_input(
 
 def subtask_instance_id(workflow_id: str, stage: PipelineStage | str) -> str:
     return f"{workflow_id}:{_to_stage(stage).value}"
+
+
+def report_message_id(workflow_id: str) -> str:
+    """报告消息 ID：由 workflow_id 派生，重放时保持稳定（ADR-008）。"""
+
+    return str(uuid.uuid5(REPORT_MESSAGE_NAMESPACE, f"macp:report:{workflow_id}"))
+
+
+def report_content(state: PipelineState) -> str | None:
+    """取报告阶段的正文字符串；缺失时返回 None，不写 assistant 消息。"""
+
+    result = state.results.get(PipelineStage.REPORT.value)
+    if isinstance(result, dict):
+        content = result.get("content")
+        if isinstance(content, str) and content:
+            return content
+    return None
 
 
 def agent_subtask_workflow(
@@ -300,6 +333,7 @@ def agent_pipeline_workflow(
 
     terminal_input: dict[str, Any] = {
         "workflow_id": workflow_id,
+        "session_id": task.get("session_id"),
         "agent_run_id": task.get("agent_run_id"),
         "message_id": task.get("message_id"),
     }
@@ -356,6 +390,7 @@ def agent_pipeline_workflow(
             **terminal_input,
             "status": "completed",
             "checkpoint": pipeline_checkpoint_summary(state),
+            "report": report_content(state),
         },
     )
     return {
