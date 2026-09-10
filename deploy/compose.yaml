@@ -1,6 +1,29 @@
 name: multi-agent-collaboration-platform
 
 services:
+  frontend:
+    build:
+      context: ..
+      dockerfile: deploy/docker/frontend.Dockerfile
+    image: multi-agent-collaboration-platform-frontend:latest
+    ports:
+      - "5173:80"
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - -q
+        - -O
+        - /dev/null
+        - http://127.0.0.1/
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    depends_on:
+      backend:
+        condition: service_healthy
+
   backend:
     build:
       context: ..

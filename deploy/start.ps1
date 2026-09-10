@@ -66,16 +66,18 @@ if ($configExitCode -ne 0) {
     Write-Error "Docker Compose configuration is invalid: $composeFile"
 }
 
-Write-Host "Starting backend, Dapr sidecar, Redis, PostgreSQL, Jaeger, and Prometheus..."
+Write-Host "Starting frontend, backend, Dapr sidecar, Redis, PostgreSQL, Jaeger, and Prometheus..."
 docker compose -f $composeFile up -d --build --wait --wait-timeout 600
 if ($LASTEXITCODE -ne 0) {
     Write-Error "Docker Compose failed to start services."
 }
 
+Wait-HttpHealth "Frontend" "http://localhost:5173/"
 Wait-HttpHealth "Backend" "http://localhost:8000/health"
 Wait-HttpHealth "Dapr Sidecar" "http://localhost:3500/v1.0/metadata"
 
 Write-Host ""
+Write-Host "Web UI:       http://localhost:5173"
 Write-Host "Backend:      http://localhost:8000"
 Write-Host "Dapr API:     http://localhost:3500"
 Write-Host "Jaeger:       http://localhost:16686"

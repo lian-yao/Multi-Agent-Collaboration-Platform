@@ -4,8 +4,8 @@
 - 本模块只提供编排层内容：图拓扑、节点执行顺序、状态 Schema 与角色分配；
 - 角色静态内容（system_prompt 等）来自 ``app.agents.roles``，由成员 C 维护，
   接线时统一经 ``get_role(role_id)`` 获取；
-- Workflow 侧的接线（替换 ``fake_stage_result``）属于成员 B 的 D5-6 交付，
-  本模块提供与 fake 结果同构的 ``run_role_stage``，供其按序调用。
+- Workflow 侧的接线已完成：``app.workflows.pipeline`` 的阶段活动按序调用本模块的
+  ``run_role_stage``（ADR-007）。
 
 固定三步流水线将 ``PipelineStage`` 依次分配给协作角色：
 
@@ -102,7 +102,7 @@ def _stage_result(
     content: str,
     previous: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    """构造与 Workflow fake 结果同构的阶段载荷，便于成员 B 直接替换。"""
+    """构造 Workflow 阶段活动使用的载荷（step / status / content / previous）。"""
     return {
         "step": stage.value,
         "status": "completed",
@@ -139,10 +139,10 @@ def run_role_stage(
     llm: BaseChatModel | None = None,
     settings: AgentSettings | None = None,
 ) -> dict[str, Any]:
-    """调用指定阶段对应角色的模型，返回阶段结果（fake 结果同构）。
+    """调用指定阶段对应角色的模型，返回 Workflow 阶段活动使用的载荷。
 
-    Workflow 步骤活动可据此替换 ``fake_stage_result``；纯函数不触碰
-    PipelineState，状态推进仍由成员 B 侧按 ``complete_step`` 完成。
+    ``app.workflows.pipeline`` 的阶段活动据此生成阶段内容；纯函数不触碰
+    PipelineState，状态推进仍由 Workflow 侧按 ``complete_step`` 完成。
     """
 
     resolved = PipelineStage(stage) if isinstance(stage, str) else stage

@@ -6,7 +6,7 @@ __pycache__
 .pytest_cache
 tests
 doc
-frontend
+frontend/node_modules
+frontend/dist
 examples
-deploy
 scripts

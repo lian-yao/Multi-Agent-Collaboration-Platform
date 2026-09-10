@@ -6,6 +6,7 @@ from langchain_core.messages import AIMessage, BaseMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
+from app.agents.roles import get_role, role_ids
 from app.orchestration.pipeline import (
     PipelineStage,
     PipelineStatus,
@@ -148,6 +149,43 @@ def test_advance_pipeline_stage_uses_role_model_when_enabled():
     assert final_state.results[PipelineStage.REPORT]["content"] == "报告结果"
     assert len(model.calls) == 3
     assert final_state.results[PipelineStage.ANALYZE]["previous"]["content"] == "收集结果"
+
+
+def test_advance_pipeline_stage_uses_each_role_system_prompt():
+    """每个阶段使用该阶段角色的 system_prompt，而不是通用提示（ADR-007）。"""
+    model = _ScriptedRoleModel(replies=["要点", "结论", "报告"])
+    state = start(new_pipeline_state(task="演示任务"))
+
+    for stage in PIPELINE_STEPS:
+        outcome = advance_pipeline_stage(
+            state,
+            stage,
+            task="演示任务",
+            llm=model,
+        )
+        state = deserialize_pipeline_state(outcome["state"])
+
+    assert [call[0].content for call in model.calls] == [
+        get_role(role).system_prompt for role in role_ids()
+    ]
+
+
+def test_advance_pipeline_stage_propagates_model_failure():
+    """模型不可用时错误必须抛出，交由 Workflow 异常分支回写 failed（ADR-007）。"""
+
+    class UnavailableRoleModel(_ScriptedRoleModel):
+        def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+            raise RuntimeError("ollama unreachable")
+
+    state = start(new_pipeline_state(task="演示任务"))
+
+    with pytest.raises(RuntimeError, match="ollama unreachable"):
+        advance_pipeline_stage(
+            state,
+            PipelineStage.COLLECT,
+            task="演示任务",
+            llm=UnavailableRoleModel(replies=[]),
+        )
 
 
 def test_workflow_function_is_generator():
