@@ -1,4 +1,4 @@
-import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api/client";
 import type { Agent, Message, Session, Workflow } from "./types/api";
 
@@ -16,6 +16,8 @@ export function App() {
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
+  // 终态后只补刷一次消息，避免 workflow 对象每次刷新都触发新一轮定时器。
+  const finalRefreshDone = useRef<string | null>(null);
 
   const refresh = useCallback(async () => {
     if (!session) return;
@@ -37,7 +39,14 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    if (!workflow || workflow.status === "completed" || workflow.status === "failed") return;
+    if (!workflow) return;
+    if (workflow.status === "completed" || workflow.status === "failed") {
+      // 终态活动刚把报告落库，补一次延迟刷新，避免最后一次轮询早于落库（ADR-008）。
+      if (finalRefreshDone.current === workflow.id) return;
+      finalRefreshDone.current = workflow.id;
+      const timer = window.setTimeout(() => void refresh(), 1500);
+      return () => window.clearTimeout(timer);
+    }
     const timer = window.setInterval(() => void refresh(), 2000);
     return () => window.clearInterval(timer);
   }, [workflow, refresh]);
