@@ -1,12 +1,14 @@
 """固定三步流水线的 Dapr Workflow，编排状态统一消费 app.orchestration 的契约。
 
-成员 B 的 D3-D4 实现此前自带 WorkflowTask/字段，未引用成员 A 冻结的
-PipelineState。本文件把每一步活动改为：
+成员 B 的 D5-D6 实现把每个阶段封装为独立子 Workflow：
 
-- 输入使用 ``app.orchestration.pipeline.build_step_payload``；
-- 状态推进使用 ``PipelineState`` 与 ``complete_step``；
-- 落库/展示只写 ``pipeline_checkpoint_summary``，完整结果保留在活动输出与
-  Dapr State Store 中。
+- 父 Workflow ``agent_pipeline_workflow`` 只负责阶段顺序与终态回写；
+- 每个阶段通过 ``call_child_workflow`` 调度 ``agent_subtask_workflow``；
+- 子 Workflow 使用稳定的 ``{workflow_id}:{stage}`` 实例 ID，可跨进程恢复；
+- 子 Workflow 内部调用角色活动，活动结果由 Dapr 持久化，应用侧只写摘要。
+
+``use_fake_model=True`` 时保留 D3-D4 POC 的确定性假模型，供故障恢复演练
+和没有 Ollama 的本地测试使用；默认使用成员 A 提供的真实角色阶段。
 """
 
 from __future__ import annotations
@@ -17,6 +19,7 @@ from typing import Any
 
 import dapr.ext.workflow as wf
 
+from app.config import AgentSettings
 from app.core.checkpoint import (
     update_agent_run_status,
     update_message_status,
@@ -37,13 +40,22 @@ from app.orchestration.pipeline import (
     serialize_pipeline_state,
     start,
 )
+from app.orchestration.pipeline_graph import run_role_stage
 from app.workflows.state import save_step_result
 
 WORKFLOW_NAME = "agent_pipeline"
+SUBTASK_WORKFLOW_NAME = "agent_subtask"
 COLLECT_STEP = PipelineStage.COLLECT.value
 ANALYZE_STEP = PipelineStage.ANALYZE.value
 REPORT_STEP = PipelineStage.REPORT.value
 PIPELINE_STEPS = tuple(stage.value for stage in PIPELINE_CONTRACT_STEPS)
+
+SUBTASK_RETRY_POLICY = wf.RetryPolicy(
+    first_retry_interval=timedelta(seconds=1),
+    max_number_of_attempts=3,
+    backoff_coefficient=2,
+    max_retry_interval=timedelta(seconds=10),
+)
 
 
 @dataclass
@@ -54,6 +66,7 @@ class WorkflowTask:
     agent_run_id: str | None = None
     message_id: str | None = None
     hold_seconds: int = 0
+    use_fake_model: bool = False
 
     def asdict(self) -> dict[str, Any]:
         return asdict(self)
@@ -64,7 +77,7 @@ def fake_stage_result(
     task: str,
     previous: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Deterministic fake LLM output used by the D3-D4 workflow POC."""
+    """确定性假模型输出，供恢复演练与无 Ollama 环境使用。"""
     if step == COLLECT_STEP:
         content = f"collected task: {task}"
     elif step == ANALYZE_STEP:
@@ -103,6 +116,10 @@ def advance_pipeline_stage(
     state: PipelineState,
     step: PipelineStage | str,
     task: str,
+    *,
+    llm: Any | None = None,
+    settings: AgentSettings | None = None,
+    use_fake_model: bool = False,
 ) -> dict[str, Any]:
     """用编排契约推进一个阶段，返回活动输出所需的状态与 checkpoint。"""
 
@@ -117,7 +134,16 @@ def advance_pipeline_stage(
     elif stage is PipelineStage.REPORT:
         previous = state.results.get(PipelineStage.ANALYZE.value)
 
-    result = fake_stage_result(stage.value, task, previous=previous)
+    if use_fake_model:
+        result = fake_stage_result(stage.value, task, previous=previous)
+    else:
+        result = run_role_stage(
+            stage,
+            task,
+            previous=previous,
+            llm=llm,
+            settings=settings,
+        )
     updated = complete_step(state, stage, result)
     return {**build_step_result(updated), "result": result}
 
@@ -134,13 +160,33 @@ def _run_stage_activity(
             f"activity {expected_stage.value} 收到错误阶段: {stage.value}"
         )
 
-    outcome = advance_pipeline_stage(state, stage, task["task"])
+    workflow_id = str(
+        activity_input.get("workflow_id")
+        or task.get("workflow_id")
+        or ctx.workflow_id
+    )
+    outcome = advance_pipeline_stage(
+        state,
+        stage,
+        task["task"],
+        use_fake_model=bool(task.get("use_fake_model")),
+    )
     _record_checkpoint(
-        ctx.workflow_id,
+        workflow_id,
         expected_stage,
         deserialize_pipeline_state(outcome["state"]),
     )
-    return outcome
+    return {**outcome, "subtask_instance_id": ctx.workflow_id}
+
+
+def run_stage_activity(
+    ctx: wf.WorkflowActivityContext,
+    activity_input: dict[str, Any],
+) -> dict[str, Any]:
+    """子 Workflow 内部使用的通用阶段活动。"""
+
+    stage = PipelineStage(activity_input["step"])
+    return _run_stage_activity(ctx, activity_input, stage)
 
 
 def collect_activity(
@@ -195,25 +241,76 @@ def finalize_activity(
     return {"workflow_id": workflow_id, "status": status}
 
 
+def build_subtask_input(
+    workflow_id: str,
+    task: dict[str, Any],
+    state: PipelineState,
+    stage: PipelineStage | str,
+) -> dict[str, Any]:
+    """构造子 Workflow 载荷；实例 ID 由父 Workflow 固定。"""
+
+    resolved = _to_stage(stage)
+    return {
+        "workflow_id": workflow_id,
+        "step": resolved.value,
+        "task": task,
+        "payload": build_step_payload(resolved, state),
+    }
+
+
+def subtask_instance_id(workflow_id: str, stage: PipelineStage | str) -> str:
+    return f"{workflow_id}:{_to_stage(stage).value}"
+
+
+def agent_subtask_workflow(
+    ctx: wf.DaprWorkflowContext,
+    activity_input: dict[str, Any],
+) -> dict[str, Any]:
+    """单个可恢复子任务：一个持久化边界内执行一个阶段活动。"""
+
+    stage = PipelineStage(activity_input["step"])
+    ctx.set_custom_status(f"subtask:{stage.value}")
+    outcome = yield ctx.call_activity(run_stage_activity, input=activity_input)
+    return outcome
+
+
+def _call_subtask(
+    ctx: wf.DaprWorkflowContext,
+    workflow_id: str,
+    task: dict[str, Any],
+    state: PipelineState,
+    stage: PipelineStage,
+) -> Any:
+    """调用一个固定实例 ID 的子 Workflow，重放时复用已完成结果。"""
+
+    return ctx.call_child_workflow(
+        agent_subtask_workflow,
+        input=build_subtask_input(workflow_id, task, state, stage),
+        instance_id=subtask_instance_id(workflow_id, stage),
+        retry_policy=SUBTASK_RETRY_POLICY,
+    )
+
+
 def agent_pipeline_workflow(
     ctx: wf.DaprWorkflowContext,
     task: dict[str, Any],
 ) -> dict[str, Any]:
     state = start(new_pipeline_state(task=task["task"]))
+    workflow_id = str(task.get("workflow_id") or ctx.instance_id)
 
     terminal_input: dict[str, Any] = {
-        "workflow_id": task.get("workflow_id") or ctx.instance_id,
+        "workflow_id": workflow_id,
         "agent_run_id": task.get("agent_run_id"),
         "message_id": task.get("message_id"),
     }
     try:
         ctx.set_custom_status(COLLECT_STEP)
-        collected = yield ctx.call_activity(
-            collect_activity,
-            input={
-                "task": task,
-                "payload": build_step_payload(PipelineStage.COLLECT, state),
-            },
+        collected = yield _call_subtask(
+            ctx,
+            workflow_id,
+            task,
+            state,
+            PipelineStage.COLLECT,
         )
         state = deserialize_pipeline_state(collected["state"])
 
@@ -222,22 +319,22 @@ def agent_pipeline_workflow(
             yield ctx.create_timer(timedelta(seconds=hold_seconds))
 
         ctx.set_custom_status(ANALYZE_STEP)
-        analyzed = yield ctx.call_activity(
-            analyze_activity,
-            input={
-                "task": task,
-                "payload": build_step_payload(PipelineStage.ANALYZE, state),
-            },
+        analyzed = yield _call_subtask(
+            ctx,
+            workflow_id,
+            task,
+            state,
+            PipelineStage.ANALYZE,
         )
         state = deserialize_pipeline_state(analyzed["state"])
 
         ctx.set_custom_status(REPORT_STEP)
-        reported = yield ctx.call_activity(
-            report_activity,
-            input={
-                "task": task,
-                "payload": build_step_payload(PipelineStage.REPORT, state),
-            },
+        reported = yield _call_subtask(
+            ctx,
+            workflow_id,
+            task,
+            state,
+            PipelineStage.REPORT,
         )
         state = deserialize_pipeline_state(reported["state"])
     except Exception as exc:

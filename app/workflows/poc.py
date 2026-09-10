@@ -16,7 +16,12 @@ from app.orchestration.pipeline import (
 from app.workflows.pipeline import WORKFLOW_NAME, WorkflowTask
 
 
-def schedule(hold_seconds: int, wait: bool, workflow_id: str | None = None) -> None:
+def schedule(
+    hold_seconds: int,
+    wait: bool,
+    workflow_id: str | None = None,
+    use_fake_model: bool = True,
+) -> None:
     if workflow_id is None:
         init_checkpoint_schema()
         workflow_id = str(uuid.uuid4())
@@ -25,6 +30,7 @@ def schedule(hold_seconds: int, wait: bool, workflow_id: str | None = None) -> N
             task="分析技术文章并生成报告",
             session_id="demo-session",
             hold_seconds=hold_seconds,
+            use_fake_model=use_fake_model,
         )
         create_workflow_run(
             workflow_id=workflow_id,
@@ -79,11 +85,17 @@ def main() -> None:
     parser.add_argument("--hold-seconds", type=int, default=0)
     parser.add_argument("--no-wait", action="store_true")
     parser.add_argument("--workflow-id", default=None)
+    parser.add_argument(
+        "--use-roles",
+        action="store_true",
+        help="Call role prompts instead of the deterministic fake model.",
+    )
     args = parser.parse_args()
     schedule(
         hold_seconds=args.hold_seconds,
         wait=not args.no_wait,
         workflow_id=args.workflow_id,
+        use_fake_model=not args.use_roles,
     )
 
 

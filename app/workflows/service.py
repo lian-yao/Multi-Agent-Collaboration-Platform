@@ -1,22 +1,24 @@
 import threading
-from typing import Any
 
 import dapr.ext.workflow as wf
 
 from app.core.checkpoint import update_workflow_run
 from app.workflows.pipeline import (
+    SUBTASK_WORKFLOW_NAME,
     WORKFLOW_NAME,
     WorkflowTask,
     agent_pipeline_workflow,
+    agent_subtask_workflow,
     analyze_activity,
     collect_activity,
     finalize_activity,
     report_activity,
+    run_stage_activity,
 )
 
 
 class WorkflowService:
-    """Registers and schedules the Dapr workflow used by the backend app."""
+    """Registers and schedules the Dapr workflows used by the backend app."""
 
     def __init__(
         self,
@@ -32,6 +34,11 @@ class WorkflowService:
         if self._registered:
             return
         self._runtime.register_workflow(agent_pipeline_workflow, name=WORKFLOW_NAME)
+        self._runtime.register_workflow(
+            agent_subtask_workflow,
+            name=SUBTASK_WORKFLOW_NAME,
+        )
+        self._runtime.register_activity(run_stage_activity)
         self._runtime.register_activity(collect_activity)
         self._runtime.register_activity(analyze_activity)
         self._runtime.register_activity(report_activity)
