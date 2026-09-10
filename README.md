@@ -20,7 +20,7 @@
 - 存储：Redis + PostgreSQL（SQLAlchemy）
 - 工具：MCP
 - 可观测：OpenTelemetry + Jaeger + Prometheus
-- 前端（规划）：React + Vite + TailwindCSS
+- 前端：React + Vite + TailwindCSS
 - 语言：Python 3.12、TypeScript
 
 ## 目录结构
@@ -29,7 +29,7 @@
 .
 ├── AGENTS.md                 # Agent 工作入口与硬性约束
 ├── app/                      # FastAPI 后端与编排层
-├── frontend/                 # Web 可视化界面（规划）
+├── frontend/                 # Web 可视化界面（React + Vite）
 ├── tests/                    # 单元、集成、端到端测试
 ├── deploy/                   # Docker 与 Dapr 部署资源
 ├── scripts/                  # 本地开发脚本
@@ -79,6 +79,7 @@ cd deploy
 
 启动后访问：
 
+- Web UI：http://localhost:5173
 - 后端 API：http://localhost:8000
 - Dapr API：http://localhost:3500
 - Jaeger：http://localhost:16686
