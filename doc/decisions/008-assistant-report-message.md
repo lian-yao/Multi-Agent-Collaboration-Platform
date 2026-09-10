@@ -33,6 +33,9 @@ Dapr State Store（`agentrun:workflow:{workflow_id}:{step}`）与 Workflow 活�
 - `GET /sessions/{id}/messages` 在任务完成后返回两条：用户的 `user` 消息与
   Agent 的 `assistant` 报告，前端「消息记录」无需改造即可显示（`.log-marker.assistant`
   样式已存在）；本轮同时把前端角色标签从 `assistant` 改为 `Agent`。
+- 本决策之前完成的历史任务可用 `scripts/backfill_report_messages.py` 补写：默认
+  只预演，`--apply` 才写库，复用同一派生 ID 与幂等 upsert，可重复执行。补写前提是
+  Dapr State Store 里仍留有该 Workflow 的 `report` 阶段快照，Redis 被清空后无法恢复。
 - 报告随 `messages` 一起成为会话事实源的一部分，`messages.content` 为 `TEXT`，
   不额外截断；Dapr State Store 中的阶段快照保持不变，仍用于恢复与审计。
 - 同一次 Workflow 即使终态活动被重放，也只会有一条报告消息。
