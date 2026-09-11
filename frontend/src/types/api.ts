@@ -41,7 +41,54 @@ export interface Agent {
   name: string;
   role: string;
   model: string;
+  provider: string;
+  temperature: number;
   status: string;
+}
+
+export interface Provider {
+  id: string;
+  name: string;
+  model: string;
+  base_url: string | null;
+  status: string;
+  temperature: number;
+}
+
+export interface Tool {
+  name: string;
+  description: string;
+  input_schema: Record<string, unknown>;
+  status: string;
+}
+
+export interface Metric {
+  id?: number;
+  metric_name: string;
+  value: number;
+  labels: Record<string, unknown>;
+  recorded_at: string;
+}
+
+export interface DataPage<T> {
+  items: T[];
+  page: number;
+  page_size: number;
+  total: number;
+  availability: "available" | "not_integrated";
+}
+
+export interface ToolCall {
+  id: string;
+  run_id: string;
+  workflow_run_id: string | null;
+  tool_name: string;
+  input: Record<string, unknown>;
+  output: unknown;
+  status: "running" | "succeeded" | "failed";
+  error: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface MessageAccepted {
