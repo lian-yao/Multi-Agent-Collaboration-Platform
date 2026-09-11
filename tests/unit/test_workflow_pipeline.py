@@ -543,3 +543,52 @@ def test_finalize_activity_backfills_business_rows(monkeypatch):
     ]
     assert updated["agent_run"] == ["run-1", "completed"]
     assert updated["message"] == ["msg-1", "completed"]
+
+
+def test_advance_pipeline_stage_wraps_tool_registry_for_audit(monkeypatch):
+    from app.core.tool_audit import AuditedToolRegistry
+
+    class FakeRegistry:
+        def list_tools(self):
+            return []
+
+        def call(self, request):
+            return {"ok": True}
+
+    captured: dict[str, Any] = {}
+    registry = FakeRegistry()
+
+    def fake_run_role_stage(stage, task, previous, **kwargs):
+        captured.update(kwargs)
+        return {
+            "step": stage.value,
+            "status": "completed",
+            "content": "collected",
+            "previous": previous,
+            "tool_calls": [],
+        }
+
+    monkeypatch.setattr(
+        "app.workflows.pipeline.run_role_stage",
+        fake_run_role_stage,
+    )
+
+    state = start(new_pipeline_state(task="audit task"))
+    outcome = advance_pipeline_stage(
+        state,
+        PipelineStage.COLLECT,
+        task="audit task",
+        run_id="run-1",
+        workflow_run_id="wf-1",
+        tool_registry=registry,
+    )
+
+    audited_registry = captured["tool_registry"]
+    assert isinstance(audited_registry, AuditedToolRegistry)
+    assert audited_registry._registry is registry
+    assert audited_registry._run_id == "run-1"
+    assert audited_registry._workflow_run_id == "wf-1"
+    assert captured["tool_scope"] == "wf-1"
+    assert deserialize_pipeline_state(outcome["state"]).completed_steps == [
+        PipelineStage.COLLECT
+    ]

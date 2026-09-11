@@ -72,6 +72,39 @@ def _begin_call(
     return resolved_call_id, None, False
 
 
+class AuditedToolRegistry:
+    """Wrap an orchestration ToolRegistry and audit every ``call``.
+
+    The wrapper keeps A's registry protocol unchanged: ``list_tools`` passes
+    through, while ``call`` records running/terminal states before returning
+    or re-raising the underlying tool result.
+    """
+
+    def __init__(
+        self,
+        registry: Any,
+        *,
+        run_id: str,
+        workflow_run_id: str | None = None,
+    ) -> None:
+        self._registry = registry
+        self._run_id = run_id
+        self._workflow_run_id = workflow_run_id
+
+    def list_tools(self):
+        return self._registry.list_tools()
+
+    def call(self, request: Any) -> Any:
+        tool_input = dict(getattr(request, "arguments", {}) or {})
+        return execute_tool_call(
+            run_id=self._run_id,
+            workflow_run_id=self._workflow_run_id,
+            tool_name=str(request.tool_name),
+            tool_input=tool_input,
+            call_id=str(request.call_id),
+            tool=lambda _payload: self._registry.call(request),
+        )
+
 def execute_tool_call(
     *,
     run_id: str | uuid.UUID,

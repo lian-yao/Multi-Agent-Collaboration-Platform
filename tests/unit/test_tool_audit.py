@@ -223,3 +223,53 @@ def test_running_call_is_rejected_for_concurrent_replay(audit_store):
         )
 
     assert audit_store.sequence == ["get"]
+
+class FakeRegistry:
+    def __init__(self, result: Any = None, error: Exception | None = None) -> None:
+        self.result = result
+        self.error = error
+        self.calls: list[Any] = []
+
+    def list_tools(self):
+        return [{"name": "echo"}]
+
+    def call(self, request):
+        self.calls.append(request)
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+
+class FakeRequest:
+    def __init__(self, call_id: str, tool_name: str, arguments: dict[str, Any]):
+        self.call_id = call_id
+        self.tool_name = tool_name
+        self.arguments = arguments
+
+
+def test_audited_registry_records_running_to_succeeded(audit_store):
+    registry = tool_audit.AuditedToolRegistry(
+        FakeRegistry(result={"ok": True}),
+        run_id="run-1",
+        workflow_run_id="wf-1",
+    )
+
+    result = registry.call(FakeRequest("call-1", "echo", {"value": "hi"}))
+
+    assert result == {"ok": True}
+    assert audit_store.rows["call-1"]["status"] == "succeeded"
+    assert audit_store.rows["call-1"]["output"] == {"ok": True}
+    assert audit_store.sequence == ["get", "create", "complete"]
+
+
+def test_audited_registry_records_failure(audit_store):
+    registry = tool_audit.AuditedToolRegistry(
+        FakeRegistry(error=RuntimeError("tool down")),
+        run_id="run-1",
+    )
+
+    with pytest.raises(RuntimeError, match="tool down"):
+        registry.call(FakeRequest("call-1", "echo", {"value": "hi"}))
+
+    assert audit_store.rows["call-1"]["status"] == "failed"
+    assert audit_store.rows["call-1"]["error"] == "RuntimeError: tool down"
