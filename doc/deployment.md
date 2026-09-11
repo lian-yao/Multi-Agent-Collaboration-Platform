@@ -52,6 +52,77 @@ cd deploy
 .\stop.ps1
 ```
 
+## 本地启动后端（PyCharm / 命令行）
+
+容器里的 `backend` 由 `uv run python -m app.workflows.worker` 启动，入口就是
+`app/workflows/worker.py` 的 `main()`。它做三件事：
+
+1. `init_checkpoint_schema()` 建表；
+2. 后台线程启动 Dapr Workflow runtime（等 sidecar 就绪，失败每 2 秒重试）；
+3. `uvicorn` 托管 `app.api.main:app`，默认监听 `0.0.0.0:8000`。
+
+> `app/api/main.py` 只是 ASGI 应用本身，不是进程入口。直接
+> `uvicorn app.api.main:app` 能起 HTTP，但不会注册 Workflow 与活动，提交消息会在
+> 调度阶段失败。
+
+### PyCharm 运行配置
+
+仓库自带共享运行配置 `.idea/runConfigurations/Backend.xml`（名为 **Backend**）：
+
+| 配置项 | 值 |
+| --- | --- |
+| 运行方式 | Python → 模块 |
+| 模块 | `app.workflows.worker` |
+| 工作目录 | `$PROJECT_DIR$`（项目根，必须如此，否则 `app.*` 导入失败） |
+| 解释器 | 项目解释器 `uv (Multi-Agent Collaboration Platform)` |
+| 环境变量 | `PYTHONUNBUFFERED=1` |
+
+曾用过的 `uvicorn` 运行配置（参数 `main:--host 0.0.0.0 ...`）可以删掉：仓库根目录没有
+`main.py`，所以会报 `Could not import module "main"`。
+
+### 本地运行需要的外部依赖
+
+| 依赖 | 本地地址 | 来源 |
+| --- | --- | --- |
+| PostgreSQL | `localhost:5433` | `docker compose -f deploy/compose.yaml up -d postgres` |
+| Redis | `localhost:6380` | `docker compose -f deploy/compose.yaml up -d redis` |
+| Ollama | `localhost:11434` | 宿主机安装并 `ollama pull qwen2.5-coder:7b` |
+| Dapr sidecar | `localhost:3500` / `localhost:50001` | `.\scripts\run_local_sidecar.ps1` |
+
+默认值已对齐上面的端口（见 `app/config.py`、`app/core/storage.py`），无需改 `.env`。
+
+### 推荐步骤
+
+```powershell
+# 1) 停掉容器里的 backend 与 dapr-sidecar：它们占用 8000/3500
+cd deploy
+docker compose stop backend dapr-sidecar
+
+# 2) 只起基础设施
+docker compose up -d redis postgres
+
+# 3) 起本地 Dapr sidecar（独立窗口常驻）
+cd ..
+.\scripts\run_local_sidecar.ps1
+
+# 4) 在 PyCharm 里运行 "Backend"（或等价地：uv run python -m app.workflows.worker）
+```
+
+`deploy/compose.yaml` 里的 `dapr-sidecar` 用 `--app-channel-address backend`，
+只为容器内的 backend 服务，宿主机进程连不上它，所以第 3 步必须另起一个 sidecar；
+脚本用 `deploy/dapr/components-local/`，其中 Redis 指向 `localhost:6380`
+（容器版组件指向 compose 网络别名 `redis:6379`）。
+
+不调试、只想单命令跑通时，可以合并 3、4 两步：
+
+```powershell
+dapr run --app-id backend --app-port 8000 --dapr-http-port 3500 --dapr-grpc-port 50001 `
+  --resources-path deploy/dapr/components-local -- python -m app.workflows.worker
+```
+
+注意此时前端容器（依赖 backend 健康）不会启动；调试后端请直接访问
+http://localhost:8000，或另开一个窗口跑前端的 `npm run dev`。
+
 ## 前端本地开发
 
 前端联调也可以不经过容器，直接用 Vite 开发服务器启动：
