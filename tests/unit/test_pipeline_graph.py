@@ -137,6 +137,8 @@ def test_run_role_stage_returns_workflow_stage_payload():
         "status": "completed",
         "content": "关键风险：延迟",
         "previous": previous,
+        # 未接入工具注册表时阶段载荷仍带空的调用记录（ADR-009）。
+        "tool_calls": [],
     }
     assert fake.calls[0][0].content == get_role(RoleId.ANALYST).system_prompt
 
