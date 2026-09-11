@@ -119,6 +119,53 @@ class WorkflowRun(Base):
     )
 
 
+class ToolCall(Base):
+    __tablename__ = "tool_calls"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("agent_runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    workflow_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workflow_runs.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    tool_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    input: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    output: Mapped[Any | None] = mapped_column(JSONB, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(20), default="running", nullable=False
+    )
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+    __table_args__ = (Index("idx_tool_calls_run", "run_id", "created_at"),)
+
+
+def _tool_call_to_dict(row: ToolCall) -> dict[str, Any]:
+    return {
+        "id": str(row.id),
+        "run_id": str(row.run_id),
+        "workflow_run_id": (
+            str(row.workflow_run_id) if row.workflow_run_id else None
+        ),
+        "tool_name": row.tool_name,
+        "input": row.input,
+        "output": row.output,
+        "status": row.status,
+        "error": row.error,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+    }
+
 def _row_to_dict(row: WorkflowRun) -> dict[str, Any]:
     return {
         "id": str(row.id),
@@ -422,3 +469,118 @@ def update_workflow_run(
         session.commit()
         session.refresh(row)
         return _row_to_dict(row)
+
+
+def get_tool_call(call_id: str | uuid.UUID) -> dict[str, Any] | None:
+    with get_session_factory()() as session:
+        row = session.get(ToolCall, _as_uuid(call_id))
+        return _tool_call_to_dict(row) if row else None
+
+
+def create_tool_call(
+    *,
+    call_id: str | uuid.UUID,
+    run_id: str | uuid.UUID,
+    tool_name: str,
+    tool_input: dict[str, Any],
+    workflow_run_id: str | uuid.UUID | None = None,
+) -> dict[str, Any]:
+    tool_name = tool_name.strip()
+    if not tool_name:
+        raise ValueError('tool_name must not be empty')
+    call_uuid = _as_uuid(call_id)
+    values = {
+        "id": call_uuid,
+        "run_id": _as_uuid(run_id),
+        "workflow_run_id": (
+            _as_uuid(workflow_run_id) if workflow_run_id else None
+        ),
+        "tool_name": tool_name,
+        "input": tool_input,
+        "status": "running",
+    }
+    from sqlalchemy.dialects.postgresql import insert as pg_insert
+
+    with get_session_factory()() as session:
+        session.execute(
+            pg_insert(ToolCall)
+            .values(**values)
+            .on_conflict_do_nothing(index_elements=["id"])
+        )
+        session.commit()
+        row = session.get(ToolCall, call_uuid)
+        if row is None:
+            raise KeyError(f"tool call upsert failed: {call_id}")
+        return _tool_call_to_dict(row)
+
+
+def mark_tool_call_running(call_id: str | uuid.UUID) -> dict[str, Any]:
+    call_uuid = _as_uuid(call_id)
+    with get_session_factory()() as session:
+        row = session.get(ToolCall, call_uuid)
+        if row is None:
+            raise KeyError(f"tool call not found: {call_id}")
+        if row.status == "succeeded":
+            return _tool_call_to_dict(row)
+        row.status = "running"
+        row.output = None
+        row.error = None
+        session.commit()
+        session.refresh(row)
+        return _tool_call_to_dict(row)
+
+
+def complete_tool_call(
+    call_id: str | uuid.UUID,
+    *,
+    output: Any,
+) -> dict[str, Any]:
+    call_uuid = _as_uuid(call_id)
+    with get_session_factory()() as session:
+        row = session.get(ToolCall, call_uuid)
+        if row is None:
+            raise KeyError(f"tool call not found: {call_id}")
+        row.status = "succeeded"
+        row.output = output
+        row.error = None
+        session.commit()
+        session.refresh(row)
+        return _tool_call_to_dict(row)
+
+
+def fail_tool_call(
+    call_id: str | uuid.UUID,
+    *,
+    error: str,
+) -> dict[str, Any]:
+    call_uuid = _as_uuid(call_id)
+    with get_session_factory()() as session:
+        row = session.get(ToolCall, call_uuid)
+        if row is None:
+            raise KeyError(f"tool call not found: {call_id}")
+        row.status = "failed"
+        row.output = None
+        row.error = error
+        session.commit()
+        session.refresh(row)
+        return _tool_call_to_dict(row)
+
+
+def list_tool_calls(
+    *,
+    run_id: str | uuid.UUID | None = None,
+    workflow_run_id: str | uuid.UUID | None = None,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    from sqlalchemy import select
+
+    statement = select(ToolCall).order_by(ToolCall.created_at.desc()).limit(limit)
+    if run_id is not None:
+        statement = statement.where(ToolCall.run_id == _as_uuid(run_id))
+    if workflow_run_id is not None:
+        statement = statement.where(
+            ToolCall.workflow_run_id == _as_uuid(workflow_run_id)
+        )
+    with get_session_factory()() as session:
+        rows = session.scalars(statement).all()
+        return [_tool_call_to_dict(row) for row in rows]
