@@ -1,0 +1,21 @@
+# 本地（宿主机进程）运行后端时使用的 State Store。
+#
+# 与 deploy/dapr/components/statestore.yaml 的唯一差别是 redisHost：
+# 容器内的 sidecar 走 compose 网络别名 `redis:6379`，
+# 宿主机上的 sidecar 必须走端口映射 `localhost:6380`。
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: statestore
+spec:
+  type: state.redis
+  version: v1
+  metadata:
+    - name: redisHost
+      value: localhost:6380
+    - name: redisPassword
+      value: ""
+    - name: keyPrefix
+      value: none
+    - name: actorStateStore
+      value: "true"

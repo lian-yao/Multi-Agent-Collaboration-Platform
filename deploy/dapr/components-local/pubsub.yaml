@@ -1,0 +1,13 @@
+# 本地（宿主机进程）运行后端时使用的 Pub/Sub，host 差异同 statestore.yaml。
+apiVersion: dapr.io/v1alpha1
+kind: Component
+metadata:
+  name: pubsub
+spec:
+  type: pubsub.redis
+  version: v1
+  metadata:
+    - name: redisHost
+      value: localhost:6380
+    - name: redisPassword
+      value: ""
