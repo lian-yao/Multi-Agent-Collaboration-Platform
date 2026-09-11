@@ -19,6 +19,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import time
 from collections.abc import Sequence
 from typing import Any
 
@@ -28,6 +30,7 @@ from langgraph.graph import END, START, StateGraph
 
 from app.agents.roles import RoleId, get_role
 from app.config import AgentSettings, get_settings
+from app.observability.logging import get_logger, log_event
 from app.orchestration.llm import build_chat_model
 from app.orchestration.pipeline import (
     PIPELINE_STEPS,
@@ -56,10 +59,16 @@ PIPELINE_ROLE_ASSIGNMENT: dict[PipelineStage, RoleId] = {
 # 单个角色节点内允许的「请求工具 → 回填观察」轮次上限，避免模型陷入无限循环。
 TOOL_CALL_MAX_ITERATIONS = 4
 
+logger = get_logger("orchestration.pipeline")
+
 _UPSTREAM_LABELS: dict[RoleId, str] = {
     RoleId.ANALYST: "信息收集结果",
     RoleId.REPORTER: "数据分析结果",
 }
+
+
+def _elapsed_ms(started: float) -> float:
+    return round((time.perf_counter() - started) * 1000, 1)
 
 
 def role_for_stage(stage: PipelineStage | str) -> RoleId:
@@ -194,6 +203,7 @@ def _run_role_stage(
     previous: dict[str, Any] | None,
     llm: BaseChatModel,
     caller: ToolCaller | None = None,
+    workflow_id: str | None = None,
 ) -> dict[str, Any]:
     role = role_for_stage(stage)
     definition = get_role(role)
@@ -201,13 +211,44 @@ def _run_role_stage(
         SystemMessage(content=definition.system_prompt),
         HumanMessage(content=_role_input(role, task, previous)),
     ]
-    response = _invoke_role(messages, llm, caller)
-    return _stage_result(
-        stage,
-        _content_text(response.content),
-        previous,
-        caller.records if caller is not None else (),
+    discovered = caller.available() if caller is not None else ()
+    log_event(
+        logger,
+        "stage.start",
+        workflow_id=workflow_id,
+        stage=stage.value,
+        role=role.value,
+        task_chars=len(task),
+        tools=len(discovered),
     )
+    started = time.perf_counter()
+    try:
+        response = _invoke_role(messages, llm, caller)
+    except Exception as exc:
+        log_event(
+            logger,
+            "stage.failed",
+            level=logging.ERROR,
+            workflow_id=workflow_id,
+            stage=stage.value,
+            role=role.value,
+            error=f"{type(exc).__name__}: {exc}",
+            duration_ms=_elapsed_ms(started),
+        )
+        raise
+    content = _content_text(response.content)
+    records = caller.records if caller is not None else ()
+    log_event(
+        logger,
+        "stage.finish",
+        workflow_id=workflow_id,
+        stage=stage.value,
+        role=role.value,
+        chars=len(content),
+        tool_calls=len(records),
+        duration_ms=_elapsed_ms(started),
+    )
+    return _stage_result(stage, content, previous, records)
 
 
 def run_role_stage(
@@ -219,6 +260,7 @@ def run_role_stage(
     settings: AgentSettings | None = None,
     tool_registry: ToolRegistry | None = None,
     tool_scope: str | None = None,
+    workflow_id: str | None = None,
 ) -> dict[str, Any]:
     """调用指定阶段对应角色的模型，返回 Workflow 阶段活动使用的载荷。
 
@@ -228,13 +270,17 @@ def run_role_stage(
     传入 ``tool_registry``（或解析到默认注册表）时，角色节点可发现并调用 MCP 工具；
     可持久化执行（Dapr Workflow）应给出稳定的 ``tool_scope``（如 Workflow 实例 ID），
     使同一次执行重放时得到相同的调用 ID（见 `doc/dapr-integration.md` §6）。
+
+    ``workflow_id`` 用于行为日志关联（`event=stage.start|finish|failed`），
+    未显式给出 ``tool_scope`` 时也作为工具调用 ID 的 scope。
     """
 
     resolved = PipelineStage(stage) if isinstance(stage, str) else stage
     model = llm or build_chat_model(settings or get_settings())
     registry = tool_registry if tool_registry is not None else default_tool_registry()
-    caller = ToolCaller(registry, scope=tool_scope) if registry is not None else None
-    return _run_role_stage(resolved, task, previous, model, caller)
+    scope = tool_scope if tool_scope is not None else workflow_id
+    caller = ToolCaller(registry, scope=scope) if registry is not None else None
+    return _run_role_stage(resolved, task, previous, model, caller, workflow_id=workflow_id)
 
 
 def _state_update(state: PipelineState) -> dict[str, Any]:

@@ -6,6 +6,7 @@ import time
 import uvicorn
 
 from app.core.checkpoint import init_checkpoint_schema
+from app.observability.logging import configure_logging
 from app.workflows.service import get_workflow_service
 
 logger = logging.getLogger("app.workflows.worker")
@@ -28,7 +29,7 @@ def start_runtime_in_background() -> threading.Thread:
 
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO)
+    configure_logging()
     init_checkpoint_schema()
     start_runtime_in_background()
 

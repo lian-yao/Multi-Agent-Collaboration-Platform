@@ -18,6 +18,8 @@
 
 from __future__ import annotations
 
+import logging
+import time
 import uuid
 from collections.abc import Callable, Sequence
 from enum import StrEnum
@@ -25,7 +27,11 @@ from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
 
+from app.observability.logging import get_logger, log_event
+
 TOOL_CALL_NAMESPACE = uuid.NAMESPACE_URL
+
+logger = get_logger("orchestration.tools")
 
 
 class ToolCallStatus(StrEnum):
@@ -115,6 +121,13 @@ class ToolCaller:
         self._discovered = tuple(registry.list_tools())
         self.records: list[ToolCallRecord] = []
         self._index = 0
+        if self._discovered:
+            log_event(
+                logger,
+                "tools.discovered",
+                count=len(self._discovered),
+                tools=",".join(spec.name for spec in self._discovered),
+            )
 
     def available(self) -> tuple[ToolSpec, ...]:
         """本次执行开始时发现的工具快照。"""
@@ -144,6 +157,7 @@ class ToolCaller:
             tool_name=record.tool_name,
             arguments=record.input,
         )
+        started = time.perf_counter()
         try:
             output = self._registry.call(request)
         except Exception as exc:  # 工具失败不应中断流水线，记录后交给模型继续
@@ -152,6 +166,16 @@ class ToolCaller:
         else:
             record.status = ToolCallStatus.SUCCEEDED
             record.output = output
+        log_event(
+            logger,
+            "tool.call",
+            level=logging.WARNING if record.status is ToolCallStatus.FAILED else logging.INFO,
+            call_id=call_id,
+            tool_name=tool_name,
+            status=record.status.value,
+            duration_ms=round((time.perf_counter() - started) * 1000, 1),
+            error=record.error,
+        )
         self.records.append(record)
         return record
 

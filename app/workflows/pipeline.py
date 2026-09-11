@@ -123,8 +123,12 @@ def advance_pipeline_stage(
     llm: Any | None = None,
     settings: AgentSettings | None = None,
     use_fake_model: bool = False,
+    workflow_id: str | None = None,
 ) -> dict[str, Any]:
-    """用编排契约推进一个阶段，返回活动输出所需的状态与 checkpoint。"""
+    """用编排契约推进一个阶段，返回活动输出所需的状态与 checkpoint。
+
+    ``workflow_id`` 由阶段活动透传，用于行为日志关联与工具调用 ID 去重（ADR-010）。
+    """
 
     stage = _to_stage(step)
     if stage != state.current_step:
@@ -146,6 +150,7 @@ def advance_pipeline_stage(
             previous=previous,
             llm=llm,
             settings=settings,
+            workflow_id=workflow_id,
         )
     updated = complete_step(state, stage, result)
     return {**build_step_result(updated), "result": result}
@@ -173,6 +178,7 @@ def _run_stage_activity(
         stage,
         task["task"],
         use_fake_model=bool(task.get("use_fake_model")),
+        workflow_id=workflow_id,
     )
     _record_checkpoint(
         workflow_id,
