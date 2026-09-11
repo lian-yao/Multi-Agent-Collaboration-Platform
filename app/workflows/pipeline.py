@@ -21,6 +21,7 @@ from typing import Any
 import dapr.ext.workflow as wf
 
 from app.config import AgentSettings
+from app.core.tool_audit import AuditedToolRegistry
 from app.core.checkpoint import (
     update_agent_run_status,
     update_message_status,
@@ -43,6 +44,7 @@ from app.orchestration.pipeline import (
     start,
 )
 from app.orchestration.pipeline_graph import run_role_stage
+from app.orchestration.tools import ToolRegistry, default_tool_registry
 from app.workflows.state import save_step_result
 
 WORKFLOW_NAME = "agent_pipeline"
@@ -124,11 +126,11 @@ def advance_pipeline_stage(
     settings: AgentSettings | None = None,
     use_fake_model: bool = False,
     workflow_id: str | None = None,
+    run_id: str | None = None,
+    workflow_run_id: str | None = None,
+    tool_registry: ToolRegistry | None = None,
 ) -> dict[str, Any]:
-    """用编排契约推进一个阶段，返回活动输出所需的状态与 checkpoint。
-
-    ``workflow_id`` 由阶段活动透传，用于行为日志关联与工具调用 ID 去重（ADR-010）。
-    """
+    """推进一个阶段，审计工具调用并保留 Workflow 行为日志关联。"""
 
     stage = _to_stage(step)
     if stage != state.current_step:
@@ -144,17 +146,25 @@ def advance_pipeline_stage(
     if use_fake_model:
         result = fake_stage_result(stage.value, task, previous=previous)
     else:
+        registry = tool_registry if tool_registry is not None else default_tool_registry()
+        if registry is not None and run_id:
+            registry = AuditedToolRegistry(
+                registry,
+                run_id=run_id,
+                workflow_run_id=workflow_run_id,
+            )
         result = run_role_stage(
             stage,
             task,
             previous=previous,
             llm=llm,
             settings=settings,
+            tool_registry=registry,
+            tool_scope=workflow_run_id or workflow_id or run_id,
             workflow_id=workflow_id,
         )
     updated = complete_step(state, stage, result)
     return {**build_step_result(updated), "result": result}
-
 
 def _run_stage_activity(
     ctx: wf.WorkflowActivityContext,
@@ -179,6 +189,8 @@ def _run_stage_activity(
         task["task"],
         use_fake_model=bool(task.get("use_fake_model")),
         workflow_id=workflow_id,
+        run_id=task.get("agent_run_id"),
+        workflow_run_id=workflow_id,
     )
     _record_checkpoint(
         workflow_id,
