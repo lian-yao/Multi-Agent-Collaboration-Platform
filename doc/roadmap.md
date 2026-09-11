@@ -21,5 +21,9 @@
   （Fake 仅保留为恢复演练开关，见 ADR-007）。
 - 已完成（D5-D6 收尾）：最终报告作为 `messages(role=assistant)` 在终态回写并经
   `GET /messages` 返回，Web 消息记录直接可见（见 ADR-008）。
-- 下一步：M4 的工具生态与可观测（MCP 工具注册与调用、Jaeger/Prometheus 指标）。
+- 已完成（D7-D8 编排层，成员 A）：流水线接入 MCP 工具——编排层冻结工具契约
+  （`ToolSpec` / `ToolCall` / `ToolCallRecord` / `ToolRegistry`）与模型驱动的 ReAct 调用循环，
+  阶段载荷回传 `tool_calls`；`app/mcp` 注册表落地后无需改动即可接入（见 ADR-009）。
+- 下一步：M4 其余部分——成员 C 的内置工具/沙箱/可观测接入、成员 B 的 `tool_calls`
+  审计落库、成员 D 的调用链路与 Token 统计，以及 Jaeger/Prometheus 指标。
 - 范围说明：D3-D4 不含动态并行分派、依赖 DAG 与人工介入（HITL），后续版本单独评估。
