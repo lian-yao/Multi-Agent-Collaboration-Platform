@@ -24,6 +24,9 @@
 - 已完成（D7-D8 编排层，成员 A）：流水线接入 MCP 工具——编排层冻结工具契约
   （`ToolSpec` / `ToolCall` / `ToolCallRecord` / `ToolRegistry`）与模型驱动的 ReAct 调用循环，
   阶段载荷回传 `tool_calls`；`app/mcp` 注册表落地后无需改动即可接入（见 ADR-009）。
+- 已完成（D7-D8 可观测增量）：编排层输出结构化行为日志
+  （`event=stage.start|finish|failed`、`tool.call`），按 `workflow_id` 关联，
+  级别由 `LOG_LEVEL` 控制（见 ADR-010）。
 - 下一步：M4 其余部分——成员 C 的内置工具/沙箱/可观测接入、成员 B 的 `tool_calls`
   审计落库、成员 D 的调用链路与 Token 统计，以及 Jaeger/Prometheus 指标。
 - 范围说明：D3-D4 不含动态并行分派、依赖 DAG 与人工介入（HITL），后续版本单独评估。

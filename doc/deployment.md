@@ -94,3 +94,4 @@ npm run dev
 | `AGENT_OPENAI_MODEL` | OpenAI 模型名 |
 | `REDIS_URL` | Redis 连接 |
 | `DATABASE_URL` | PostgreSQL 连接 |
+| `LOG_LEVEL` | 应用行为日志级别，默认 `INFO`（见 ADR-010） |
