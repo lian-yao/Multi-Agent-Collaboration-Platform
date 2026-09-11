@@ -31,7 +31,7 @@
 | 分工 | 负责 | 状态 | 落地内容 |
 | --- | --- | --- | --- |
 | 流水线接入 MCP 工具并验收 | A | 已完成 | 编排层冻结工具契约（`ToolSpec`/`ToolCall`/`ToolCallRecord`/`ToolRegistry`）与模型驱动的 ReAct 调用循环，阶段载荷回传 `tool_calls`，注册表缺失时保持原行为（ADR-009）；并补充结构化行为日志（ADR-010） |
-| 支持工具调用审计落库 | B | 已完成 | `tool_calls` 表与 `app/core/tool_audit.py`：先写 running 再执行，成功/失败回写，按 `call_id` 幂等缓存、并发重放拒绝；阶段活动透传 `run_id`/`workflow_run_id` 接入审计 |
+| 支持工具调用审计落库 | B | 已完成 | `tool_calls` 表与 `app/core/tool_audit.py`：先写 running 再执行，成功/失败回写，按 `call_id` 幂等缓存、并发重放拒绝；阶段活动透传 `run_id`/`workflow_run_id` 接入审计（ADR-011） |
 | 完成内置工具、沙箱、可观测接入 | C | 未开始 | `app/mcp`、`app/tools`、`app/sandbox` 仍为空；4 个示例工具、沙箱隔离、OpenTelemetry/Jaeger 追踪均未落地 |
 | 展示调用链路与 Token 统计 | D | 已完成（只读层） | 新增只读接口 `/providers`、`/agents/{id}`、`/tools`、`/workflows/{id}/tool-calls`、`/metrics`，Web 工作台接入工具调用详情与 Token 采样展示，契约见 `doc/api.md` §5 |
 
