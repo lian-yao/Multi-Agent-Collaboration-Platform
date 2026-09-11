@@ -37,7 +37,7 @@ cd deploy; .\start.ps1                     # 起完整环境
 | U-04 | 会话/AgentRun/Workflow 状态迁移 | 非法迁移被拒绝 | M2/M3 |
 | U-05 | 图状态 Schema 序列化 | LangGraph 状态可无损转 JSON 并还原 | M3 |
 | U-06 | 工具函数独立行为 | 计算器/SQL 只读校验等返回值正确 | M4 |
-| U-07 | 工具调用幂等键 | 同 ID 重复投递返回缓存结果 | M4 |
+| U-07 | 工具调用幂等键 | 同 ID 重复投递返回缓存结果；失败可同 ID 重试；`running` 拒绝并发重放；装饰器记录 running→终态（ADR-011） | M4 |
 | U-08 | 沙箱边界拒绝越权 | 代码执行工具拒绝网络/危险命令 | M4 |
 | U-09 | 流水线接入 MCP 工具 | 注册表工具被发现，按模型 `tool_calls` 调用并回填观察；失败记为 failed 且不中断；阶段载荷可序列化 | M4 |
 | U-10 | 行为日志事件 | 阶段开始/结束/失败与工具调用输出 `event=... field=value` 结构化日志，含 workflow_id 与耗时 | M4 |
@@ -54,6 +54,7 @@ cd deploy; .\start.ps1                     # 起完整环境
 | I-06 | MCP 工具发现与调用 | 工具可发现、可调用、审计落库 | M4 |
 | I-07 | 可观测数据输出 | 关键 Span 与指标可在 Jaeger/Prometheus 查到 | M4 |
 | I-08 | 配置热更新 | PATCH agent 后新执行使用新配置 | M4 |
+| I-09 | D7-D8 只读巡检接口 | Provider/Agent/工具/调用/指标接口的分页、`availability` 区分「未接入」与「零条记录」、404/422/503 契约 | M4 |
 
 ### 2.3 端到端测试（E）
 
@@ -78,7 +79,11 @@ cd deploy; .\start.ps1                     # 起完整环境
 5. 轮询 `GET /workflows/{id}`，断言从 `analysis` 阶段继续并最终 `completed`；
 6. 记录从服务可用到实例恢复执行的耗时，目标 `< 5s`。
 
-自动化路线：已提供 `scripts/fault_recovery.ps1` 固化手工演练步骤；D7 前改为 pytest 集成用例。
+自动化路线：已提供 `scripts/fault_recovery.ps1` 固化手工演练步骤。
+
+现状（2026-09-11）：仍为手工脚本；`tests/unit/test_workflow_pipeline.py` 覆盖了活动重放、
+子 Workflow 实例 ID 稳定、终态回写等**单元级**的恢复语义，真实 Dapr 进程被杀→重启的
+pytest 集成用例尚未落地，E-03 仍按 M5 手工验收。
 
 ### 3.2 并发会话测试（E 系列性能）
 
@@ -93,8 +98,27 @@ cd deploy; .\start.ps1                     # 起完整环境
 | M1（单 Agent） | U-01、U-02、U-03 |
 | M2（Dapr 持久化） | I-01、I-02、I-03 |
 | M3（多 Agent） | U-04、U-05、I-04、I-05、E-03 手工版 |
-| M4（工具 + 可观测） | U-06、U-07、U-08、U-09、U-10、I-06、I-07、I-08 |
+| M4（工具 + 可观测） | U-06、U-07、U-08、U-09、U-10、I-06、I-07、I-08、I-09 |
 | M5（交付） | E-01 至 E-05 全部 |
+
+### 4.1 M4 当前状态（2026-09-11）
+
+合并 A/B/D 三份 D7-D8 提交后的实测状态。**M4 未完成**，缺口集中在成员 C 的
+内置工具/沙箱/可观测接入。
+
+| 用例 | 状态 | 证据 / 缺口 |
+| --- | --- | --- |
+| U-06 工具函数独立行为 | 未实现 | 尚无内置工具（`app/tools` 为空），待 C |
+| U-07 工具调用幂等键 | 通过 | `tests/unit/test_tool_audit.py`（ADR-011） |
+| U-08 沙箱边界拒绝越权 | 未实现 | 尚无沙箱（`app/sandbox` 为空），待 C |
+| U-09 流水线接入 MCP 工具 | 通过 | `tests/unit/test_pipeline_tools.py`，含「阶段活动消费默认注册表」（ADR-009） |
+| U-10 行为日志事件 | 通过 | `tests/unit/test_observability.py`（ADR-010） |
+| I-06 MCP 工具发现与调用 | 部分 | 发现、调用、审计链路已就位并有单元级证据；缺真实注册表，端到端验收待 C |
+| I-07 可观测数据输出 | 未实现 | 未接 OpenTelemetry/Jaeger；Prometheus 目前只抓 dapr-sidecar |
+| I-08 配置热更新 | 未实现 | `PATCH /api/v1/config/agents/{agent_id}` 未实现（`doc/api.md` §6） |
+| I-09 只读巡检接口 | 通过 | `tests/integration/test_inspection_api.py`；用 SQLite 内存表与注入目录数据，不等于真实 PostgreSQL/MCP 验收 |
+
+运行命令与结果：`uv run pytest -q` → **127 passed**（`tests/unit` 与 `tests/integration` 全部用例）。
 
 ## 5. 失败处理约定
 
