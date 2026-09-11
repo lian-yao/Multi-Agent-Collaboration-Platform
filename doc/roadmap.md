@@ -29,4 +29,7 @@
   级别由 `LOG_LEVEL` 控制（见 ADR-010）。
 - 下一步：M4 其余部分——成员 C 的内置工具/沙箱/可观测接入、成员 B 的 `tool_calls`
   审计落库、成员 D 的调用链路与 Token 统计，以及 Jaeger/Prometheus 指标。
+- 下一步：M4 的工具生态与可观测（MCP 工具注册与调用、Jaeger/Prometheus 指标）。
+- 成员 D（D7-D8，2026-09-11）：已实现只读 Provider/Agent 配置查询、工具目录适配入口、工具审计和指标表读取，以及 Web 分页/刷新/错误状态/调用详情/Token 采样展示。契约见 api.md §5。当前 MCP 注册表仍未接入；真实审计/指标写入及 PostgreSQL + Worker 全链路联调待 B/C 配合，不能据此认定 M4 完成。配置 PATCH 仍未实现。
+- 本轮验证：API 集成测试 14 项、全量 pytest 90 项通过，前端 TypeScript 与 Vite 构建通过。数据库读取测试使用 SQLite 内存表与注入目录数据，不代表真实 MCP、PostgreSQL 或浏览器端到端验收。pytest 缓存目录存在权限警告，测试结果不受影响。
 - 范围说明：D3-D4 不含动态并行分派、依赖 DAG 与人工介入（HITL），后续版本单独评估。

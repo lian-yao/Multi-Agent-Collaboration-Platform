@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
+from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import FastAPI, Query, Request, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, FiniteFloat
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.store import SqlApiStore
+from app.api.inspection import InspectionStore
+from app.config import get_settings
 from app.workflows.pipeline import WorkflowTask
 from app.workflows.service import get_workflow_service
 
@@ -83,11 +87,77 @@ class AgentResponse(BaseModel):
     name: str
     role: str
     model: str
+    provider: str = "ollama"
+    temperature: float = 0.2
     status: str
 
 
 class AgentListResponse(BaseModel):
     items: list[AgentResponse]
+
+
+class ProviderResponse(BaseModel):
+    id: str
+    name: str
+    model: str
+    base_url: str | None = None
+    status: str
+    temperature: float
+
+
+class ProviderListResponse(BaseModel):
+    items: list[ProviderResponse]
+
+
+class ToolResponse(BaseModel):
+    name: str
+    description: str
+    input_schema: dict[str, Any]
+    status: str
+
+
+class ToolListResponse(BaseModel):
+    items: list[ToolResponse]
+    page: int
+    page_size: int
+    total: int
+    availability: str = "not_integrated"
+
+
+class ToolCallResponse(BaseModel):
+    id: str
+    run_id: str
+    workflow_run_id: str | None = None
+    tool_name: str
+    input: dict[str, Any]
+    output: Any | None = None
+    status: str
+    error: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ToolCallListResponse(BaseModel):
+    items: list[ToolCallResponse]
+    page: int
+    page_size: int
+    total: int
+    availability: str = "not_integrated"
+
+
+class MetricResponse(BaseModel):
+    metric_name: str
+    value: FiniteFloat
+    labels: dict[str, Any]
+    recorded_at: datetime
+
+
+class MetricListResponse(BaseModel):
+    items: list[MetricResponse]
+    page: int
+    page_size: int
+    total: int
+    availability: str = "not_integrated"
 
 
 app = FastAPI(
@@ -98,6 +168,14 @@ app = FastAPI(
 # The worker process uses the SQL adapter. Tests can replace this value with
 # InMemoryApiStore without changing route behavior or requiring PostgreSQL.
 api_store: Any = SqlApiStore()
+inspection_store = InspectionStore()
+
+
+def _inspection_read(read, **kwargs):
+    try:
+        return read(**kwargs)
+    except (SQLAlchemyError, OSError, ValueError, KeyError) as exc:
+        raise ApiError("DATA_SOURCE_UNAVAILABLE", "数据源读取失败，请稍后重试", 503) from exc
 
 
 @app.exception_handler(ApiError)
@@ -275,7 +353,8 @@ def get_workflow(workflow_id: str) -> WorkflowResponse:
 @app.get("/api/v1/agents", response_model=AgentListResponse)
 def list_agents() -> AgentListResponse:
     """Return the fixed D5-D6 team represented by the three pipeline roles."""
-    model = "qwen2.5-coder:7b"
+    settings = get_settings()
+    model = settings.ollama_model if settings.llm_provider == "ollama" else settings.openai_model
     return AgentListResponse(
         items=[
             AgentResponse(
@@ -283,6 +362,8 @@ def list_agents() -> AgentListResponse:
                 name="信息收集 Agent",
                 role="collector",
                 model=model,
+                provider=settings.llm_provider,
+                temperature=settings.temperature,
                 status="idle",
             ),
             AgentResponse(
@@ -290,6 +371,8 @@ def list_agents() -> AgentListResponse:
                 name="数据分析 Agent",
                 role="analyst",
                 model=model,
+                provider=settings.llm_provider,
+                temperature=settings.temperature,
                 status="idle",
             ),
             AgentResponse(
@@ -297,7 +380,106 @@ def list_agents() -> AgentListResponse:
                 name="报告生成 Agent",
                 role="reporter",
                 model=model,
+                provider=settings.llm_provider,
+                temperature=settings.temperature,
                 status="idle",
             ),
         ]
+    )
+
+
+_AGENT_NAMES = {
+    "collector": "信息收集 Agent",
+    "analyst": "数据分析 Agent",
+    "reporter": "报告生成 Agent",
+}
+
+
+def _agent_response(agent_id: str) -> AgentResponse:
+    if agent_id not in _AGENT_NAMES:
+        raise ApiError("AGENT_NOT_FOUND", "Agent 不存在", status.HTTP_404_NOT_FOUND)
+    settings = get_settings()
+    return AgentResponse(
+        id=agent_id,
+        name=_AGENT_NAMES[agent_id],
+        role=agent_id,
+        model=settings.ollama_model if settings.llm_provider == "ollama" else settings.openai_model,
+        provider=settings.llm_provider,
+        temperature=settings.temperature,
+        status="idle",
+    )
+
+
+@app.get("/api/v1/providers", response_model=ProviderListResponse)
+def list_providers() -> ProviderListResponse:
+    settings = get_settings()
+    if settings.llm_provider == "ollama":
+        model = settings.ollama_model
+        base_url = settings.ollama_base_url
+    else:
+        model = settings.openai_model
+        base_url = None
+    if base_url:
+        parts = urlsplit(base_url)
+        base_url = urlunsplit((parts.scheme, parts.netloc.rsplit("@", 1)[-1], parts.path, "", ""))
+    model_status = "configured" if model else "missing_model"
+    return ProviderListResponse(
+        items=[
+            ProviderResponse(
+                id=settings.llm_provider,
+                name="Ollama" if settings.llm_provider == "ollama" else "OpenAI",
+                model=model,
+                base_url=base_url,
+                status=model_status,
+                temperature=settings.temperature,
+            )
+        ]
+    )
+
+
+@app.get("/api/v1/agents/{agent_id}", response_model=AgentResponse)
+def get_agent(agent_id: str) -> AgentResponse:
+    return _agent_response(agent_id)
+
+
+@app.get("/api/v1/tools", response_model=ToolListResponse)
+def list_tools(
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+) -> ToolListResponse:
+    return ToolListResponse.model_validate(
+        _inspection_read(inspection_store.tools, page=page, page_size=page_size)
+    )
+
+
+@app.get(
+    "/api/v1/workflows/{workflow_id}/tool-calls",
+    response_model=ToolCallListResponse,
+)
+def list_workflow_tool_calls(
+    workflow_id: str,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+) -> ToolCallListResponse:
+    try:
+        workflow = api_store.get_workflow(workflow_id)
+    except (ValueError, TypeError):
+        workflow = None
+    if workflow is None:
+        raise ApiError("WORKFLOW_NOT_FOUND", "Workflow 不存在", status.HTTP_404_NOT_FOUND)
+    return ToolCallListResponse.model_validate(
+        _inspection_read(inspection_store.tool_calls, workflow=workflow, page=page, page_size=page_size)
+    )
+
+
+@app.get("/api/v1/metrics", response_model=MetricListResponse)
+def list_metrics(
+    workflow_id: str | None = None,
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+) -> MetricListResponse:
+    if workflow_id is not None:
+        get_workflow(workflow_id)
+    return MetricListResponse.model_validate(
+        _inspection_read(inspection_store.metrics, page=page, page_size=page_size, workflow_id=workflow_id)
     )
