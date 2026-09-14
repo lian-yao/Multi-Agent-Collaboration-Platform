@@ -242,7 +242,7 @@ GET /api/v1/agents/{agent_id}
 
 GET /api/v1/tools?page=1&page_size=20
 
-item 字段为 name、description、input_schema（JSON 对象）、status。当前 MCP 注册表未落地，返回 availability=not_integrated；API 的工具目录读取适配由 C 提供真实注册表后接入。不会把四种规划工具当成已注册工具。
+item 字段为 name、description、input_schema（JSON 对象）、status。C 的注册表与目录已就位（`app/mcp/registry.py::tool_catalog()`，返回 calculator / web_search / code_execution / sql_query 四项，见 ADR-012）；`app/api/main.py` 尚未把它注入 `InspectionStore(tool_catalog=...)`，因此当前仍返回 availability=not_integrated，接线属 D。接入后 item 的 status 为 available。不会把四种规划工具当成已注册工具。
 
 ### 5.4 查询 Workflow 工具调用
 

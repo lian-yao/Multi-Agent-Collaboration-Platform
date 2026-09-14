@@ -164,5 +164,20 @@ npm run dev
 | `AGENT_OLLAMA_MODEL` | Ollama 模型名 |
 | `AGENT_OPENAI_MODEL` | OpenAI 模型名 |
 | `REDIS_URL` | Redis 连接 |
-| `DATABASE_URL` | PostgreSQL 连接 |
+| `DATABASE_URL` | PostgreSQL 连接（也是只读 SQL 工具的默认数据源） |
 | `LOG_LEVEL` | 应用行为日志级别，默认 `INFO`（见 ADR-010） |
+| `MCP_TRANSPORT` | 工具注册表传输：`inprocess`（默认）/ `stdio` / `http`（见 ADR-012） |
+| `MCP_SERVER_COMMAND` | `stdio` 传输时启动 MCP Server 的命令，默认当前解释器 |
+| `MCP_SERVER_URL` | `http` 传输时的 MCP Server 地址 |
+| `TOOL_SEARCH_ENDPOINT` | 网页搜索端点，默认 DuckDuckGo Instant Answer |
+| `TOOL_SQL_DSN` | 只读 SQL 工具的 DSN，留空则用 `DATABASE_URL` |
+| `SANDBOX_BACKEND` | 代码执行沙箱后端：`docker`（默认）/ `denied` |
+| `SANDBOX_TIMEOUT_SECONDS` | 单次沙箱执行超时，默认 15 |
+| `OBS_TRACING_ENDPOINT` | OTLP HTTP 追踪导出地址，默认 `http://localhost:4318/v1/traces`（Jaeger） |
+| `OBS_TRACING_ENABLED` | 是否启用追踪导出，默认 `true` |
+| `OBS_METRICS_SINK` | `metrics` 采样写入：`postgres`（默认）/ `none` |
+
+> 工具、沙箱与可观测的完整配置项见 `app/tools/config.py`、`app/sandbox/config.py`、
+> `app/mcp/config.py`、`app/observability/config.py`（ADR-012）。
+> `docker` 后端需要挂载宿主 Docker socket；`SANDBOX_BACKEND=denied` 时
+> `code_execution` 工具会以「沙箱不可用」失败，不会退回宿主执行。

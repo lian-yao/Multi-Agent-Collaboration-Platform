@@ -1182,6 +1182,7 @@ dependencies = [
     { name = "dapr-agents" },
     { name = "dapr-ext-fastapi" },
     { name = "dapr-ext-workflow" },
+    { name = "docker" },
     { name = "fastapi" },
     { name = "langchain-ollama" },
     { name = "langchain-openai" },
@@ -1191,6 +1192,7 @@ dependencies = [
     { name = "openai" },
     { name = "opentelemetry-exporter-otlp-proto-http" },
     { name = "opentelemetry-sdk" },
+    { name = "prometheus-client" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pydantic" },
     { name = "pydantic-settings" },
@@ -1214,6 +1216,7 @@ requires-dist = [
     { name = "dapr-agents", specifier = "==1.0.6" },
     { name = "dapr-ext-fastapi", specifier = "==1.18.3" },
     { name = "dapr-ext-workflow", specifier = "==1.18.3" },
+    { name = "docker", specifier = "==7.2.0" },
     { name = "fastapi", specifier = "==0.141.1" },
     { name = "langchain-ollama", specifier = "==1.1.0" },
     { name = "langchain-openai", specifier = "==1.6.0" },
@@ -1223,6 +1226,7 @@ requires-dist = [
     { name = "openai", specifier = "==2.54.0" },
     { name = "opentelemetry-exporter-otlp-proto-http", specifier = "==1.39.1" },
     { name = "opentelemetry-sdk", specifier = "==1.39.1" },
+    { name = "prometheus-client", specifier = "==0.26.0" },
     { name = "psycopg", extras = ["binary"], specifier = "==3.3.5" },
     { name = "pydantic", specifier = "==2.12.5" },
     { name = "pydantic-settings", specifier = "==2.15.0" },
@@ -1602,6 +1606,15 @@ dependencies = [
 sdist = { url = "https://mirrors.aliyun.com/pypi/packages/0b/57/dc169d6b05f3ea486f0a6b74deb08961687f3cd1eb36bf72cf208b0325e6/posthog-7.45.3.tar.gz", hash = "sha256:98d79f116c68c4e710ad6f97de6d66cb384347261b9046961e41e3a71122485d" }
 wheels = [
     { url = "https://mirrors.aliyun.com/pypi/packages/da/ff/b8cd7a5650b40335f05321e7124e7094bf3979bfa145ab6e8289cec65153/posthog-7.45.3-py3-none-any.whl", hash = "sha256:92641e86198005438daa2f83ae46f2bcd2bb5d43a34b7d63900d471239c6c5ac" },
+]
+
+[[package]]
+name = "prometheus-client"
+version = "0.26.0"
+source = { registry = "https://mirrors.aliyun.com/pypi/simple/" }
+sdist = { url = "https://mirrors.aliyun.com/pypi/packages/52/73/f1334c29c2af4cd9dba6c7817e61b611bd0215e2eb5565c6064a4de18802/prometheus_client-0.26.0.tar.gz", hash = "sha256:04a91bcf94e2cf74a44a1a874d651a2e853ed354b6e822f3b7487751465d5c2b" }
+wheels = [
+    { url = "https://mirrors.aliyun.com/pypi/packages/eb/a3/b69efbf4143b5b9859b977770bbbabcc2796b702fa69dc40271e45cd5a56/prometheus_client-0.26.0-py3-none-any.whl", hash = "sha256:fa93d06737aa02bacd05794768508bb97d2fbee28cb3bca04eaae92f0ca953d6" },
 ]
 
 [[package]]

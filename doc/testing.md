@@ -101,24 +101,30 @@ pytest 集成用例尚未落地，E-03 仍按 M5 手工验收。
 | M4（工具 + 可观测） | U-06、U-07、U-08、U-09、U-10、I-06、I-07、I-08、I-09 |
 | M5（交付） | E-01 至 E-05 全部 |
 
-### 4.1 M4 当前状态（2026-09-11）
+### 4.1 M4 当前状态（2026-09-14）
 
-合并 A/B/D 三份 D7-D8 提交后的实测状态。**M4 未完成**，缺口集中在成员 C 的
-内置工具/沙箱/可观测接入。
+成员 C 的 D7-8（内置工具/沙箱/可观测接入）落地后的实测状态。
+**M4 仍未整体完成**，剩余缺口已不在 C 侧，见每行的「缺口」。
 
 | 用例 | 状态 | 证据 / 缺口 |
 | --- | --- | --- |
-| U-06 工具函数独立行为 | 未实现 | 尚无内置工具（`app/tools` 为空），待 C |
+| U-06 工具函数独立行为 | 通过 | `tests/unit/test_builtin_tools.py`：计算器返回值与拒绝面、只读 SQL 校验与真实只读执行、注册表发现/调用、`web_search` 注入 fetcher 的离线解析（ADR-012） |
 | U-07 工具调用幂等键 | 通过 | `tests/unit/test_tool_audit.py`（ADR-011） |
-| U-08 沙箱边界拒绝越权 | 未实现 | 尚无沙箱（`app/sandbox` 为空），待 C |
+| U-08 沙箱边界拒绝越权 | 通过 | `tests/unit/test_sandbox_policy.py`：Python/Shell 越权拒绝、策略先于后端、`denied` 后端不降级执行（ADR-012） |
 | U-09 流水线接入 MCP 工具 | 通过 | `tests/unit/test_pipeline_tools.py`，含「阶段活动消费默认注册表」（ADR-009） |
 | U-10 行为日志事件 | 通过 | `tests/unit/test_observability.py`（ADR-010） |
-| I-06 MCP 工具发现与调用 | 部分 | 发现、调用、审计链路已就位并有单元级证据；缺真实注册表，端到端验收待 C |
-| I-07 可观测数据输出 | 未实现 | 未接 OpenTelemetry/Jaeger；Prometheus 目前只抓 dapr-sidecar |
+| I-06 MCP 工具发现与调用 | 部分 | `tests/unit/test_mcp_tools.py` 走 `mcp.shared.memory` 的**真实 MCP 协议往返**（发现、调用、错误还原、目录）；缺跨进程 stdio 与真实 PostgreSQL 上的 `tool_calls` 落库验收 |
+| I-07 可观测数据输出 | 部分 | `tests/unit/test_observability_metrics.py`：Span 与属性/异常、指标去重、Prometheus 文本、`metrics` 表写入（SQLite 与表缺失两种路径）、降级不阻塞；缺 Jaeger/Prometheus 实例上的实际抓取验收，且 `metrics` 表尚未建（B） |
 | I-08 配置热更新 | 未实现 | `PATCH /api/v1/config/agents/{agent_id}` 未实现（`doc/api.md` §6） |
 | I-09 只读巡检接口 | 通过 | `tests/integration/test_inspection_api.py`；用 SQLite 内存表与注入目录数据，不等于真实 PostgreSQL/MCP 验收 |
 
-运行命令与结果：`uv run pytest -q` → **127 passed**（`tests/unit` 与 `tests/integration` 全部用例）。
+运行命令与结果：`uv run pytest -q` → **288 passed / 1 failed**。
+
+唯一失败是 `tests/unit/test_pipeline_tools.py::test_role_stage_without_registry_does_not_bind_tools`：
+该用例用「成员 C 的 `app/mcp` 不存在」来构造「没有注册表」的前置条件，
+C 落地注册表后 `default_tool_registry()` 不再返回 `None`，前置条件失效。
+用例意图（没有注册表时不绑定工具、不产生调用记录）仍然成立，
+需改为 `set_tool_registry_factory(lambda: None)` 显式构造；该文件属成员 A（见 ADR-012）。
 
 ## 5. 失败处理约定
 
