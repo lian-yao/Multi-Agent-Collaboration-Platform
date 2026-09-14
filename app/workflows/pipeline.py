@@ -45,6 +45,7 @@ from app.orchestration.pipeline import (
 )
 from app.orchestration.pipeline_graph import run_role_stage
 from app.orchestration.tools import ToolRegistry, default_tool_registry
+from app.observability.metrics import flush_metrics, record_workflow_terminal
 from app.workflows.state import save_step_result
 
 WORKFLOW_NAME = "agent_pipeline"
@@ -247,6 +248,12 @@ def finalize_activity(
         raise ValueError(f"unsupported terminal status: {status}")
 
     workflow_id = activity_input["workflow_id"]
+
+    # 成员 C D7-8：Workflow 终态指标（任务完成率 = completed / 全部终态），
+    # 并借终态把本进程内缓冲的采样刷入 metrics 表（见 app/observability/metrics.py）。
+    record_workflow_terminal(status, workflow_id=workflow_id)
+    flush_metrics()
+
     update_workflow_run(
         workflow_id,
         status=status,

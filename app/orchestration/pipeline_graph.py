@@ -30,6 +30,7 @@ from langgraph.graph import END, START, StateGraph
 
 from app.agents.roles import RoleId, get_role
 from app.config import AgentSettings, get_settings
+from app.observability.instrumentation import observed_stage
 from app.observability.logging import get_logger, log_event
 from app.orchestration.llm import build_chat_model
 from app.orchestration.pipeline import (
@@ -223,7 +224,12 @@ def _run_role_stage(
     )
     started = time.perf_counter()
     try:
-        response = _invoke_role(messages, llm, caller)
+        # 成员 C D7-8：可观测接入点——为本阶段设置标签上下文、开 Span 并记录阶段指标；
+        # 工具与模型观测通过该上下文关联到 workflow_id/stage（见 app/observability）。
+        with observed_stage(
+            workflow_id=workflow_id, stage=stage.value, role=role.value
+        ):
+            response = _invoke_role(messages, llm, caller)
     except Exception as exc:
         log_event(
             logger,
