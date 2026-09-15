@@ -14,11 +14,12 @@ Prometheus 断言只看文本格式的暴露结果，不启动 exporter 端口�
 
 from __future__ import annotations
 
+import logging
 import uuid
 
 import pytest
 import sqlalchemy as sa
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.outputs import ChatGeneration, ChatResult, LLMResult
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from sqlalchemy import create_engine, inspect
@@ -337,6 +338,93 @@ def test_callback_handler_records_tokens_for_a_model_call(memory_metrics):
     [tokens] = sink.samples("total_tokens")
     assert tokens.value == 10
     assert tokens.labels["model"] == "test-model"
+
+
+# 实测的 ChatOllama 回调载荷（2026-09-15，langchain-core 1.6.1 / langchain-ollama）：
+# `serialized` 只有集成类名、**没有 `kwargs`**，真实模型名只在回调 `metadata` 里；
+# `LLMResult.llm_output` 为 None，结束回调本身取不到模型名。
+CHATOLLAMA_SERIALIZED = {
+    "lc": 1,
+    "type": "not_implemented",
+    "id": ["langchain_ollama", "chat_models", "ChatOllama"],
+    "repr": "ChatOllama(model='qwen2.5-coder:7b', temperature=0.2)",
+    "name": "ChatOllama",
+}
+CHATOLLAMA_METADATA = {
+    "ls_provider": "ollama",
+    "ls_model_name": "qwen2.5-coder:7b",
+    "ls_model_type": "chat",
+    "ls_temperature": 0.2,
+    "ls_integration": "langchain_chat_model",
+}
+CHATOLLAMA_INVOCATION_PARAMS = {"_type": "chat-ollama", "stop": None}
+
+
+def _chat_result(total: int = 7, llm_output: dict | None = None) -> ChatResult:
+    return ChatResult(
+        generations=[
+            ChatGeneration(
+                message=AIMessage(
+                    content="ok",
+                    usage_metadata={
+                        "input_tokens": total - 2,
+                        "output_tokens": 2,
+                        "total_tokens": total,
+                    },
+                )
+            )
+        ],
+        llm_output=llm_output,
+    )
+
+
+def test_callback_handler_uses_real_model_name_not_integration_class(
+    memory_metrics, caplog: pytest.LogCaptureFixture
+) -> None:
+    """F-03 回归：Token 要按真实模型归因，而不是记成集成类名 `ChatOllama`（ADR-013）。
+
+    模型名只在开始回调拿得到（结果里没有），所以开始时按 `run_id` 记下、结束时用。
+    只有连 `metadata` 都没有时才退化为集成类名——那是能力下限，不是模型名。
+    """
+
+    collector, sink = memory_metrics
+    handler = ObservabilityCallbackHandler(collector=collector)
+    run_id = uuid.uuid4()
+    caplog.set_level(logging.INFO, logger="macp.observability.callbacks")
+
+    handler.on_chat_model_start(
+        CHATOLLAMA_SERIALIZED,
+        [[HumanMessage(content="hi")]],
+        run_id=run_id,
+        metadata=CHATOLLAMA_METADATA,
+        invocation_params=CHATOLLAMA_INVOCATION_PARAMS,
+    )
+    handler.on_llm_end(_chat_result(), run_id=run_id)
+    collector.flush()
+
+    assert "event=llm.finish" in caplog.messages[-1]
+    assert "model=qwen2.5-coder:7b" in caplog.messages[-1]
+    [tokens] = sink.samples("total_tokens")
+    assert tokens.labels["model"] == "qwen2.5-coder:7b"
+
+
+def test_callback_handler_falls_back_to_legacy_serialized_kwargs(memory_metrics) -> None:
+    """旧版回调形状（`serialized["kwargs"]["model"]`）仍要能取到模型名。"""
+
+    collector, sink = memory_metrics
+    handler = ObservabilityCallbackHandler(collector=collector)
+    run_id = uuid.uuid4()
+
+    handler.on_chat_model_start(
+        {"name": "ChatOpenAI", "kwargs": {"model": "gpt-legacy", "temperature": 0.2}},
+        [[HumanMessage(content="hi")]],
+        run_id=run_id,
+    )
+    handler.on_llm_end(_chat_result(total=3), run_id=run_id)
+    collector.flush()
+
+    [tokens] = sink.samples("total_tokens")
+    assert tokens.labels["model"] == "gpt-legacy"
 
 
 def test_callback_handler_reads_nested_llm_result_generations(memory_metrics):
