@@ -55,6 +55,29 @@ export interface Provider {
   temperature: number;
 }
 
+/** `GET/PUT /api/v1/config/provider` 的响应（doc/api.md §5.8）。 */
+export interface ProviderConfig {
+  provider: string;
+  model: string;
+  base_url: string | null;
+  temperature: number;
+  api_key_configured: boolean;
+  updated_by: string | null;
+  updated_at: string | null;
+}
+
+/**
+ * `PUT /api/v1/config/provider` 的请求体。
+ * 字段省略 = 不改动；显式 `null` = 清除覆盖、回退环境配置。
+ */
+export interface ProviderConfigUpdate {
+  provider?: string;
+  model?: string | null;
+  base_url?: string | null;
+  api_key?: string | null;
+  temperature?: number | null;
+}
+
 export interface Tool {
   name: string;
   description: string;

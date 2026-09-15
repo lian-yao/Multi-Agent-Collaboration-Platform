@@ -372,6 +372,8 @@ item 字段为 metric_name、value（有限数值）、labels（JSON 对象）�
 
 模型构造语义：合并后的配置在阶段活动执行时解析，因此 `PUT` 后的下一次任务即生效；`provider=openai` 而缺少 `model` 或凭据时，模型构造抛出明确错误并让任务失败，**不静默回退到其他提供方**。
 
+前端入口：工作台「工具与配置」页（`frontend/src/Inspection.tsx::ProviderConfigPanel`）读写本接口。页面读取生效值并显示凭据是否配置；提交时只发送被改动的字段，清空某项并按保存 = 清除该覆盖（回退环境配置），凭据输入框留空表示不修改；「清除覆盖并回退环境配置」一次性清除 `model`/`base_url`/`api_key`/`temperature`。响应不含密钥，因此页面无法回显密钥原值。
+
 ## 6. 规划接口（当前未实现）
 
 下列接口已列入设计方向，但当前 FastAPI 不提供路由，前端不得直接调用：
@@ -398,7 +400,8 @@ POST /api/v1/agents/{agent_id}/run
 - 初始化顺序：并行调用 `GET /agents` 与 `POST /sessions`。
 - 发送消息后保存 `workflow_id`，每 2 秒轮询一次 Workflow；终态为 `completed`、`failed`、`cancelled` 时停止轮询。
 - Token 与调用明细由 §5 读取；区分加载、失败、未接入、无记录、有记录，运行时轮询，终态补刷。切换 Workflow 时丢弃旧请求结果；调用和指标独立失败，不能阻断会话功能。主决策 Agent 选择仍为预览，任务标题取用户消息摘要。
-- 配置写入（§5.7、§5.8 的 `PUT`）当前没有前端入口：写接口需要 `ADMIN_TOKEN`，令牌不能下发到浏览器。前端若要展示生效配置，只读取 §5.1 / §4.9 / §5.2，以及 §5.8 的 `GET`（该接口不返回密钥，可以安全展示）。
+- Provider 配置（§5.8）已有前端入口：写接口需要 `ADMIN_TOKEN`，而**令牌不由服务端下发**——由操作者在页面上手动输入，只保留在页面内存（不写 `localStorage`/`sessionStorage`，不入日志、不入构建产物），刷新页面后需重新输入。服务端未配置 `ADMIN_TOKEN` 时写入一律 `403`，页面按 403 提示令牌缺失或不正确。其余只读展示继续走 §5.1 / §4.9 / §5.2 与 §5.8 的 `GET`。
+- Agent 覆盖（§5.7 的 `PATCH`）仍没有前端入口：它只调整角色模型与温度，本期经脚本或接口直接调用。
 - Agent 执行台根据 Workflow 的 `checkpoint.completed_steps` 与 `current_step` 展示阶段状态；不得在无 Workflow 时预填三张 Agent 卡片。
 
 ## 8. 版本与变更规则

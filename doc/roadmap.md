@@ -37,7 +37,7 @@
 | 流水线接入 MCP 工具并验收 | A | 代码完成，验收未闭环 | 编排层冻结工具契约（`ToolSpec`/`ToolCall`/`ToolCallRecord`/`ToolRegistry`）与模型驱动的 ReAct 调用循环，阶段载荷回传 `tool_calls`，注册表缺失时保持原行为（ADR-009）；并补充结构化行为日志（ADR-010）。代码与单元级证据齐备，但真实模型路径未产生工具调用，验收证据待补 |
 | 支持工具调用审计落库 | B | 已完成 | `tool_calls` 表与 `app/core/tool_audit.py`：先写 running 再执行，成功/失败回写，按 `call_id` 幂等缓存、并发重放拒绝；阶段活动透传 `run_id`/`workflow_run_id` 接入审计（ADR-011） |
 | 完成内置工具、沙箱、可观测接入 | C | 已完成（代码与单元级证据） | `app/tools` 四个内置工具（计算器 AST 白名单、网页搜索、沙箱代码执行、只读 SQL）、`app/sandbox` 策略层 + Docker 隔离后端、`app/mcp` Server/Client/注册表（inprocess/stdio/http 三种传输）、`app/observability` 追踪 + Prometheus 指标 + `metrics` 采样 + 模型回调（ADR-012） |
-| 展示调用链路与 Token 统计 | D | 已完成（只读层与接线） | 新增只读接口 `/providers`、`/agents/{id}`、`/tools`、`/workflows/{id}/tool-calls`、`/metrics`，Web 工作台接入工具调用详情与 Token 采样展示（`doc/api.md` §5）；`app/api/main.py` 已注入 `tool_catalog` 并新增 Prometheus 文本端点 `/metrics`（`doc/api.md` §5.6），2026-09-15 补齐 |
+| 展示调用链路与 Token 统计 | D | 已完成（含 Provider 配置写入面板） | 新增只读接口 `/providers`、`/agents/{id}`、`/tools`、`/workflows/{id}/tool-calls`、`/metrics`，Web 工作台接入工具调用详情与 Token 采样展示（`doc/api.md` §5）；`app/api/main.py` 已注入 `tool_catalog` 并新增 Prometheus 文本端点 `/metrics`（`doc/api.md` §5.6），2026-09-15 补齐；同日「工具与配置」页新增 Provider 配置表单，读写 §5.8（含 403 提示、清空即回退环境配置、清除覆盖按钮），令牌由操作者手动输入且只留内存 |
 
 - **M4 代码落地情况（2026-09-15）**：代码侧原缺口已全部落地——MCP 注册表与 4 个内置工具、工具沙箱隔离、
   OpenTelemetry 追踪、Prometheus 指标采集（ADR-012）；读取接线（工具目录注入与
@@ -113,6 +113,13 @@
   `tests/integration/test_provider_config_api.py`（15 例），覆盖 Provider 配置的
   合并顺序、Redis 镜像降级、密钥脱敏与 §5.8 契约；默认提供方改为 OpenAI 兼容 API
   （ADR-014），`tests/test_langgraph_agent.py` 同步更新默认值与缺凭据 fail-fast 用例。
+- 2026-09-15（前端配置面板落地后）：`npm --prefix frontend run build` → 通过
+  （`tsc --noEmit && vite build`）。后端真实链路冒烟（本机 PostgreSQL 5433 +
+  Redis 6380 + uvicorn，`ADMIN_TOKEN` 已配置）：无令牌/错误令牌 `PUT` → `403
+  CONFIG_WRITE_FORBIDDEN`；正确令牌 `PUT` → `200` 且响应与回读都不含密钥；
+  `/providers` 反映合并后的生效值；删除 `provider:config` 缓存后 `GET` 仍返回
+  存储值并自动回填。冒烟写入的行与缓存键已清理。前端目前没有测试框架，
+  门禁是类型检查 + 构建，见 `doc/testing.md` §3.3。
 - 注意事项：数据库读取用例使用 SQLite 内存表与注入目录数据，MCP 用例走内存协议往返而非
   跨进程 stdio，因此不代表真实 PostgreSQL、真实 MCP Server 或浏览器端到端验收。
 

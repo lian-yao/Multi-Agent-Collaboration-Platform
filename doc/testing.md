@@ -92,6 +92,22 @@ pytest 集成用例尚未落地，E-03 仍按 M5 手工验收。
 - 断言：全部会话完成、无 5xx 比例超过阈值、平均延迟记录在报告；
 - 指标从 Prometheus 导出 Token 消耗与工具调用成功率。
 
+### 3.3 前端验证现状（成员 D）
+
+前端当前**没有测试框架**，自动化门禁是类型检查 + 构建：`npm --prefix frontend run build`
+（`tsc --noEmit && vite build`）。因此前端改动按「构建通过 + 真实后端冒烟」两步验证，
+不把构建通过当作功能验收。
+
+Provider 配置面板（`frontend/src/Inspection.tsx::ProviderConfigPanel`）的验证步骤：
+
+1. 起后端（真实 PostgreSQL + Redis，配置 `ADMIN_TOKEN`）与 `npm run dev`；
+2. 「工具与配置」页应显示生效的 provider/model/地址/温度与凭据状态；
+3. 不填或填错管理员令牌提交 → 页面提示 403，配置不变；
+4. 填对令牌、改模型或地址提交 → 提示已保存，页面回读生效值，关键字段不出现密钥；
+5. 点「清除覆盖并回退环境配置」→ 页面回到环境配置值。
+
+浏览器端的自动化用例（Playwright 之类）尚未引入，属后续增量。
+
 ## 4. 里程碑验收清单
 
 | 里程碑 | 必须通过的用例 |
@@ -99,7 +115,7 @@ pytest 集成用例尚未落地，E-03 仍按 M5 手工验收。
 | M1（单 Agent） | U-01、U-02、U-03 |
 | M2（Dapr 持久化） | I-01、I-02、I-03 |
 | M3（多 Agent） | U-04、U-05、I-04、I-05、E-03 手工版 |
-| M4（工具 + 可观测） | U-06、U-07、U-08、U-09、U-10、I-06、I-07、I-08、I-09 |
+| M4（工具 + 可观测） | U-06、U-07、U-08、U-09、U-10、I-06、I-07、I-08、I-09、I-10 |
 | M5（交付） | E-01 至 E-05 全部 |
 
 ### 4.1 M4 当前状态（2026-09-15）
@@ -121,7 +137,7 @@ pytest 集成用例尚未落地，E-03 仍按 M5 手工验收。
 | I-07 可观测数据输出 | 通过 | `tests/unit/test_observability_metrics.py`：Span 与属性/异常、指标去重、Prometheus 文本、`metrics` 表写入（SQLite 与表缺失两种路径）、降级不阻塞；`metrics` 表已由 `app/core/checkpoint.py::MetricRecord` 建出，2026-09-15 在真实 PostgreSQL 上跑通采样落库与 `/api/v1/metrics` 读回（16 条采样），真实 Prometheus 上抓到 `backend`/`dapr-sidecar` 两个 `up` target（43 条 `macp_*` 序列），真实 Jaeger 上查到 `stage.run`/`llm.chat` span |
 | I-08 配置热更新 | 通过 | `PATCH /api/v1/config/agents/{agent_id}` 已实现（`doc/api.md` §5.7、ADR-013）：覆盖写 `agent_configs`，阶段活动执行时解析生效配置，无需重启；单元用例 `tests/unit/test_agent_config.py`（合并/校验/回退/表契约），集成用例 `tests/integration/test_config_api.py`（403/404/422/503/200 与生效值）；真实 PostgreSQL 上已跑通写入—读回—新执行生效 |
 | I-09 只读巡检接口 | 通过 | `tests/integration/test_inspection_api.py`；覆盖分页、`availability` 区分「未接入」与「零条记录」、默认工具目录接线（`/tools` 返回 4 个注册工具）与 Prometheus 文本端点（`/metrics`）；用 SQLite 内存表与注入目录数据，不等于真实 PostgreSQL/MCP 验收 |
-| I-10 Provider 配置读写 | 单元级 + 集成级通过，真实环境未验收 | `tests/unit/test_provider_config.py`（26 例：表契约、合并顺序、Redis 命中/回源/回填、镜像失败降级、密钥脱敏、字段校验）与 `tests/integration/test_provider_config_api.py`（15 例：403/422/503/200、显式 null 清除、provider 切换）；用内存覆盖表与内存 Redis 替身，不等于真实 PostgreSQL/Redis 验收 |
+| I-10 Provider 配置读写 | 通过（含真实环境冒烟） | 单元与集成用例：`tests/unit/test_provider_config.py`（26 例：表契约、合并顺序、Redis 命中/回源/回填、镜像失败降级、密钥脱敏、字段校验）与 `tests/integration/test_provider_config_api.py`（15 例：403/422/503/200、显式 null 清除、provider 切换）。2026-09-15 真实环境冒烟（本机 PostgreSQL 5433 + Redis 6380 + uvicorn）：无令牌/错误令牌 `PUT` → `403 CONFIG_WRITE_FORBIDDEN`；正确令牌 `PUT` → `200` 且响应不含密钥；`GET` 回读生效值；`/providers` 反映新值；删除 `provider:config` 后 `GET` 仍返回存储值并自动回填缓存。测试数据已清理 |
 
 运行命令与结果：`uv run pytest -q` → **288 passed / 1 failed**。
 
