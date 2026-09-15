@@ -115,7 +115,7 @@ pytest 集成用例尚未落地，E-03 仍按 M5 手工验收。
 | U-10 行为日志事件 | 通过 | `tests/unit/test_observability.py`（ADR-010） |
 | I-06 MCP 工具发现与调用 | 部分 | `tests/unit/test_mcp_tools.py` 走 `mcp.shared.memory` 的**真实 MCP 协议往返**（发现、调用、错误还原、目录）；真实 PostgreSQL 上的 `tool_calls` 落库与读回已于 2026-09-15 验收（`calculator` `21*2`→`42`，`GET /workflows/{id}/tool-calls` 返回 1 条）；缺跨进程 stdio |
 | I-07 可观测数据输出 | 通过 | `tests/unit/test_observability_metrics.py`：Span 与属性/异常、指标去重、Prometheus 文本、`metrics` 表写入（SQLite 与表缺失两种路径）、降级不阻塞；`metrics` 表已由 `app/core/checkpoint.py::MetricRecord` 建出，2026-09-15 在真实 PostgreSQL 上跑通采样落库与 `/api/v1/metrics` 读回（16 条采样），真实 Prometheus 上抓到 `backend`/`dapr-sidecar` 两个 `up` target（43 条 `macp_*` 序列），真实 Jaeger 上查到 `stage.run`/`llm.chat` span |
-| I-08 配置热更新 | 未实现 | `PATCH /api/v1/config/agents/{agent_id}` 未实现（`doc/api.md` §6） |
+| I-08 配置热更新 | 通过 | `PATCH /api/v1/config/agents/{agent_id}` 已实现（`doc/api.md` §5.7、ADR-013）：覆盖写 `agent_configs`，阶段活动执行时解析生效配置，无需重启；单元用例 `tests/unit/test_agent_config.py`（合并/校验/回退/表契约），集成用例 `tests/integration/test_config_api.py`（403/404/422/503/200 与生效值）；真实 PostgreSQL 上已跑通写入—读回—新执行生效 |
 | I-09 只读巡检接口 | 通过 | `tests/integration/test_inspection_api.py`；覆盖分页、`availability` 区分「未接入」与「零条记录」、默认工具目录接线（`/tools` 返回 4 个注册工具）与 Prometheus 文本端点（`/metrics`）；用 SQLite 内存表与注入目录数据，不等于真实 PostgreSQL/MCP 验收 |
 
 运行命令与结果：`uv run pytest -q` → **288 passed / 1 failed**。
@@ -129,6 +129,12 @@ C 落地注册表后 `default_tool_registry()` 不再返回 `None`，前置条�
 2026-09-15（M4 收口后）：`uv run pytest -q` → **294 passed / 1 failed**，
 失败项与上面同一处，仍属成员 A 的过期前置条件；新增
 `tests/unit/test_metrics_table_schema.py` 校验 `metrics` 表 DDL 与索引契约。
+
+2026-09-15（I-08 落地后）：`uv run pytest -q` → **322 passed / 1 failed**，
+失败项仍是上面同一处。新增 `tests/unit/test_agent_config.py`（13 例：表契约、
+合并回退、provider 字段映射、读取失败回退、校验与审计日志）与
+`tests/integration/test_config_api.py`（15 例：403 fail-closed、200 生效值、
+局部更新、显式 null 清除、404、422、503）。
 
 ## 5. 失败处理约定
 

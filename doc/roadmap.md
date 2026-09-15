@@ -63,7 +63,15 @@
   追踪导出原先没有任何调用点（`configure_tracing()` 只在测试里被调用，真实运行中
   span 全进空操作 Tracer），本轮在 `app/workflows/worker.py::main()` 启动时补上配置，
   属成员 B 的 worker 入口。
-- **其他未实现**：`PATCH /api/v1/config/agents/{agent_id}` 配置热更新（见 `doc/api.md` §6）。
+- **I-08 配置热更新（2026-09-15 补齐）**：`PATCH /api/v1/config/agents/{agent_id}`
+  已实现（`doc/api.md` §5.7、ADR-013），覆盖值落 `agent_configs`，阶段活动执行时解析，
+  无需重启进程；写接口以 `ADMIN_TOKEN` 做 fail-closed 权限边界。
+  真实环境验收：在宿主机 API（配了 `ADMIN_TOKEN`）把 `analyst` 的 model 覆盖成
+  `qwen2.5-coder:7b-does-not-exist` 后，**未重启**的容器 backend 立刻在
+  `GET /agents/analyst` 返回覆盖值，下一次 Workflow 在 analyze 阶段失败于
+  `ResponseError: model 'qwen2.5-coder:7b-does-not-exist' not found (404)`
+  （collect 已用环境配置跑完）；清除覆盖后再次提交任务恢复 `completed`。
+  容器未配置 `ADMIN_TOKEN` 时同一请求返回 `403 CONFIG_WRITE_FORBIDDEN`。
 
 ### 验证记录
 
