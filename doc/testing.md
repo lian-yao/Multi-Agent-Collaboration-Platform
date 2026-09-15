@@ -121,19 +121,20 @@ Provider 配置面板（`frontend/src/Inspection.tsx::ProviderConfigPanel`）的
 ### 4.1 M4 当前状态（2026-09-15）
 
 成员 C 的 D7-8（内置工具/沙箱/可观测接入）落地后的实测状态。
-**M4 代码完成、验收未闭环**（口径与 `doc/roadmap.md` D7-D8 一致）：代码与测试
-证据齐备（`uv run pytest -q` → 323 passed / 0 failed），但 U-09/I-06 在真实模型
-路径下的端到端验收未通过，剩余缺口已不在 C 侧，见每行的「缺口」。
-**测试全绿 ≠ M4 完成**，缺口的判定依据是验收证据而不是用例数量。
+**M4 已完成（2026-09-15 验收通过）**（口径与 `doc/roadmap.md` D7-D8 一致）：
+真实 Dapr Workflow + OpenAI 兼容 API（`deepseek-flash`）产出了工具调用并落审计表，
+详见文末验证记录与 `doc/roadmap.md`。
+**注意判定标准**：M4 的完成依据是「真实模型路径下的验收证据」，而不是用例数量——
+测试全绿曾是 M4 未闭环时的状态，因此不能用测试结果替代验收。
 
 | 用例 | 状态 | 证据 / 缺口 |
 | --- | --- | --- |
 | U-06 工具函数独立行为 | 通过 | `tests/unit/test_builtin_tools.py`：计算器返回值与拒绝面、只读 SQL 校验与真实只读执行、注册表发现/调用、`web_search` 注入 fetcher 的离线解析（ADR-012） |
 | U-07 工具调用幂等键 | 通过 | `tests/unit/test_tool_audit.py`（ADR-011） |
 | U-08 沙箱边界拒绝越权 | 通过 | `tests/unit/test_sandbox_policy.py`：Python/Shell 越权拒绝、策略先于后端、`denied` 后端不降级执行（ADR-012） |
-| U-09 流水线接入 MCP 工具 | 单元级通过，真实路径未验收 | `tests/unit/test_pipeline_tools.py`（15 例全绿，含「阶段活动消费默认注册表」，ADR-009）；假模型返回规范 `tool_calls`，真实模型返回裸 JSON、流水线不产生调用，故该用例不能作为 M4 验收证据 |
+| U-09 流水线接入 MCP 工具 | 通过（含真实模型验收） | `tests/unit/test_pipeline_tools.py`（15 例全绿，含「阶段活动消费默认注册表」，ADR-009）。真实路径已验收：API 模型下 collector/analyst 两阶段各产生一次 `calculator` 调用（`21*2`、`21+21`，`succeeded`） |
 | U-10 行为日志事件 | 通过 | `tests/unit/test_observability.py`（ADR-010） |
-| I-06 MCP 工具发现与调用 | 部分 | `tests/unit/test_mcp_tools.py` 走 `mcp.shared.memory` 的**真实 MCP 协议往返**（发现、调用、错误还原、目录）；真实 PostgreSQL 上的 `tool_calls` 落库与读回已于 2026-09-15 验收（`calculator` `21*2`→`42`，`GET /workflows/{id}/tool-calls` 返回 1 条）；缺跨进程 stdio |
+| I-06 MCP 工具发现与调用 | 通过（缺跨进程 stdio） | `tests/unit/test_mcp_tools.py` 走 `mcp.shared.memory` 的**真实 MCP 协议往返**（发现、调用、错误还原、目录）；真实流水线验收（2026-09-15）：Workflow 内 2 次 `calculator` 调用落 `tool_calls` 并读回（`21*2`、`21+21` → `42`）；仍缺跨进程 stdio 传输的端到端用例 |
 | I-07 可观测数据输出 | 通过 | `tests/unit/test_observability_metrics.py`：Span 与属性/异常、指标去重、Prometheus 文本、`metrics` 表写入（SQLite 与表缺失两种路径）、降级不阻塞；`metrics` 表已由 `app/core/checkpoint.py::MetricRecord` 建出，2026-09-15 在真实 PostgreSQL 上跑通采样落库与 `/api/v1/metrics` 读回（16 条采样），真实 Prometheus 上抓到 `backend`/`dapr-sidecar` 两个 `up` target（43 条 `macp_*` 序列），真实 Jaeger 上查到 `stage.run`/`llm.chat` span |
 | I-08 配置热更新 | 通过 | `PATCH /api/v1/config/agents/{agent_id}` 已实现（`doc/api.md` §5.7、ADR-013）：覆盖写 `agent_configs`，阶段活动执行时解析生效配置，无需重启；单元用例 `tests/unit/test_agent_config.py`（合并/校验/回退/表契约），集成用例 `tests/integration/test_config_api.py`（404/422/503/200 与生效值，裸请求可写见 ADR-015）；真实 PostgreSQL 上已跑通写入—读回—新执行生效 |
 | I-09 只读巡检接口 | 通过 | `tests/integration/test_inspection_api.py`；覆盖分页、`availability` 区分「未接入」与「零条记录」、默认工具目录接线（`/tools` 返回 4 个注册工具）与 Prometheus 文本端点（`/metrics`）；用 SQLite 内存表与注入目录数据，不等于真实 PostgreSQL/MCP 验收 |
@@ -173,6 +174,16 @@ API 模型下跑通工具调用**，因此 M4 仍是「代码完成、验收未�
 其中两例为参数化），改为各留 1 例「裸请求即可写入」；`AdminSettings` 与
 `get_admin_settings()` 一并移除，因此用例总数下降属于预期，不是跳过或删除有效断言。
 `npm --prefix frontend run build` 通过（前端同步删除令牌输入框与 403 分支）。
+
+2026-09-15（M4 真实验收，缺口二关闭）：compose 容器栈 + `deepseek-flash` 真实运行。
+提交「用 calculator 计算 21*2」后 Workflow `completed`（collect → analyze → report），
+`GET /workflows/{id}/tool-calls` 返回 **2 条** `calculator` 记录（`21*2`、`21+21`，
+均 `succeeded`，输出 `{"value": 42}`），报告正文引用 `42`；
+`GET /metrics?workflow_id=...` 返回 **20 条**采样，含各阶段 Token
+（943/77/1020、1216/128/1344、1858/1193/3051）与 `tool_calls` 指标。
+同一任务在 `deepseek-v4-pro` 上也产生 1 条成功调用，可作对照。
+据此 M4 由「代码完成、验收未闭环」转为**已完成**；U-09/I-06 的剩余缺口只剩
+跨进程 stdio 传输与浏览器端自动化，不影响 M4 结论。
 
 ## 5. 失败处理约定
 

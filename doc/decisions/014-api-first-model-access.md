@@ -68,9 +68,10 @@ M4 只能记为「代码完成、验收未闭环」（见 `doc/roadmap.md`）。
 
 ## 影响
 
-- **缺口二的验收方式改变**：从「本地 Ollama 产出工具调用」改为「API 模型下真实
-  Workflow 产出工具调用并落 `tool_calls` 表」。在拿到可用密钥并跑通真实链路之前，
-  M4 仍记为「代码完成、验收未闭环」，本 ADR 不构成验收通过的证据。
+- **缺口二已关闭（2026-09-15）**：验收方式从「本地 Ollama 产出工具调用」改为
+  「API 模型下真实 Workflow 产出工具调用并落 `tool_calls` 表」，并已按后者验收通过：
+  `deepseek-flash` 真实运行产出 2 条 `calculator` 调用（`succeeded`），
+  报告正文引用工具返回值；证据见 `doc/roadmap.md` 与 `doc/testing.md` 验证记录。
 - **改动跨成员范围**：`app/config.py` 与 `app/orchestration/llm.py` 的模型接入属
   成员 C 的职责（`分工.md` §2「多模型接入」），本次由成员 A 按用户指示跨范围实现，
   `provider_configs` 建表落在 `app/core/checkpoint.py`、镜像与合并逻辑落在
