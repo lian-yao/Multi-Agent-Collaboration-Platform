@@ -1,4 +1,4 @@
-"""Agent 配置覆盖：读时合并与写入校验（`doc/api.md` §5.7、ADR-013）。
+"""Agent 配置覆盖：读时合并与写入校验（`doc/api.md` §5.7、ADR-013、ADR-017）。
 
 职责边界：
 
@@ -6,11 +6,17 @@
 - 合并规则与校验 → 本模块；
 - HTTP 契约与权限边界 → `app/api/main.py`（成员 D）。
 
-关键约定（ADR-013）：
+关键约定（ADR-013、ADR-017）：
 
-1. 只存覆盖字段，列值为 NULL 表示回退环境配置；
+1. 只存覆盖字段，列值为 NULL 表示回退下一层配置；
 2. 读取失败回退环境配置并记日志（配置读取不阻断业务）；
 3. 写入失败由调用方显式暴露（API 返回 503），本模块不做静默降级。
+
+合并顺序（低 → 高，逐字段回退）：
+环境配置 → `provider_configs.default_llm_model_id` → `provider_configs` legacy 五列
+→ 本模块的角色覆盖。角色覆盖里 `llm_model_id` 先解析成 Provider 端点与特化参数，
+再被同一行的 `model` / `temperature` / `top_p` / `max_output_tokens` / `reasoning_type`
+逐项覆盖。
 """
 
 from __future__ import annotations
@@ -27,12 +33,28 @@ from app.observability.logging import get_logger, log_event
 logger = get_logger("core.agent_config")
 
 MODEL_MAX_LENGTH = 200
+MODEL_ID_MAX_LENGTH = 80
 TEMPERATURE_MIN = 0.0
 TEMPERATURE_MAX = 2.0
+TOP_P_MIN = 0.0
+TOP_P_MAX = 1.0
+REASONING_TYPES = ("none", "openai", "gemini", "anthropic")
+
+OVERRIDE_FIELDS = (
+    "model",
+    "temperature",
+    "llm_model_id",
+    "top_p",
+    "max_output_tokens",
+    "reasoning_type",
+)
+"""可覆盖字段名；`override_keys`（§5.7）就是其中当前非 NULL 的那些。"""
 
 __all__ = [
     "AgentConfigError",
+    "OVERRIDE_FIELDS",
     "agent_config_overrides",
+    "effective_override_keys",
     "resolve_agent_settings",
     "update_agent_config",
 ]
@@ -53,6 +75,36 @@ def _validate_model(model: str) -> str:
     return resolved
 
 
+def _validate_llm_model_id(value: Any) -> str:
+    if not isinstance(value, str):
+        raise AgentConfigError("llm_model_id 必须是字符串")
+    resolved = value.strip()
+    if not resolved:
+        raise AgentConfigError("llm_model_id 不能为空（清除请显式传 null）")
+    if len(resolved) > MODEL_ID_MAX_LENGTH:
+        raise AgentConfigError(f"llm_model_id 不能超过 {MODEL_ID_MAX_LENGTH} 个字符")
+    if not _model_exists(resolved):
+        raise AgentConfigError(f"llm_model_id 指向的模型不存在：{resolved}")
+    return resolved
+
+
+def _model_exists(model_id: str) -> bool:
+    """注册表读不到时不拦截写入：最终写入会因存储不可用返回 503，
+    用一次读取失败换取「模型不存在」的假象更难排查（与 provider_config 同构）。"""
+
+    try:
+        return checkpoint.get_llm_model(model_id) is not None
+    except Exception as exc:
+        log_event(
+            logger,
+            "config.agent.model_check_skipped",
+            level=logging.WARNING,
+            llm_model_id=model_id,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        return True
+
+
 def _validate_temperature(temperature: float) -> float:
     if isinstance(temperature, bool) or not isinstance(temperature, (int, float)):
         raise AgentConfigError("temperature 必须是数值")
@@ -60,6 +112,34 @@ def _validate_temperature(temperature: float) -> float:
     if resolved < TEMPERATURE_MIN or resolved > TEMPERATURE_MAX:
         raise AgentConfigError(
             f"temperature 必须在 {TEMPERATURE_MIN}–{TEMPERATURE_MAX} 之间"
+        )
+    return resolved
+
+
+def _validate_top_p(top_p: float) -> float:
+    if isinstance(top_p, bool) or not isinstance(top_p, (int, float)):
+        raise AgentConfigError("top_p 必须是数值")
+    resolved = float(top_p)
+    if resolved < TOP_P_MIN or resolved > TOP_P_MAX:
+        raise AgentConfigError(f"top_p 必须在 {TOP_P_MIN}–{TOP_P_MAX} 之间")
+    return resolved
+
+
+def _validate_max_output_tokens(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise AgentConfigError("max_output_tokens 必须是整数")
+    if value < 1:
+        raise AgentConfigError("max_output_tokens 必须 ≥ 1")
+    return value
+
+
+def _validate_reasoning_type(value: Any) -> str:
+    if not isinstance(value, str):
+        raise AgentConfigError("reasoning_type 必须是字符串")
+    resolved = value.strip()
+    if resolved not in REASONING_TYPES:
+        raise AgentConfigError(
+            f"reasoning_type 必须是 {' 或 '.join(REASONING_TYPES)}"
         )
     return resolved
 
@@ -81,6 +161,14 @@ def agent_config_overrides() -> dict[str, dict[str, Any]]:
     return {row["agent_id"]: row for row in rows}
 
 
+def effective_override_keys(row: dict[str, Any] | None) -> list[str]:
+    """该角色当前**被显式覆盖**的字段名（§5.7 的 `override_keys`）。"""
+
+    if not row:
+        return []
+    return [field for field in OVERRIDE_FIELDS if row.get(field) is not None]
+
+
 def resolve_agent_settings(
     agent_id: str,
     base: AgentSettings | None = None,
@@ -88,13 +176,11 @@ def resolve_agent_settings(
     overrides: dict[str, dict[str, Any]] | None = None,
     provider_row: dict[str, Any] | None = UNSET,
 ) -> AgentSettings:
-    """把运行期 Provider 配置与角色覆盖值依次合并进环境配置，返回生效配置。
+    """把默认路由、legacy 覆盖与角色覆盖依次合并进环境配置，返回生效配置。
 
     `overrides` 用于调用方（例如 API 进程或测试）注入已读取的覆盖行，
     缺省时从 `agent_configs` 读取；`provider_row` 同理，缺省时经
     `app/core/provider_config.py` 读取（Redis → PostgreSQL → 环境回退）。
-
-    合并顺序：环境配置 → Provider 覆盖（ADR-014）→ 角色覆盖（ADR-013）。
     """
 
     resolved = resolve_provider_settings(base or get_settings(), row=provider_row)
@@ -104,17 +190,64 @@ def resolve_agent_settings(
         return resolved
 
     updates: dict[str, Any] = {}
+
+    # 1) 注册表引用：重新指向该模型所属 Provider 的端点、凭据与特化参数。
+    llm_model_id = override.get("llm_model_id")
+    if llm_model_id:
+        registry_updates = _registry_overrides(str(llm_model_id))
+        if registry_updates:
+            resolved = resolved.model_copy(update=registry_updates)
+
+    # 2) 同行的逐字段覆盖：优先级最高。
     model = override.get("model")
     temperature = override.get("temperature")
+    top_p = override.get("top_p")
+    max_output_tokens = override.get("max_output_tokens")
+    reasoning_type = override.get("reasoning_type")
     if model:
         updates[_model_field(resolved)] = model
     if temperature is not None:
         updates["temperature"] = temperature
+    if top_p is not None:
+        updates["top_p"] = top_p
+    if max_output_tokens is not None:
+        updates["max_tokens"] = max_output_tokens
+    if reasoning_type is not None:
+        updates["reasoning_type"] = reasoning_type
     return resolved.model_copy(update=updates) if updates else resolved
 
 
+def _registry_overrides(model_id: str) -> dict[str, Any]:
+    """注册表读取失败或引用悬空时返回空字典（不阻断阶段执行）。"""
+
+    from app.core.model_registry import resolve_provider_settings_from_model
+
+    try:
+        resolved = resolve_provider_settings_from_model(model_id)
+    except Exception as exc:
+        log_event(
+            logger,
+            "config.agent.model_unavailable",
+            level=logging.WARNING,
+            llm_model_id=model_id,
+            error=f"{type(exc).__name__}: {exc}",
+            hint="回退环境配置",
+        )
+        return {}
+    if resolved is None:
+        log_event(
+            logger,
+            "config.agent.model_dangling",
+            level=logging.WARNING,
+            llm_model_id=model_id,
+            hint="条目或其 Provider 不存在，按未绑定处理",
+        )
+        return {}
+    return resolved[0]
+
+
 def _model_field(settings: AgentSettings) -> str:
-    """覆盖值落在当前 provider 对应的模型字段上（provider 不通过 API 修改）。"""
+    """覆盖值落在当前 provider 对应的模型字段上（provider 不通过本模块修改）。"""
 
     return "ollama_model" if settings.llm_provider == "ollama" else "openai_model"
 
@@ -124,6 +257,10 @@ def update_agent_config(
     *,
     model: Any = UNSET,
     temperature: Any = UNSET,
+    llm_model_id: Any = UNSET,
+    top_p: Any = UNSET,
+    max_output_tokens: Any = UNSET,
+    reasoning_type: Any = UNSET,
     actor: str | None = None,
 ) -> dict[str, Any]:
     """校验并写入覆盖值，成功后记审计日志；返回写入后的覆盖行。
@@ -136,11 +273,23 @@ def update_agent_config(
         model = _validate_model(model)
     if temperature is not UNSET and temperature is not None:
         temperature = _validate_temperature(temperature)
+    if llm_model_id is not UNSET and llm_model_id is not None:
+        llm_model_id = _validate_llm_model_id(llm_model_id)
+    if top_p is not UNSET and top_p is not None:
+        top_p = _validate_top_p(top_p)
+    if max_output_tokens is not UNSET and max_output_tokens is not None:
+        max_output_tokens = _validate_max_output_tokens(max_output_tokens)
+    if reasoning_type is not UNSET and reasoning_type is not None:
+        reasoning_type = _validate_reasoning_type(reasoning_type)
 
     row = checkpoint.upsert_agent_config(
         agent_id,
         model=model,
         temperature=temperature,
+        llm_model_id=llm_model_id,
+        top_p=top_p,
+        max_output_tokens=max_output_tokens,
+        reasoning_type=reasoning_type,
         updated_by=actor,
     )
     log_event(
@@ -157,4 +306,6 @@ def update_agent_config(
 def _snapshot(row: dict[str, Any] | None) -> str:
     if not row:
         return "none"
-    return f"model={row['model']},temperature={row['temperature']}"
+    return ",".join(
+        f"{field}={row.get(field)}" for field in OVERRIDE_FIELDS
+    )

@@ -14,7 +14,12 @@
    `AGENT_*` 环境配置并记警告，读取不阻断业务（与 ADR-013 同构）。
 3. **`api_key` 不回传、不落日志**：日志快照只记 `set`/`unset`。
 
-合并顺序：环境配置 → 本模块的存储覆盖 → `agent_configs` 的角色覆盖（ADR-013）。
+合并顺序：环境配置 → `default_llm_model_id` 指向的模型条目 → 本模块的 legacy 五列覆盖
+→ `agent_configs` 的角色覆盖（ADR-013、ADR-017 §2）。
+
+`default_llm_model_id`（ADR-017）是单行表在注册表落地后新增的首选表达：它指向
+`llm_models.id`，从而带出 Provider 端点、凭据与模型特化参数；`provider` / `model` /
+`base_url` / `api_key` / `temperature` 五列保留为直连覆盖，优先级更低。
 """
 
 from __future__ import annotations
@@ -35,6 +40,7 @@ logger = get_logger("core.provider_config")
 PROVIDER_CONFIG_CACHE_KEY = "provider:config"
 ALLOWED_PROVIDERS = ("openai", "ollama")
 MODEL_MAX_LENGTH = 200
+MODEL_ID_MAX_LENGTH = 80
 BASE_URL_MAX_LENGTH = 500
 API_KEY_MAX_LENGTH = 500
 TEMPERATURE_MIN = 0.0
@@ -134,6 +140,7 @@ def _serializable(row: dict[str, Any]) -> dict[str, Any]:
         "base_url": row.get("base_url"),
         "api_key": row.get("api_key"),
         "temperature": row.get("temperature"),
+        "default_llm_model_id": row.get("default_llm_model_id"),
         "updated_by": row.get("updated_by"),
         "updated_at": updated_at.isoformat() if updated_at is not None else None,
     }
@@ -185,13 +192,48 @@ def _base_url_field(provider: str) -> str:
     return "ollama_base_url" if provider == "ollama" else "openai_base_url"
 
 
+def _registry_overrides(model_id: str) -> dict[str, Any]:
+    """把默认模型路由（`llm_models.id`）解析成 `AgentSettings` 更新字段。
+
+    注册表读取失败时返回空字典并记警告：配置读取不阻断业务（同 ADR-013/014）。
+    悬空引用（条目已删除）同样按「未设置」处理（ADR-017）。
+    """
+
+    from app.core.model_registry import resolve_provider_settings_from_model
+
+    try:
+        resolved = resolve_provider_settings_from_model(model_id)
+    except Exception as exc:
+        log_event(
+            logger,
+            "config.provider.default_model_unavailable",
+            level=logging.WARNING,
+            model_id=model_id,
+            error=f"{type(exc).__name__}: {exc}",
+            hint="回退 legacy 列与环境配置",
+        )
+        return {}
+    if resolved is None:
+        log_event(
+            logger,
+            "config.provider.default_model_dangling",
+            level=logging.WARNING,
+            model_id=model_id,
+            hint="条目或其 Provider 不存在，按未设置处理",
+        )
+        return {}
+    return resolved[0]
+
+
 def resolve_provider_settings(
     base: AgentSettings | None = None,
     *,
     row: dict[str, Any] | None = UNSET,  # type: ignore[assignment]
 ) -> AgentSettings:
-    """把运行期 Provider 覆盖值合并进环境配置，返回生效配置。
+    """把默认模型路由与 legacy 覆盖值合并进环境配置，返回生效配置。
 
+    优先级（低 → 高）：环境配置 → `default_llm_model_id` 指向的注册表条目 →
+    legacy 五列（`provider` / `model` / `base_url` / `api_key` / `temperature`）。
     `row` 供调用方注入已读取的覆盖行；缺省时经 Redis/PostgreSQL 读取。
     """
 
@@ -221,6 +263,11 @@ def resolve_provider_settings(
     if temperature is not None:
         updates["temperature"] = temperature
 
+    # 注册表路由优先级高于上面五列：放在最后覆盖（ADR-017 §2）。
+    default_model_id = config.get("default_llm_model_id")
+    if default_model_id:
+        updates.update(_registry_overrides(str(default_model_id)))
+
     return resolved.model_copy(update=updates) if updates else resolved
 
 
@@ -241,7 +288,15 @@ def effective_provider_view(
         "model": model,
         "base_url": sanitize_base_url(base_url),
         "temperature": settings.temperature,
+        "top_p": settings.top_p,
+        "max_tokens": settings.max_tokens,
         "api_key_configured": bool(openai_api_key(settings)),
+        "default_llm_model_id": (config or {}).get("default_llm_model_id"),
+        "llm_model_id": settings.llm_model_id or None,
+        "provider_name": settings.provider_name or None,
+        "preset_type": settings.preset_type,
+        "api_type": settings.api_type,
+        "reasoning_type": settings.reasoning_type,
         "updated_by": (config or {}).get("updated_by"),
         "updated_at": updated_at.isoformat() if hasattr(updated_at, "isoformat") else updated_at,
     }
@@ -305,6 +360,41 @@ def _validate_temperature(temperature: Any) -> float:
     return resolved
 
 
+def _validate_default_llm_model_id(value: Any) -> str:
+    if not isinstance(value, str):
+        raise ProviderConfigError("default_llm_model_id 必须是字符串")
+    resolved = value.strip()
+    if not resolved:
+        raise ProviderConfigError("default_llm_model_id 不能为空（清除请显式传 null）")
+    if len(resolved) > MODEL_ID_MAX_LENGTH:
+        raise ProviderConfigError(
+            f"default_llm_model_id 不能超过 {MODEL_ID_MAX_LENGTH} 个字符"
+        )
+    if not _model_exists(resolved):
+        raise ProviderConfigError(f"default_llm_model_id 指向的模型不存在：{resolved}")
+    return resolved
+
+
+def _model_exists(model_id: str) -> bool:
+    """注册表可用且条目存在才返回 False/True；注册表读不到时不拦截写入。
+
+    写操作最终会因存储不可用而返回 503，用一次读取失败换取「422 说模型不存在」
+    的假象会更难排查，因此这里把读取异常视为「无法判定」。
+    """
+
+    try:
+        return checkpoint.get_llm_model(model_id) is not None
+    except Exception as exc:
+        log_event(
+            logger,
+            "config.provider.default_model_check_skipped",
+            level=logging.WARNING,
+            model_id=model_id,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        return True
+
+
 def update_provider_config(
     *,
     provider: Any = UNSET,
@@ -312,6 +402,7 @@ def update_provider_config(
     base_url: Any = UNSET,
     api_key: Any = UNSET,
     temperature: Any = UNSET,
+    default_llm_model_id: Any = UNSET,
     actor: str | None = None,
 ) -> dict[str, Any]:
     """校验并写入覆盖值，随后刷新 Redis 镜像；返回写入后的覆盖行。
@@ -330,6 +421,8 @@ def update_provider_config(
         api_key = _validate_api_key(api_key)
     if temperature is not UNSET and temperature is not None:
         temperature = _validate_temperature(temperature)
+    if default_llm_model_id is not UNSET and default_llm_model_id is not None:
+        default_llm_model_id = _validate_default_llm_model_id(default_llm_model_id)
 
     # 先校验再读旧值：非法输入不触达存储（也避免为一次 422 建立数据库连接）。
     before = provider_config_row()
@@ -339,6 +432,7 @@ def update_provider_config(
         base_url=base_url,
         api_key=api_key,
         temperature=temperature,
+        default_llm_model_id=default_llm_model_id,
         updated_by=actor,
     )
     _write_mirror(row)
@@ -364,5 +458,6 @@ def _snapshot(row: dict[str, Any] | None) -> str:
             f"base_url={'set' if row.get('base_url') else 'unset'}",
             f"api_key={'set' if row.get('api_key') else 'unset'}",
             f"temperature={row.get('temperature')}",
+            f"default_llm_model_id={row.get('default_llm_model_id')}",
         ]
     )

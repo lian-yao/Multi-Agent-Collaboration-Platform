@@ -29,6 +29,7 @@ def _row(**overrides) -> dict:
         "base_url": None,
         "api_key": None,
         "temperature": None,
+        "default_llm_model_id": None,
         "updated_by": None,
         "updated_at": None,
     }
@@ -46,6 +47,7 @@ def test_provider_configs_table_matches_data_model():
         "base_url",
         "api_key",
         "temperature",
+        "default_llm_model_id",
         "updated_by",
         "updated_at",
     ]
@@ -56,7 +58,10 @@ def test_provider_configs_table_matches_data_model():
     assert "base_url VARCHAR(500)" in ddl
     assert "api_key TEXT" in ddl
     assert "temperature FLOAT" in ddl
+    assert "default_llm_model_id VARCHAR(80)" in ddl
     assert table.primary_key.columns.keys() == ["id"]
+    # 默认路由是逻辑引用：不建外键，条目删除时按未设置处理（ADR-017）。
+    assert table.columns["default_llm_model_id"].foreign_keys == set()
 
 
 def test_resolve_merges_stored_config_over_environment():

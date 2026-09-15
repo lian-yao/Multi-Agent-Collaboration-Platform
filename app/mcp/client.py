@@ -96,6 +96,159 @@ def build_http_session_factory(settings: McpSettings) -> SessionFactory:
     return factory
 
 
+# --------------------------------------------------------------------------- #
+# 注册表条目 → 会话工厂（`doc/api.md` §5.11、ADR-017）
+#
+# 与上面两个工厂的区别：参数来自 `mcp_server_registry` 的**行**（用户配置的多 Server），
+# 而不是全局 `MCP_*` 环境变量。编排层的默认传输仍由 `app/mcp/registry.py` 决定。
+# --------------------------------------------------------------------------- #
+
+
+class McpTransportUnsupported(RuntimeError):
+    """该 transport 当前没有可用的客户端实现（API 层归一化为 502）。"""
+
+
+_SERVER_INFO_ATTRIBUTE = "_macp_server_info"
+"""握手返回的 `serverInfo` 在会话对象上的暂存名。
+
+MCP SDK 的 `ClientSession.initialize()` 只把 `InitializeResult` 作为返回值，
+不在会话上保留；配置页需要展示 Server 自称的名称与版本，所以在工厂里显式暂存。
+"""
+
+
+def _capture_server_info(session: ClientSession, result: Any) -> None:
+    info = getattr(result, "serverInfo", None)
+    payload: dict[str, Any] = {}
+    for key in ("name", "title", "version"):
+        value = getattr(info, key, None)
+        if isinstance(value, str):
+            payload[key] = value
+    setattr(session, _SERVER_INFO_ATTRIBUTE, payload)
+
+
+def build_stdio_session_factory_for(
+    *,
+    command: str,
+    args: Sequence[str] | None = None,
+    env: dict[str, str] | None = None,
+    cwd: str | None = None,
+) -> SessionFactory:
+    parameters = StdioServerParameters(
+        command=command,
+        args=list(args or []),
+        env=dict(env) if env else None,
+        cwd=cwd,
+    )
+
+    @asynccontextmanager
+    async def factory() -> AsyncIterator[ClientSession]:
+        async with stdio_client(parameters) as (read_stream, write_stream):
+            async with ClientSession(read_stream, write_stream) as session:
+                _capture_server_info(session, await session.initialize())
+                yield session
+
+    return factory
+
+
+def build_streamable_http_session_factory_for(
+    *, url: str, headers: dict[str, str] | None = None
+) -> SessionFactory:
+    @asynccontextmanager
+    async def factory() -> AsyncIterator[ClientSession]:
+        from mcp.client.streamable_http import streamablehttp_client
+
+        async with streamablehttp_client(url, headers=dict(headers or {})) as (
+            read,
+            write,
+            _,
+        ):
+            async with ClientSession(read, write) as session:
+                _capture_server_info(session, await session.initialize())
+                yield session
+
+    return factory
+
+
+def build_sse_session_factory_for(
+    *, url: str, headers: dict[str, str] | None = None
+) -> SessionFactory:
+    @asynccontextmanager
+    async def factory() -> AsyncIterator[ClientSession]:
+        from mcp.client.sse import sse_client
+
+        async with sse_client(url, headers=dict(headers or {})) as (
+            read,
+            write,
+        ):
+            async with ClientSession(read, write) as session:
+                _capture_server_info(session, await session.initialize())
+                yield session
+
+    return factory
+
+
+def build_registry_session_factory(entry: dict[str, Any]) -> SessionFactory:
+    """按注册表条目构造会话工厂。
+
+    `ws` 目前没有官方客户端实现，显式抛 `McpTransportUnsupported`，
+    而不是静默退回别的传输（避免把用户配的地址连错）。
+    """
+
+    transport = str(entry.get("transport") or "")
+    if transport == "stdio":
+        return build_stdio_session_factory_for(
+            command=str(entry.get("command") or ""),
+            args=entry.get("args") or [],
+            env=entry.get("env") or {},
+            cwd=entry.get("cwd"),
+        )
+    if transport == "http":
+        return build_streamable_http_session_factory_for(
+            url=str(entry.get("url") or ""), headers=entry.get("headers") or {}
+        )
+    if transport == "sse":
+        return build_sse_session_factory_for(
+            url=str(entry.get("url") or ""), headers=entry.get("headers") or {}
+        )
+    raise McpTransportUnsupported(
+        f"transport={transport or '未设置'} 暂不支持连接，请改用 stdio / http / sse"
+    )
+
+
+def discover_registry_server(
+    entry: dict[str, Any], *, timeout: float = 15.0
+) -> dict[str, Any]:
+    """连接注册表条目、握手并列出工具，返回 `{server_info, tools}`。
+
+    这是 `POST /api/v1/config/mcp/servers/{id}/discover` 的协议侧实现；
+    落库与错误码映射由上层负责。工具条目保留 `input_schema`，
+    由目录接口决定是否下发（§5.11 的紧凑目录默认不内联）。
+    """
+
+    factory = build_registry_session_factory(entry)
+    bridge = _SessionBridge(factory, timeout)
+    try:
+        result = bridge.run(lambda session: session.list_tools(), timeout=timeout)
+        tools = [
+            {
+                "name": str(getattr(tool, "name", "")),
+                "description": str(getattr(tool, "description", "") or ""),
+                "input_schema": _input_schema(tool),
+            }
+            for tool in getattr(result, "tools", [])
+        ]
+        server_info = getattr(bridge.session, _SERVER_INFO_ATTRIBUTE, {}) or {}
+        return {"server_info": dict(server_info), "tools": tools}
+    finally:
+        bridge.close()
+
+
+def _input_schema(tool: Any) -> dict[str, Any]:
+    schema = getattr(tool, "inputSchema", None)
+    return schema if isinstance(schema, dict) else {}
+
+
+
 def _factory_for(settings: McpSettings) -> SessionFactory:
     if settings.transport == "stdio":
         return build_stdio_session_factory(settings)
@@ -155,6 +308,12 @@ class _SessionBridge:
             _await(operation(session)), self._loop
         )
         return future.result(timeout if timeout is not None else self._timeout)
+
+    @property
+    def session(self) -> ClientSession | None:
+        """已建立的会话；未建立时为 None（供发现流程读取握手信息）。"""
+
+        return self._session
 
     def _ensure_session(self) -> ClientSession:
         if self._session is not None:

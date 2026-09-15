@@ -21,6 +21,14 @@ class SqlApiStore:
     def get_session(self, session_id: str) -> dict[str, Any] | None:
         return checkpoint.get_session(session_id)
 
+    def list_sessions(
+        self, *, page: int, page_size: int
+    ) -> tuple[list[dict[str, Any]], int]:
+        return checkpoint.list_sessions(page=page, page_size=page_size)
+
+    def delete_session(self, session_id: str) -> bool:
+        return checkpoint.delete_session(session_id)
+
     def update_session_status(self, session_id: str, status: str) -> dict[str, Any]:
         return checkpoint.update_session_status(session_id, status)
 
@@ -112,6 +120,74 @@ class InMemoryApiStore:
     def get_session(self, session_id: str) -> dict[str, Any] | None:
         row = self.sessions.get(session_id)
         return row.copy() if row else None
+
+    def list_sessions(
+        self, *, page: int, page_size: int
+    ) -> tuple[list[dict[str, Any]], int]:
+        rows = sorted(
+            self.sessions.values(),
+            key=lambda row: row["updated_at"],
+            reverse=True,
+        )
+        total = len(rows)
+        start = (page - 1) * page_size
+        items = []
+        for row in rows[start : start + page_size]:
+            item = row.copy()
+            # 摘要字段：首条用户消息 + 最新 workflow 终态（与 SQL 实现对齐）。
+            user_msgs = sorted(
+                (
+                    m
+                    for m in self.messages.values()
+                    if m["session_id"] == row["id"] and m["role"] == "user"
+                ),
+                key=lambda m: m["created_at"],
+            )
+            if user_msgs:
+                content = (user_msgs[0]["content"] or "").strip()
+                item["title"] = (
+                    content[:60] + ("…" if len(content) > 60 else "")
+                ) if content else "（无文本消息）"
+            else:
+                item["title"] = "（暂无消息）"
+            wfs = [
+                w
+                for w in self.workflows.values()
+                if w["session_id"] == row["id"]
+            ]
+            latest_wf = max(wfs, key=lambda w: w["created_at"]) if wfs else None
+            item["latest_workflow_status"] = latest_wf["status"] if latest_wf else None
+            item["latest_workflow_id"] = latest_wf["id"] if latest_wf else None
+            items.append(item)
+        return items, total
+
+    def delete_session(self, session_id: str) -> bool:
+        if session_id not in self.sessions:
+            return False
+        del self.sessions[session_id]
+        # 自底向上清理关联数据，与 SQL 实现对齐。
+        run_ids = {
+            rid
+            for rid, run in self.agent_runs.items()
+            if run["session_id"] == session_id
+        }
+        wf_ids = {
+            wid
+            for wid, wf in self.workflows.items()
+            if wf["session_id"] == session_id
+        }
+        self.agent_runs = {
+            rid: run for rid, run in self.agent_runs.items() if rid not in run_ids
+        }
+        self.workflows = {
+            wid: wf for wid, wf in self.workflows.items() if wid not in wf_ids
+        }
+        self.messages = {
+            mid: msg
+            for mid, msg in self.messages.items()
+            if msg["session_id"] != session_id
+        }
+        return True
 
     def update_session_status(self, session_id: str, status: str) -> dict[str, Any]:
         row = self.sessions[session_id]

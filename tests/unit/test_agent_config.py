@@ -21,6 +21,10 @@ def test_agent_configs_table_matches_data_model():
         "agent_id",
         "model",
         "temperature",
+        "llm_model_id",
+        "top_p",
+        "max_output_tokens",
+        "reasoning_type",
         "updated_by",
         "updated_at",
     ]
@@ -28,9 +32,15 @@ def test_agent_configs_table_matches_data_model():
     assert "agent_id VARCHAR(50) NOT NULL" in ddl
     assert "model VARCHAR(200)" in ddl
     assert "temperature FLOAT" in ddl
+    assert "llm_model_id VARCHAR(80)" in ddl
+    assert "top_p FLOAT" in ddl
+    assert "max_output_tokens INTEGER" in ddl
+    assert "reasoning_type VARCHAR(20)" in ddl
     assert "updated_by VARCHAR(100)" in ddl
     assert "updated_at TIMESTAMP WITH TIME ZONE NOT NULL" in ddl
     assert table.primary_key.columns.keys() == ["agent_id"]
+    # `llm_model_id` 是逻辑引用：不建外键，条目删除时退化为未绑定（ADR-017）。
+    assert table.columns["llm_model_id"].foreign_keys == set()
 
 
 def test_resolve_applies_override(monkeypatch):
@@ -104,18 +114,49 @@ def test_resolve_falls_back_when_read_fails(monkeypatch, caplog):
     assert "event=config.read_fallback" in caplog.text
 
 
+def _fake_upsert(captured: dict[str, object]):
+    """记录写入字段的替身；默认值镜像 `checkpoint.upsert_agent_config` 的签名。"""
+
+    def fake(
+        agent_id,
+        *,
+        model=UNSET,
+        temperature=UNSET,
+        llm_model_id=UNSET,
+        top_p=UNSET,
+        max_output_tokens=UNSET,
+        reasoning_type=UNSET,
+        updated_by=None,
+    ):
+        captured.update(
+            agent_id=agent_id,
+            model=model,
+            temperature=temperature,
+            llm_model_id=llm_model_id,
+            top_p=top_p,
+            max_output_tokens=max_output_tokens,
+            reasoning_type=reasoning_type,
+            updated_by=updated_by,
+        )
+        return {"agent_id": agent_id}
+
+    return fake
+
+
+_UNTOUCHED = {
+    "llm_model_id": UNSET,
+    "top_p": UNSET,
+    "max_output_tokens": UNSET,
+    "reasoning_type": UNSET,
+    "updated_by": None,
+}
+
+
 def test_update_validates_and_writes(monkeypatch, caplog):
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(checkpoint, "get_agent_config", lambda agent_id: None)
-
-    def fake_upsert(agent_id, *, model=UNSET, temperature=UNSET, updated_by=None):
-        captured.update(
-            agent_id=agent_id, model=model, temperature=temperature, updated_by=updated_by
-        )
-        return {"agent_id": agent_id, "model": model, "temperature": temperature}
-
-    monkeypatch.setattr(checkpoint, "upsert_agent_config", fake_upsert)
+    monkeypatch.setattr(checkpoint, "upsert_agent_config", _fake_upsert(captured))
 
     with caplog.at_level(logging.INFO):
         row = agent_config.update_agent_config(
@@ -126,9 +167,10 @@ def test_update_validates_and_writes(monkeypatch, caplog):
         "agent_id": "collector",
         "model": "new:1b",  # 去空白后写入
         "temperature": 0.4,
+        **_UNTOUCHED,
         "updated_by": "req-1",
     }
-    assert row["model"] == "new:1b"
+    assert row["agent_id"] == "collector"
     assert "event=config.agent.updated" in caplog.text
 
 
@@ -136,19 +178,106 @@ def test_update_passes_unset_and_none_through(monkeypatch):
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(checkpoint, "get_agent_config", lambda agent_id: None)
-
-    def fake_upsert(agent_id, *, model=UNSET, temperature=UNSET, updated_by=None):
-        captured.update(model=model, temperature=temperature)
-        return {"agent_id": agent_id, "model": None, "temperature": None}
-
-    monkeypatch.setattr(checkpoint, "upsert_agent_config", fake_upsert)
+    monkeypatch.setattr(checkpoint, "upsert_agent_config", _fake_upsert(captured))
 
     agent_config.update_agent_config("collector", model=None)
-    assert captured == {"model": None, "temperature": UNSET}
+    assert captured == {
+        "agent_id": "collector",
+        "model": None,
+        "temperature": UNSET,
+        **_UNTOUCHED,
+    }
 
     captured.clear()
     agent_config.update_agent_config("collector", temperature=0.1)
-    assert captured == {"model": UNSET, "temperature": 0.1}
+    assert captured == {
+        "agent_id": "collector",
+        "model": UNSET,
+        "temperature": 0.1,
+        **_UNTOUCHED,
+    }
+
+
+def test_update_writes_specialized_parameters(monkeypatch):
+    """ADR-017 新增的四个覆盖字段：llm_model_id / top_p / max_output_tokens / reasoning_type。"""
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(checkpoint, "get_agent_config", lambda agent_id: None)
+    monkeypatch.setattr(checkpoint, "upsert_agent_config", _fake_upsert(captured))
+    monkeypatch.setattr(
+        checkpoint, "get_llm_model", lambda model_id: {"id": model_id}
+    )
+
+    agent_config.update_agent_config(
+        "analyst",
+        llm_model_id=" gateway-main:gpt-4o ",
+        top_p=0.9,
+        max_output_tokens=2048,
+        reasoning_type="openai",
+    )
+
+    assert captured["llm_model_id"] == "gateway-main:gpt-4o"  # 去空白后写入
+    assert captured["top_p"] == 0.9
+    assert captured["max_output_tokens"] == 2048
+    assert captured["reasoning_type"] == "openai"
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"llm_model_id": "   "},
+        {"top_p": -0.1},
+        {"top_p": 1.1},
+        {"max_output_tokens": 0},
+        {"max_output_tokens": 1.5},
+        {"reasoning_type": "unknown"},
+    ],
+)
+def test_update_rejects_invalid_specialized_parameters(monkeypatch, kwargs):
+    monkeypatch.setattr(checkpoint, "get_agent_config", lambda agent_id: None)
+    monkeypatch.setattr(
+        checkpoint,
+        "upsert_agent_config",
+        lambda *args, **rest: pytest.fail("非法值不应写入"),
+    )
+
+    with pytest.raises(agent_config.AgentConfigError):
+        agent_config.update_agent_config("collector", **kwargs)
+
+
+def test_update_rejects_unknown_llm_model_id(monkeypatch):
+    """`llm_model_id` 必须指向存在的条目，否则 422（§5.7）。"""
+
+    monkeypatch.setattr(checkpoint, "get_agent_config", lambda agent_id: None)
+    monkeypatch.setattr(checkpoint, "get_llm_model", lambda model_id: None)
+    monkeypatch.setattr(
+        checkpoint,
+        "upsert_agent_config",
+        lambda *args, **rest: pytest.fail("悬空引用不应写入"),
+    )
+
+    with pytest.raises(agent_config.AgentConfigError):
+        agent_config.update_agent_config("collector", llm_model_id="missing:1")
+
+
+def test_effective_override_keys_lists_only_non_null_columns():
+    row = {
+        "agent_id": "collector",
+        "model": None,
+        "temperature": 0.3,
+        "llm_model_id": "m-1",
+        "top_p": None,
+        "max_output_tokens": None,
+        "reasoning_type": "none",
+    }
+
+    assert agent_config.effective_override_keys(row) == [
+        "temperature",
+        "llm_model_id",
+        "reasoning_type",
+    ]
+    assert agent_config.effective_override_keys(None) == []
 
 
 @pytest.mark.parametrize(
