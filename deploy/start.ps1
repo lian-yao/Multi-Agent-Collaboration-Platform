@@ -67,8 +67,16 @@ if ($configExitCode -ne 0) {
 }
 
 Write-Host "Starting frontend, backend, Dapr sidecar, Redis, PostgreSQL, Jaeger, and Prometheus..."
+# docker compose 把构建与拉取进度写到 stderr。Windows PowerShell 5.1 在
+# $ErrorActionPreference = "Stop" 下会把原生命令的 stderr 当成终止性错误，
+# 结果镜像构建成功、容器也起来了，脚本却在这里中断：既不执行下面的健康检查，
+# 也不打印访问地址，看起来像部署失败。与上面 docker info / compose version /
+# compose config 的处理保持一致，临时切到 Continue 并用退出码判定成败。
+$ErrorActionPreference = "Continue"
 docker compose -f $composeFile up -d --build --wait --wait-timeout 600
-if ($LASTEXITCODE -ne 0) {
+$upExitCode = $LASTEXITCODE
+$ErrorActionPreference = $previousErrorActionPreference
+if ($upExitCode -ne 0) {
     Write-Error "Docker Compose failed to start services."
 }
 
