@@ -228,6 +228,9 @@ def test_registry_failure_is_recorded_as_failed():
 
 
 def test_role_stage_without_registry_does_not_bind_tools():
+    # app/mcp 落地后 default_tool_registry() 会回退到成员 C 的注册表，
+    # 这里显式构造「没有注册表」的前置条件，而不是依赖模块不存在（ADR-012）。
+    set_tool_registry_factory(lambda: None)
     model = ToolCallingChatModel(tool_name="web_search")
 
     result = run_role_stage(PipelineStage.COLLECT, task="任务", llm=model)
