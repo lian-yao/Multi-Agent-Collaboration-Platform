@@ -2,7 +2,17 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, Index, String, Text, UniqueConstraint
+from sqlalchemy import (
+    BigInteger,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    String,
+    Text,
+    UniqueConstraint,
+    desc,
+)
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -148,6 +158,29 @@ class ToolCall(Base):
     )
 
     __table_args__ = (Index("idx_tool_calls_run", "run_id", "created_at"),)
+
+
+class MetricRecord(Base):
+    """`metrics` 表：观测采样落库（`doc/data-model.md` §3）。
+
+    写入方是 `app/observability/metrics.py::PostgresMetricSink`（按列名反射插入），
+    读取方是只读接口 `GET /api/v1/metrics`；建表只走 `init_checkpoint_schema()`，
+    采样与读取都不建表。
+    """
+
+    __tablename__ = "metrics"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    metric_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    value: Mapped[float] = mapped_column(Float, nullable=False)
+    labels: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+
+    __table_args__ = (
+        Index("idx_metrics_name_time", "metric_name", desc("recorded_at")),
+    )
 
 
 def _tool_call_to_dict(row: ToolCall) -> dict[str, Any]:
