@@ -24,31 +24,39 @@
   （Fake 仅保留为恢复演练开关，见 ADR-007）；最终报告作为 `messages(role=assistant)`
   在终态回写并经 `GET /messages` 返回（见 ADR-008）。
 
-### D7-D8（M4 工具生态与可观测）：完成（2026-09-15）
+### D7-D8（M4 工具生态与可观测）：代码完成，验收未闭环（2026-09-15）
 
-按 `分工.md` §3 的四条分工记录落地情况。**四条分工均已完成**；剩余项集中在
-验证与规划接口，见下一节与 `doc/testing.md` §4.1。
+按 `分工.md` §3 的四条分工记录落地情况。**四条分工的代码均已落地、测试全绿
+（`uv run pytest -q` → 323 passed / 0 failed）；M4 验收未闭环**——A 的分工原文是
+「流水线接入 MCP 工具**并验收**」，当前只有假模型单元级证据，真实模型路径下流水线
+没有产生任何工具调用。验收路径已按 ADR-014 改为由 OpenAI 兼容 API 承担，Ollama
+降为备用。状态口径与 `doc/testing.md` §4.1 一致，**不得只凭测试全绿判定 M4 完成**。
 
 | 分工 | 负责 | 状态 | 落地内容 |
 | --- | --- | --- | --- |
-| 流水线接入 MCP 工具并验收 | A | 已完成 | 编排层冻结工具契约（`ToolSpec`/`ToolCall`/`ToolCallRecord`/`ToolRegistry`）与模型驱动的 ReAct 调用循环，阶段载荷回传 `tool_calls`，注册表缺失时保持原行为（ADR-009）；并补充结构化行为日志（ADR-010） |
+| 流水线接入 MCP 工具并验收 | A | 代码完成，验收未闭环 | 编排层冻结工具契约（`ToolSpec`/`ToolCall`/`ToolCallRecord`/`ToolRegistry`）与模型驱动的 ReAct 调用循环，阶段载荷回传 `tool_calls`，注册表缺失时保持原行为（ADR-009）；并补充结构化行为日志（ADR-010）。代码与单元级证据齐备，但真实模型路径未产生工具调用，验收证据待补 |
 | 支持工具调用审计落库 | B | 已完成 | `tool_calls` 表与 `app/core/tool_audit.py`：先写 running 再执行，成功/失败回写，按 `call_id` 幂等缓存、并发重放拒绝；阶段活动透传 `run_id`/`workflow_run_id` 接入审计（ADR-011） |
 | 完成内置工具、沙箱、可观测接入 | C | 已完成（代码与单元级证据） | `app/tools` 四个内置工具（计算器 AST 白名单、网页搜索、沙箱代码执行、只读 SQL）、`app/sandbox` 策略层 + Docker 隔离后端、`app/mcp` Server/Client/注册表（inprocess/stdio/http 三种传输）、`app/observability` 追踪 + Prometheus 指标 + `metrics` 采样 + 模型回调（ADR-012） |
 | 展示调用链路与 Token 统计 | D | 已完成（只读层与接线） | 新增只读接口 `/providers`、`/agents/{id}`、`/tools`、`/workflows/{id}/tool-calls`、`/metrics`，Web 工作台接入工具调用详情与 Token 采样展示（`doc/api.md` §5）；`app/api/main.py` 已注入 `tool_catalog` 并新增 Prometheus 文本端点 `/metrics`（`doc/api.md` §5.6），2026-09-15 补齐 |
 
-- **M4 落地情况（2026-09-15）**：原缺口已全部落地——MCP 注册表与 4 个内置工具、工具沙箱隔离、
+- **M4 代码落地情况（2026-09-15）**：代码侧原缺口已全部落地——MCP 注册表与 4 个内置工具、工具沙箱隔离、
   OpenTelemetry 追踪、Prometheus 指标采集（ADR-012）；读取接线（工具目录注入与
   Prometheus 文本端点，`doc/api.md` §5.3、§5.6）；`metrics` 建表
   （`app/core/checkpoint.py::MetricRecord` + `init_checkpoint_schema()`，
   `doc/data-model.md` §3）；容器 `OBS_*` 与 Prometheus 抓取配置
   （`backend:8000/metrics`，见 `doc/deployment.md`）。
-  仍在的缺口不在本轮范围：
-  - A 的 `tests/unit/test_pipeline_tools.py::test_role_stage_without_registry_does_not_bind_tools`
-    仍是过期前置条件，测试未全绿（需改为 `set_tool_registry_factory(lambda: None)`）；
+  **M4 验收未闭环的唯一阻塞项（属 A 的 D7-D8 范围，尚未收口）**：
   - 本地 qwen2.5-coder:7b 在真实运行中把工具调用当文本输出（例如
     `{"name": "web_search", "arguments": {...}}`），未返回原生 `tool_calls`，
-    所以真实流水线的审计记录是 0 条；工具审计本身已在真实库上单独验证通过。
-    这是模型/Prompt 行为问题，属 A 的模型接入范围。
+    所以真实流水线没有工具调用、审计记录为 0 条；工具审计链路本身已在真实库上
+    单独验证通过。2026-09-15 复核：Ollama 把该模型标记为 tools-capable，其模板
+    要求调用包裹在 `<tool_call></tool_call>` 内，而实测两次（含显式格式示范的
+    system 提示）均返回裸 JSON，属**指令遵从度问题，不是模型能力缺失**。
+  - 2026-09-15 决策（ADR-014）：模型接入改为「API 优先、Ollama 备用」，
+    Provider 配置（provider/model/base_url/api_key/temperature）由系统保存
+    （`provider_configs` 事实源 + Redis 镜像，`doc/api.md` §5.8）。
+    **待办：拿到可用凭据后在 API 模型下重跑真实 Workflow，产出 `tool_calls`
+    审计记录即可关闭本缺口。**
 - **端到端联调（2026-09-15 已跑通）**：真实 PostgreSQL + Dapr Workflow + Ollama 提交消息
   → Workflow `completed`（collect/analyze/report 三段）→ `metrics` 表写入 16 条采样
   （`stage_duration_ms`、`stage_runs`、`input_tokens`/`output_tokens`/`total_tokens`、
@@ -95,6 +103,16 @@
   `uvicorn app.api.main:app` 后 `/metrics` 返回 6 个 `macp_*` 指标族、
   `/api/v1/tools` 返回 4 个工具且 `availability=available`；
   `promtool check config deploy/prometheus/prometheus.yml` → SUCCESS。
+- 2026-09-15（A 修复过期前置条件后）：`uv run pytest -q` → **323 passed / 0 failed**。
+  `tests/unit/test_pipeline_tools.py::test_role_stage_without_registry_does_not_bind_tools`
+  改用 `set_tool_registry_factory(lambda: None)` 显式构造「没有注册表」的前置条件；
+  该用例原先依赖「`app/mcp` 不存在」，成员 C 落地注册表后 `default_tool_registry()`
+  会回退到真实注册表，前置条件失效（见 ADR-012）。用例意图与断言未改动。
+- 2026-09-15（API 优先接入落地后）：`uv run pytest -q` → **366 passed / 0 failed**。
+  新增 `tests/unit/test_provider_config.py`（26 例）与
+  `tests/integration/test_provider_config_api.py`（15 例），覆盖 Provider 配置的
+  合并顺序、Redis 镜像降级、密钥脱敏与 §5.8 契约；默认提供方改为 OpenAI 兼容 API
+  （ADR-014），`tests/test_langgraph_agent.py` 同步更新默认值与缺凭据 fail-fast 用例。
 - 注意事项：数据库读取用例使用 SQLite 内存表与注入目录数据，MCP 用例走内存协议往返而非
   跨进程 stdio，因此不代表真实 PostgreSQL、真实 MCP Server 或浏览器端到端验收。
 
