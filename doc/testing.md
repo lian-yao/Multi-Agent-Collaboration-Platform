@@ -19,6 +19,11 @@ uv run pytest                              # 全部可用用例
 cd deploy; .\start.ps1                     # 起完整环境
 ```
 
+> **`uv run pytest` 需要可达的 PostgreSQL 与 Redis**（本机 compose 的 `postgres` 与
+> `redis` 即可，见 `doc/deployment.md`）。这两者不可达时，用例**不会快速失败**，而是
+> 长时间阻塞在连接重试上——曾出现 30 分钟仍无结果、起栈后 14.51s 跑完（成员 D D9-10
+> 实测）。跑全量前先确认 `localhost:5433` 与 `localhost:6380` 可连。
+
 测试替身：
 
 - LLM 使用 `FakeChatModel`（已有实现），按用例注入固定回复；
@@ -66,6 +71,12 @@ cd deploy; .\start.ps1                     # 起完整环境
 | E-03 | 故障恢复 | 执行中断掉 backend → 重启 | 任务从断点续跑成功，无状态丢失 | M3 起可演练，M5 验收 |
 | E-04 | Web 会话管理 | UI 创建会话、发消息、暂停/恢复 | UI 与 API 状态一致 | M5 |
 | E-05 | 一键部署 | `start.ps1` → 健康检查 → `stop.ps1` | 全部服务健康 | M5 |
+
+E-04/E-05 目前的自动化程度（成员 D D9-10）：会话生命周期（创建 → 暂停 → 暂停期提交被拒
+→ 恢复 → 回读）与「前端容器 + nginx `/api` 反代」走 `tests/e2e/test_live_e2e.py` 的
+Web 侧用例，部署脚本按 `deploy/start.ps1` / `stop.ps1` 实跑并以退出码与三段健康检查判定。
+浏览器里的**渲染效果**仍需人工按 `doc/deployment.md`「演示与验收」的核对清单确认；
+发消息后的三步流水线需要可用的模型凭据（提供方前提见 §4.2）。
 
 ## 3. 关键链路测试设计
 
@@ -231,8 +242,8 @@ OpenAI 兼容 API，表中「未达成」的结论已在 API 模型下复测通�
 | E-01 单 Agent 问答 | 通过（结论分提供方） | 真实环境跑通：会话→消息→轮询→`completed`，报告消息落库。答复内容在 Ollama `qwen2.5-coder:7b` 下**未达成**——报告正文是 `{"name": "web_search", ...}` 这样的工具调用 JSON 文本（缺口 F-02）；换 OpenAI 兼容 API（`deepseek-flash`）后达成：报告 1877 字并引用工具返回值 `42`（见 §4.1 与 `doc/roadmap.md` 验证记录） |
 | E-02 多 Agent 协作 | 通过（结论分提供方） | 真实环境三步依次完成（`checkpoint.completed_steps=[collect, analyze, report]`，2-4s/条）；同受 F-02 影响（Ollama 下 `tool_calls=0`，工具未真正执行），API 模型下 collector/analyst 各产生一次 `calculator` 调用 |
 | E-03 故障恢复 | 通过（旧数据有缺口） | `scripts/measure_recovery.py`：不可用 2.62s、**恢复耗时 ≤0.2s（目标 <5s）**、业务状态保留 `completed`/三步齐全；该次演练的 Dapr 终态为 FAILED（缺口 F-05，**已由 B 修复**），修复后的演练需重跑以确认两个终态同时成功。数据取自 poc 的确定性（假模型）路径 |
-| E-04 Web 会话管理 | 部分 | API 侧通过：暂停 → 新消息被 409 `SESSION_PAUSED` 拒绝 → 恢复 → 原 Workflow 续跑 `completed`；**Web UI 侧未验**（需浏览器端到端） |
-| E-05 一键部署 | 部分 | compose 全服务健康、`/health` 200、`/api/v1/agents` 三角色、`/api/v1/providers` 非空；容器侧 `/metrics`、`/tools` 与 Prometheus/Jaeger 已由 B/D 验收（`doc/roadmap.md`「M4 代码落地情况」）；**`start.ps1` 全流程与 `stop.ps1` 未在本轮重跑** |
+| E-04 Web 会话管理 | 部分（Web 侧数据路径已验，渲染未验） | API 侧通过：暂停 → 新消息被 409 `SESSION_PAUSED` 拒绝 → 恢复 → 原 Workflow 续跑 `completed`。Web 侧由成员 D 补自动化（§4.3）：经 nginx 反代跑完「新建任务 → 暂停 → 暂停期提交被拒 → 恢复 → 回读」六步；浏览器**渲染效果**仍需人工按 `doc/deployment.md` 的核对清单确认，发消息后的三步流水线需要模型凭据 |
+| E-05 一键部署 | 通过（2026-09-15，成员 D 实跑） | `start.ps1` 退出码 `0` 且 Frontend / Backend / Dapr Sidecar 三段健康检查全部打印 `is healthy`，随后打印 7 行访问地址；`stop.ps1` 退出码 `0` 且 `docker ps -a` 中项目容器全部移除。过程中修复了两个脚本在 Windows PowerShell 5.1 下被 `docker compose` 的 stderr 中断的缺陷（见 §4.3）。容器侧 `/metrics`、`/tools` 与 Prometheus/Jaeger 已由 B/D 验收（`doc/roadmap.md`「M4 代码落地情况」） |
 | 并发会话（§3.2） | 通过 | 10 会话/并发度 10：成功率 1.0、HTTP 5xx 0、受理延迟 p50 0.46s、端到端 p50 16.54s / p95 18.61s、Token 合计 18650（621.7/次调用）、工具调用成功率**无样本**（0 次；Ollama 下模型未发起工具调用，F-02 之外的模型行为差异，API 模型下重测后应不再为 0） |
 
 合入 `master` 后（2026-09-15）：`uv run pytest -q` → **371 passed / 0 failed / 5 skipped**
@@ -252,6 +263,48 @@ F-05 poc/故障演练路径业务终态与 Dapr 终态不一致（B，**已修�
 CLI 对运行时终态非 `COMPLETED` 即非零码退出）；
 F-06 会话/长期记忆未接入编排（`app/memory/` 只有 Protocol，历史消息既不落记忆也不回注
 Prompt，仅 `GET /messages` 读取）——**本轮只记录，未处置**。
+
+### 4.3 Web UI 与部署编排（2026-09-15，成员 D D9-10）
+
+`分工.md` §3 里 D 的 D9-10 是「UI 收尾、录制演示、部署文档」，对应 §4.2 表里 E-04/E-05
+的 Web 侧与部署脚本两行。本轮落地情况：
+
+| 分工 | 状态 | 落地内容 |
+| --- | --- | --- |
+| Web 控制台 | 代码未改动，验收补齐 | master 的工作台已覆盖团队状态、任务记录、调用链路与 Token 采样、会话管理；本轮没有改前端代码，补的是验收（见下两行的自动化与核对清单） |
+| `start.ps1` / `stop.ps1` 全流程 | 已完成 | 修复两个脚本在 Windows PowerShell 5.1 下被 `docker compose` 的 stderr（构建/停止进度）中断的缺陷：`$ErrorActionPreference = "Stop"` 会把原生命令的 stderr 当成终止性错误，`start.ps1` 因此不做健康检查、不打印地址就退出（容器其实已经起来），`stop.ps1` 对已完成的停止报错并返回非零码。两处都改为在该调用期间临时切到 `Continue` 并以 `$LASTEXITCODE` 判定成败，与文件里 `docker info` / `compose version` / `compose config` 的既有写法一致 |
+| 部署文档 | 已完成 | `doc/deployment.md` 补「演示与验收」：E-05 的通过标准（退出码 + 三段健康检查 + stop 后容器为空）、E-04 的自动化命令与浏览器核对清单；并修正模型前置条件——默认提供方已是 OpenAI 兼容 API（ADR-014），原文「宿主机需要运行 Ollama」已过时 |
+
+验证（本机 compose，2026-09-15）：
+
+```bash
+uv run pytest -q -p no:cacheprovider
+# 359 passed / 0 failed，14.51s（前置：PostgreSQL 5433 + Redis 6380 可达）
+
+MACP_E2E_LIVE=1 uv run pytest tests/e2e/test_live_e2e.py -q -s \
+  -k "frontend or web_ui_session or health"
+# 3 passed（E-05 健康与目录、E-05 Web 侧、E-04 Web 侧）
+
+npm --prefix frontend run build
+# 通过：tsc --noEmit && vite build，3134 modules，产物 index-*.js 251.80 kB
+```
+
+`deploy/start.ps1` → `deploy/stop.ps1` 实跑：两次都得到 `SCRIPT_OK=True / LASTEXITCODE=0`，
+中间打印 `Frontend is healthy.` / `Backend is healthy.` / `Dapr Sidecar is healthy.` 与
+7 行访问地址；`stop.ps1` 打印 `Services stopped.` 后
+`docker ps -a --filter "name=multi-agent-collaboration-platform"` 为空。
+
+**未完成 / 未验**（不隐瞒）：
+
+1. `tests/e2e/test_live_e2e.py` 中依赖模型的 4 条（E-01/E-02 两条、I-06、
+   E-04 API 侧续跑）本轮**未跑**：本机没有可用的模型凭据。命令与预期不变，
+   配好凭据后可直接重跑。
+2. 浏览器渲染，以及「发消息 → 观察 Agent 执行台推进 → 展开协作详情」仍是人工步骤：
+   本轮只给核对清单，没有引入浏览器自动化（前端门禁是类型检查 + 构建，见 §3.3）。
+3. 「任务记录」页只显示当前会话最近一次执行（`App.tsx::History`，页面已标注
+   「完整历史查询尚未接入」）。做完整历史需要新增 `GET /api/v1/workflows` 一类的列表
+   接口，属新增能力，本轮未做；因此**不据此宣称** `分工.md` §7 的「Web UI 可展示任务历史」
+   已闭环。
 
 ## 5. 失败处理约定
 

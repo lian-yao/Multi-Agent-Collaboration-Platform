@@ -4,12 +4,18 @@
 
 ## 当前状态
 
-- LangGraph 单 Agent 原型已完成，包含基础图结构与测试。
-- 编排框架固定为 LangGraph，不引入 CrewAI。
-- Dapr 本地运行时已完成初始化，Redis、Placement、Scheduler、Zipkin 容器可用。
-- D3-D4（里程碑 M2）已完成：固定三步 Dapr Workflow + State Management 持久化、
-  断点续跑演练脚本、会话/记忆数据结构与 REST API（会话、消息、Workflow 暂停/恢复）。
-- API 发起的 Workflow 执行完成后会由 durable 活动回写终态，轮询可观察到 completed。
+- D1-D2（M1）：LangGraph 单 Agent 原型、基础图结构与测试完成；编排框架固定为 LangGraph，
+  不引入 CrewAI。
+- D3-D4（M2）：固定三步 Dapr Workflow + State Management 持久化、断点续跑演练脚本、
+  会话/记忆数据结构与 REST API（会话、消息、Workflow 暂停/恢复）；API 发起的执行完成后
+  由 durable 终态活动回写 `completed`/`failed`。
+- D5-D6（M3）：多 Agent 流水线（信息收集 → 数据分析 → 报告生成）与可恢复子任务 Workflow；
+  最终报告作为 `messages(role=assistant)` 回写，可经 `GET /messages` 读到。
+- D7-D8（M4，已完成）：四个内置 MCP 工具与沙箱隔离、工具调用审计落库、
+  OpenTelemetry + Jaeger + Prometheus 可观测；Web 工作台展示 Agent 团队、工具调用链路与
+  Token 采样，模型 Provider 配置可在「工具与配置」页读写。
+- D9-10（M5，进行中）：Web UI 与一键部署全流程（`deploy/start.ps1` / `stop.ps1`）已实跑验收；
+  端到端用例、性能基线与未闭环项见 [doc/testing.md](doc/testing.md) §4。
 - Python 环境由 UV 管理，实际环境以 `pyproject.toml + uv.lock` 为准。
 
 ## 技术栈
@@ -20,7 +26,7 @@
 - 存储：Redis + PostgreSQL（SQLAlchemy）
 - 工具：MCP
 - 可观测：OpenTelemetry + Jaeger + Prometheus
-- 前端：React + Vite + TailwindCSS
+- 前端：React + Vite + TypeScript
 - 语言：Python 3.12、TypeScript
 
 ## 目录结构
@@ -70,7 +76,10 @@ DAPR_DEFAULT_IMAGE_REGISTRY=ghcr dapr init --runtime-version 1.18.2
 
 ## 一键部署
 
-需要本机已安装 Docker。进入 `deploy` 目录后执行：
+需要本机已安装 Docker。**默认模型提供方是 OpenAI 兼容 API（ADR-014），部署前请先在
+`deploy/.env` 配好 `AGENT_OPENAI_MODEL` 与 `AGENT_OPENAI_API_KEY`（`.env` 已在
+`.gitignore` 中），否则部署本身会成功、但提交任务后 Workflow 阶段会 fail-fast 失败。**
+回退本机 Ollama 时设 `AGENT_LLM_PROVIDER=ollama`。详见 [doc/deployment.md](doc/deployment.md)。
 
 ```powershell
 cd deploy
@@ -84,6 +93,10 @@ cd deploy
 - Dapr API：http://localhost:3500
 - Jaeger：http://localhost:16686
 - Prometheus：http://localhost:9090
+
+`start.ps1` 通过的标准是脚本退出码为 `0`，且 Frontend / Backend / Dapr Sidecar 三段健康
+检查都打印 `is healthy`（只看「容器起来了」不算通过）。完整演示步骤与浏览器核对清单见
+[doc/deployment.md](doc/deployment.md) 的「演示与验收」。
 
 停止服务：
 

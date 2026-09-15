@@ -41,16 +41,94 @@ cd deploy
 - Web UI：http://localhost:5173
 - 后端 API：http://localhost:8000
 
-> 前置条件：宿主机需要运行 Ollama 并已拉取 `qwen2.5-coder:7b`；容器通过
-> `deploy/compose.yaml` 的 `AGENT_OLLAMA_BASE_URL`（默认
-> `http://host.docker.internal:11434`）访问它。Ollama 未启动时部署本身仍然成功，
-> 但提交任务后 Workflow 阶段会失败（见 ADR-007）。
+> **模型前置条件（ADR-014）**：默认提供方是 OpenAI 兼容 API（`AGENT_LLM_PROVIDER=openai`），
+> 所以**部署本身不需要 Ollama**，但要先配好模型名与凭据，否则部署会成功、提交任务后
+> Workflow 阶段 fail-fast 失败（缺 model 或凭据时模型构造直接抛错，不会静默回退到别的
+> 提供方）。两种配法：
+>
+> 1. 在 `deploy/` 下建 `.env`（已在 `.gitignore` 中，不会入库）写
+>    `AGENT_OPENAI_BASE_URL=` / `AGENT_OPENAI_API_KEY=` / `AGENT_OPENAI_MODEL=`，
+>    `compose.yaml` 的 `${AGENT_OPENAI_*:-}` 会把它们注入 backend；
+> 2. 先起栈，再到 Web 的「工具与配置」页写运行期覆盖
+>    （`PUT /api/v1/config/provider`，见 `doc/api.md` §5.8），下一次任务即生效、无需重启。
+>
+> 回退本机 Ollama 时设 `AGENT_LLM_PROVIDER=ollama`，宿主机需运行 Ollama 且已拉取
+> `AGENT_OLLAMA_MODEL`（默认 `qwen2.5-coder:7b`），容器通过 `AGENT_OLLAMA_BASE_URL`
+> （默认 `http://host.docker.internal:11434`）访问它（见 ADR-007）。
+>
+> **容器内访问宿主机服务**：`AGENT_OPENAI_BASE_URL` 指向宿主上的网关时要写
+> `http://host.docker.internal:<端口>/v1`；写 `127.0.0.1` 会指向容器自身。
 
 停止服务：
 
 ```powershell
 .\stop.ps1
 ```
+
+## 演示与验收（D9-10，成员 D）
+
+三个演示场景中由 D 负责的可复现部分。完整验收矩阵见 `doc/testing.md` §2.3，
+本轮状态见 §4。
+
+### E-05：一键部署全流程
+
+```powershell
+cd deploy
+.\start.ps1     # 构建镜像 → up -d --wait → 三段健康检查 → 打印访问地址
+.\stop.ps1      # 停止并移除容器
+```
+
+`start.ps1` 通过的标准是**同时满足**两条：脚本退出码为 `0`，且三段健康检查都打印
+`is healthy`——
+
+| 检查 | 地址 |
+| --- | --- |
+| Frontend | http://localhost:5173/ |
+| Backend | http://localhost:8000/health |
+| Dapr Sidecar | http://localhost:3500/v1.0/metadata |
+
+最后会打印 7 行访问地址（Web UI / Backend / Dapr / Jaeger / Prometheus / Redis /
+PostgreSQL）。**只看「容器起来了」不算通过**：脚本中途异常时容器可能已经在运行。
+
+`stop.ps1` 通过的标准是退出码 `0`，且
+`docker ps -a --filter "name=multi-agent-collaboration-platform"` 为空。
+
+> 两个脚本都必须容忍 `docker compose` 写到 stderr 的构建/停止进度。Windows
+> PowerShell 5.1 在 `$ErrorActionPreference = "Stop"` 下会把原生命令的 stderr 当成
+> 终止性错误：镜像构建成功、容器也起来了，脚本却以非零码退出——`start.ps1` 不做健康
+> 检查也不打印地址，`stop.ps1` 对已经完成的停止报错。两处都已改为在该调用期间临时
+> 切到 `Continue` 并用 `$LASTEXITCODE` 判定成败，与文件里 `docker info` /
+> `compose version` / `compose config` 的既有写法一致。
+
+### E-04：Web 会话管理
+
+自动化部分（走 nginx 反代的真实 API，**不依赖模型**）：
+
+```bash
+MACP_E2E_LIVE=1 uv run pytest tests/e2e/test_live_e2e.py -q -s -k "frontend or web_ui_session"
+```
+
+覆盖：`frontend` 容器可访问且 SPA 入口引用的构建产物可取到（dist 没随镜像更新时
+首页仍返回 200、页面却白屏）、nginx 把 `/api` 反代到 backend、工作台首屏与
+「工具与配置」页用到的只读接口经反代可用（含 `availability=available` 与
+「Provider 配置响应不含密钥」），以及「新建任务 → 暂停 → 暂停期提交被拒 → 恢复 →
+回读」六步会话生命周期。
+
+浏览器端仍需人工确认的部分（前端没有浏览器自动化用例，见 `doc/testing.md` §3.3）：
+
+| 步骤 | 应看到 |
+| --- | --- |
+| 打开 http://localhost:5173 | 顶栏「API 已连接」，左下「运行时」显示在线 |
+| 发一条任务 | 用户气泡出现；Agent 执行台展开三个阶段节点并随状态推进 |
+| 展开「协作详情」 | 「工具调用链路」「本次任务 Token 与指标采样」两块；无记录时显示「暂无记录」而不是 0 |
+| 点「任务记录」 | 显示当前会话最近一次执行；完整历史查询尚未接入 |
+| 点「Agent 团队」 | 三张角色卡片，Provider/模型/温度取自生效配置 |
+| 点「工具与配置」 | Provider 表单显示生效值与「凭据已配置 / 缺少凭据」；工具目录 4 项；全局指标采样非空 |
+| 点顶栏「暂停」 | 输入框禁用并提示「会话已暂停」；点「恢复」后输入框重新可用 |
+| 点「＋ 新建任务」 | 对话清空，进入新会话 |
+
+> 「发消息后跑通 collect → analyze → report 并生成报告」（E-01/E-02）不在上表：
+> 它需要可用的模型凭据，步骤与预期见 `doc/testing.md` §2.3。
 
 ## 本地启动后端（PyCharm / 命令行）
 
