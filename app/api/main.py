@@ -1,20 +1,28 @@
 from __future__ import annotations
 
+import hmac
 import logging
 import uuid
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import FastAPI, Query, Request, Response, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, FiniteFloat
+from pydantic import BaseModel, Field, FiniteFloat, field_validator, model_validator
 from prometheus_client import CONTENT_TYPE_LATEST
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.store import SqlApiStore
 from app.api.inspection import InspectionStore
-from app.config import get_settings
+from app.config import get_admin_settings, get_settings
+from app.core.agent_config import (
+    AgentConfigError,
+    agent_config_overrides,
+    resolve_agent_settings,
+    update_agent_config,
+)
+from app.core.checkpoint import UNSET
 from app.mcp.registry import tool_catalog
 from app.observability.logging import get_logger, log_event
 from app.observability.metrics import render_prometheus_metrics
@@ -22,6 +30,9 @@ from app.workflows.pipeline import WorkflowTask
 from app.workflows.service import get_workflow_service
 
 logger = get_logger("api.inspection")
+
+# 覆盖值读取器：默认读 `agent_configs`，测试可替换为固定表（与 api_store 同一模式）。
+agent_config_reader: Callable[[], dict[str, dict[str, Any]]] = agent_config_overrides
 
 
 class ApiError(Exception):
@@ -101,6 +112,32 @@ class AgentResponse(BaseModel):
 
 class AgentListResponse(BaseModel):
     items: list[AgentResponse]
+
+
+class AgentConfigPatchRequest(BaseModel):
+    """`PATCH /api/v1/config/agents/{agent_id}` 的请求体（doc/api.md §5.7）。
+
+    字段缺省 = 不改动；显式 `null` = 清除覆盖、回退环境配置。
+    """
+
+    model: str | None = Field(default=None, max_length=200)
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+
+    @field_validator("model")
+    @classmethod
+    def _normalize_model(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        resolved = value.strip()
+        if not resolved:
+            raise ValueError("model 不能为空")
+        return resolved
+
+    @model_validator(mode="after")
+    def _require_any_field(self) -> AgentConfigPatchRequest:
+        if not self.model_fields_set:
+            raise ValueError("至少需要提供 model 或 temperature 之一")
+        return self
 
 
 class ProviderResponse(BaseModel):
@@ -394,38 +431,8 @@ def get_workflow(workflow_id: str) -> WorkflowResponse:
 @app.get("/api/v1/agents", response_model=AgentListResponse)
 def list_agents() -> AgentListResponse:
     """Return the fixed D5-D6 team represented by the three pipeline roles."""
-    settings = get_settings()
-    model = settings.ollama_model if settings.llm_provider == "ollama" else settings.openai_model
     return AgentListResponse(
-        items=[
-            AgentResponse(
-                id="collector",
-                name="信息收集 Agent",
-                role="collector",
-                model=model,
-                provider=settings.llm_provider,
-                temperature=settings.temperature,
-                status="idle",
-            ),
-            AgentResponse(
-                id="analyst",
-                name="数据分析 Agent",
-                role="analyst",
-                model=model,
-                provider=settings.llm_provider,
-                temperature=settings.temperature,
-                status="idle",
-            ),
-            AgentResponse(
-                id="reporter",
-                name="报告生成 Agent",
-                role="reporter",
-                model=model,
-                provider=settings.llm_provider,
-                temperature=settings.temperature,
-                status="idle",
-            ),
-        ]
+        items=[_agent_response(agent_id) for agent_id in _AGENT_NAMES]
     )
 
 
@@ -439,7 +446,7 @@ _AGENT_NAMES = {
 def _agent_response(agent_id: str) -> AgentResponse:
     if agent_id not in _AGENT_NAMES:
         raise ApiError("AGENT_NOT_FOUND", "Agent 不存在", status.HTTP_404_NOT_FOUND)
-    settings = get_settings()
+    settings = resolve_agent_settings(agent_id, get_settings(), overrides=agent_config_reader())
     return AgentResponse(
         id=agent_id,
         name=_AGENT_NAMES[agent_id],
@@ -449,6 +456,58 @@ def _agent_response(agent_id: str) -> AgentResponse:
         temperature=settings.temperature,
         status="idle",
     )
+
+
+def _authorize_config_write(token: str | None) -> None:
+    """配置写入的权限边界：fail-closed（doc/api.md §5.7、ADR-013）。"""
+
+    expected = get_admin_settings().admin_token
+    if not expected or not token or not hmac.compare_digest(token, expected):
+        log_event(
+            logger,
+            "config.write_rejected",
+            level=logging.WARNING,
+            reason="token_not_configured" if not expected else "token_mismatch",
+        )
+        raise ApiError(
+            "CONFIG_WRITE_FORBIDDEN",
+            "配置写入被拒绝：需要管理员令牌",
+            status.HTTP_403_FORBIDDEN,
+        )
+
+
+def _patch_field(payload: AgentConfigPatchRequest, field: str) -> Any:
+    """把「字段缺省」映射成 UNSET、「显式 null」映射成 None（清除覆盖）。"""
+
+    return getattr(payload, field) if field in payload.model_fields_set else UNSET
+
+
+@app.patch(
+    "/api/v1/config/agents/{agent_id}",
+    response_model=AgentResponse,
+)
+def patch_agent_config(
+    agent_id: str,
+    payload: AgentConfigPatchRequest,
+    request: Request,
+) -> AgentResponse:
+    """修改角色的 model / temperature 覆盖值，下一次阶段执行即生效。"""
+
+    if agent_id not in _AGENT_NAMES:
+        raise ApiError("AGENT_NOT_FOUND", "Agent 不存在", status.HTTP_404_NOT_FOUND)
+    _authorize_config_write(request.headers.get("X-Admin-Token"))
+    try:
+        update_agent_config(
+            agent_id,
+            model=_patch_field(payload, "model"),
+            temperature=_patch_field(payload, "temperature"),
+            actor=request.headers.get("X-Request-ID"),
+        )
+    except AgentConfigError as exc:
+        raise ApiError("VALIDATION_ERROR", str(exc), status.HTTP_422_UNPROCESSABLE_ENTITY) from exc
+    except (SQLAlchemyError, OSError, ValueError, KeyError) as exc:
+        raise ApiError("DATA_SOURCE_UNAVAILABLE", "配置写入失败，请稍后重试", 503) from exc
+    return _agent_response(agent_id)
 
 
 @app.get("/api/v1/providers", response_model=ProviderListResponse)

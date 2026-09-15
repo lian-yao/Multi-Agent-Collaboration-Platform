@@ -12,6 +12,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     desc,
+    select,
 )
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -181,6 +182,81 @@ class MetricRecord(Base):
     __table_args__ = (
         Index("idx_metrics_name_time", "metric_name", desc("recorded_at")),
     )
+
+
+class AgentConfigRecord(Base):
+    """`agent_configs` 表：Agent 模型的覆盖配置（`doc/data-model.md` §3）。
+
+    只存**被覆盖的字段**：列值为 NULL 表示回退 API 进程的环境配置。
+    写入方是 `PATCH /api/v1/config/agents/{agent_id}`（`doc/api.md` §5.7），
+    读取方是 `app/core/agent_config.py::resolve_agent_settings`（API 与阶段活动共用）。
+    """
+
+    __tablename__ = "agent_configs"
+
+    agent_id: Mapped[str] = mapped_column(String(50), primary_key=True)
+    model: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    temperature: Mapped[float | None] = mapped_column(Float, nullable=True)
+    updated_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+
+def _agent_config_to_dict(row: AgentConfigRecord) -> dict[str, Any]:
+    return {
+        "agent_id": row.agent_id,
+        "model": row.model,
+        "temperature": row.temperature,
+        "updated_by": row.updated_by,
+        "updated_at": row.updated_at,
+    }
+
+
+def get_agent_config(agent_id: str) -> dict[str, Any] | None:
+    """按角色返回覆盖配置；没有覆盖行返回 None。"""
+
+    with get_session_factory()() as session:
+        row = session.get(AgentConfigRecord, agent_id)
+        return _agent_config_to_dict(row) if row else None
+
+
+def list_agent_configs() -> list[dict[str, Any]]:
+    """返回全部覆盖行（角色数固定，不分页）。"""
+
+    with get_session_factory()() as session:
+        rows = session.scalars(select(AgentConfigRecord)).all()
+        return [_agent_config_to_dict(row) for row in rows]
+
+
+UNSET = object()
+"""哨兵：区分「调用方没有传该字段」与「显式传 null 清除覆盖」（`doc/api.md` §5.7）。"""
+
+
+def upsert_agent_config(
+    agent_id: str,
+    *,
+    model: Any = UNSET,
+    temperature: Any = UNSET,
+    updated_by: str | None = None,
+) -> dict[str, Any]:
+    """写入覆盖值；未传的字段保持原值，显式传 None 表示清除该字段的覆盖。"""
+
+    with get_session_factory()() as session:
+        row = session.get(AgentConfigRecord, agent_id)
+        if row is None:
+            row = AgentConfigRecord(agent_id=agent_id)
+            session.add(row)
+        if model is not UNSET:
+            row.model = model
+        if temperature is not UNSET:
+            row.temperature = temperature
+        if updated_by is not None:
+            row.updated_by = updated_by
+        row.updated_at = _utcnow()
+        session.commit()
+        session.refresh(row)
+        return _agent_config_to_dict(row)
 
 
 def _tool_call_to_dict(row: ToolCall) -> dict[str, Any]:

@@ -30,6 +30,8 @@ def test_provider_and_agent_agree(monkeypatch, provider, model):
                              openai_model="remote-test", temperature=0.7,
                              ollama_base_url="http://user:secret@localhost:11434/api?key=secret#secret")
     monkeypatch.setattr(api_main, "get_settings", lambda: settings)
+    # 覆盖表隔离：断言的是「环境配置 + 无覆盖」的生效值（doc/api.md §4.9）。
+    monkeypatch.setattr(api_main, "agent_config_reader", dict)
     client = TestClient(api_main.app)
     response = client.get("/api/v1/providers")
     assert response.status_code == 200
