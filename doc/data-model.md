@@ -138,6 +138,23 @@ erDiagram
 读取方是只读接口 `GET /api/v1/metrics`（成员 D）。采样侧**不建表**：表缺失时记一次
 日志并跳过写入，`/api/v1/metrics` 返回 `availability=not_integrated`。
 
+### agent_configs（Agent 配置覆盖）
+
+| 字段 | 类型 | 约束/默认 | 说明 |
+| --- | --- | --- | --- |
+| agent_id | VARCHAR(50) | PK | 角色 id：`collector` / `analyst` / `reporter` |
+| model | VARCHAR(200) | NULL | 覆盖模型名；NULL 表示回退环境配置 |
+| temperature | DOUBLE PRECISION | NULL | 覆盖温度（0.0–2.0）；NULL 表示回退环境配置 |
+| updated_by | VARCHAR(100) | NULL | 审计来源，取请求头 `X-Request-ID` |
+| updated_at | TIMESTAMPTZ | `now()` | 最近更新时间 |
+
+只存**被覆盖的字段**（行内 NULL = 回退），不复制环境配置的全量快照；删除覆盖等价于把
+对应列写回 NULL。建表归属：`app/core/checkpoint.py::AgentConfigRecord`，随
+`init_checkpoint_schema()` 创建。写入方是 `PATCH /api/v1/config/agents/{agent_id}`
+（`doc/api.md` §5.7），读取方是同接口的 GET 列表/详情与 Workflow 阶段活动
+（`app/core/agent_config.py::resolve_agent_settings`）。索引：主键即可，无额外索引
+（数据量与角色数同阶，恒为 3 行以内）。
+
 ## 4. Redis 结构
 
 | Key | 类型 | TTL | 用途 | 一致性说明 |

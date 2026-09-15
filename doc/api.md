@@ -34,6 +34,7 @@
 | 500 | `INTERNAL_ERROR` | 已实现 | Workflow 调度失败等内部错误 |
 | 404 | `AGENT_NOT_FOUND` | 已实现 | 查询的 Agent 角色不存在 |
 | 503 | `DATA_SOURCE_UNAVAILABLE` | 已实现 | 审计或指标数据源读取失败 |
+| 403 | `CONFIG_WRITE_FORBIDDEN` | 已实现 | 配置写入被拒绝：缺少/错误的管理员令牌，或服务端未配置 `ADMIN_TOKEN` |
 | 404 | `TOOL_NOT_FOUND` | 规划 | 工具不存在；当前没有工具路由 |
 
 ## 2. 核心对象与状态
@@ -105,7 +106,7 @@
 | `analyst` | 数据分析 Agent | `analyst` | `analyze` |
 | `reporter` | 报告生成 Agent | `reporter` | `report` |
 
-列表与详情统一读取 API 进程的 `AGENT_*` 配置，返回当前 provider 对应的 model、temperature。`status=idle` 为静态角色状态，不代表模型服务健康；运行状态由 Workflow 展示。API 与 Worker 必须使用相同环境配置，配置修改需要重启对应进程。
+列表与详情返回**生效配置**：先取数据库 `agent_configs` 里该角色的覆盖值，未覆盖的字段回退 API 进程的 `AGENT_*` 环境配置（见 §5.7）。`status=idle` 为静态角色状态，不代表模型服务健康；运行状态由 Workflow 展示。`agent_configs` 读取失败时回退环境配置并记日志，不影响列表可用性。
 
 ## 3. 执行语义
 
@@ -236,7 +237,7 @@ GET /api/v1/providers
 
 GET /api/v1/agents/{agent_id}
 
-响应字段为 id、name、role、model、provider、temperature、status。未知角色返回 404 AGENT_NOT_FOUND。当前 Agent 配置由运行时默认配置提供。
+响应字段为 id、name、role、model、provider、temperature、status。未知角色返回 404 AGENT_NOT_FOUND。字段含义同 §4.9：model 与 temperature 为「数据库覆盖 + 环境配置回退」后的生效值，provider 始终来自 API 进程环境配置（不通过 API 修改）。
 
 ### 5.3 查询工具目录
 
@@ -272,6 +273,43 @@ item 字段为 metric_name、value（有限数值）、labels（JSON 对象）�
 - 只读进程内注册表：不连接数据库、不写审计、不因 `metrics` 表缺失而失败。API 进程（`uvicorn` 托管 `app.api.main:app`）与 Workflow Worker 是同一进程时指标合并在一处；多副本部署按实例分别抓取。
 - 该端点只反映本进程观测到的调用；无任何调用时返回空的指标族（仅 HELP/TYPE 行）。
 
+### 5.7 修改 Agent 配置（热更新）
+
+`PATCH /api/v1/config/agents/{agent_id}`
+
+修改某个角色的 `model` / `temperature` 覆盖值，**无需重启进程**：下一次阶段执行即按新配置建模（见 `doc/decisions/013-agent-config-hot-update.md`）。
+
+请求体（两个字段都可选，但至少要给一个）：
+
+```json
+{
+  "model": "qwen2.5-coder:7b",
+  "temperature": 0.3
+}
+```
+
+- 字段省略 = 不改动该字段；显式传 `null` = 清除该字段的覆盖，回退环境配置。
+- `model`：1–200 字符，去除首尾空白后不能为空。
+- `temperature`：`0.0`–`2.0`（闭区间）。
+- `provider` 不在本接口范围：它由 API 进程的 `AGENT_LLM_PROVIDER` 决定（涉及 base_url 与凭据），修改需要改部署配置并重启。
+
+权限边界：必须携带请求头 `X-Admin-Token`，其值等于服务端环境变量 `ADMIN_TOKEN`。服务端未配置 `ADMIN_TOKEN`（空字符串）时**一律拒绝**（fail-closed），返回 `403 CONFIG_WRITE_FORBIDDEN`；令牌错误或缺头同样是 `403`。错误响应体不包含令牌内容。
+
+响应 `200` 返回与 §5.2 完全同构的 Agent 对象（生效配置）。
+
+错误码：
+
+| HTTP | code | 含义 |
+| --- | --- | --- |
+| 403 | `CONFIG_WRITE_FORBIDDEN` | 未配置/缺少/错误的 `X-Admin-Token` |
+| 404 | `AGENT_NOT_FOUND` | 角色不存在 |
+| 422 | 框架默认 | Pydantic 校验失败（空 body、非法 temperature、超长 model、空白 model） |
+| 503 | `DATA_SOURCE_UNAVAILABLE` | 覆盖值写入失败（写操作必须显式失败，不回退、不静默成功） |
+
+持久化：覆盖值写入 `agent_configs` 表（`doc/data-model.md` §3），只存被覆盖的字段。审计：每次成功写入产生结构化日志 `event=config.agent.updated`（含 `agent_id`、`actor`、`before`/`after`、`request_id`），表内同时记录 `updated_by` / `updated_at`；`updated_by` 取请求头 `X-Request-ID`，缺省为空。
+
+并发与顺序：接口是「最后写入者生效」，不提供乐观锁或版本号；覆盖值按角色粒度，互不影响。
+
 ## 6. 规划接口（当前未实现）
 
 下列接口已列入设计方向，但当前 FastAPI 不提供路由，前端不得直接调用：
@@ -279,29 +317,30 @@ item 字段为 metric_name、value（有限数值）、labels（JSON 对象）�
 | 方法 | 路径 | 规划用途 |
 | --- | --- | --- |
 | POST | `/api/v1/agents/{agent_id}/run` | 单 Agent 调试执行 |
-| PATCH | `/api/v1/config/agents/{agent_id}` | 修改 Agent 模型与参数 |
 
 ### 6.1 规划请求示例（不保证可用）
 
 ```json
-PATCH /api/v1/config/agents/{agent_id}
+POST /api/v1/agents/{agent_id}/run
 {
-  "model": "qwen2.5-coder:7b",
-  "temperature": 0.3
+  "content": "只跑收集阶段的调试输入"
 }
 ```
 
-这些接口落地前，必须先补充 Pydantic Schema、存储写入、权限边界、审计记录和测试，并同步更新本文档。
+该接口落地前，必须先补充 Pydantic Schema、存储写入、权限边界、审计记录和测试，并同步更新本文档。
+
+`PATCH /api/v1/config/agents/{agent_id}` 已按上述要求实现，见 §5.7。
 
 ## 7. 前端对接约束
 
 - 初始化顺序：并行调用 `GET /agents` 与 `POST /sessions`。
 - 发送消息后保存 `workflow_id`，每 2 秒轮询一次 Workflow；终态为 `completed`、`failed`、`cancelled` 时停止轮询。
 - Token 与调用明细由 §5 读取；区分加载、失败、未接入、无记录、有记录，运行时轮询，终态补刷。切换 Workflow 时丢弃旧请求结果；调用和指标独立失败，不能阻断会话功能。主决策 Agent 选择仍为预览，任务标题取用户消息摘要。
+- 配置写入（§5.7）当前没有前端入口：写接口需要 `ADMIN_TOKEN`，令牌不能下发到浏览器。前端若要展示覆盖状态，只读取 §4.9 / §5.2 的生效值。
 - Agent 执行台根据 Workflow 的 `checkpoint.completed_steps` 与 `current_step` 展示阶段状态；不得在无 Workflow 时预填三张 Agent 卡片。
 
 ## 8. 版本与变更规则
 
-- 文档版本：`v0.4`，更新时间：2026-09-15。
+- 文档版本：`v0.5`，更新时间：2026-09-15。
 - 任何新增或修改路由，先更新本文件的“已实现接口/规划接口”和对象 Schema，再修改代码。
 - 若 OpenAPI 与本文档冲突，以实际路由和响应模型为准，并在同一变更中修正文档。

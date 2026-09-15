@@ -193,9 +193,13 @@ npm run dev
 | `OBS_TRACING_SAMPLE_RATIO` | 采样比例，默认 `1.0` |
 | `OBS_METRICS_ENABLED` | 是否采集指标，默认 `true` |
 | `OBS_METRICS_FLUSH_SIZE` | 采样批量落库阈值，默认 `50` |
+| `ADMIN_TOKEN` | 配置写入（`PATCH /api/v1/config/agents/{agent_id}`）所需的 `X-Admin-Token` 值；留空表示禁用该接口（返回 403，fail-closed，见 `doc/api.md` §5.7） |
 
 `deploy/compose.yaml` 的 backend 显式设置 `OBS_TRACING_ENDPOINT=http://jaeger:4318/v1/traces`
 与 `OBS_METRICS_SINK=postgres`，避免容器内默认值 `localhost` 指不到 Jaeger。
+
+> `ADMIN_TOKEN` 未写入 `deploy/compose.yaml`：容器默认不开放配置写入，需要在
+> `deploy/.env` 或 compose 覆盖里显式提供，避免示例部署带上一个可猜的默认口令。
 
 > 工具、沙箱与可观测的完整配置项见 `app/tools/config.py`、`app/sandbox/config.py`、
 > `app/mcp/config.py`、`app/observability/config.py`（ADR-012）。
