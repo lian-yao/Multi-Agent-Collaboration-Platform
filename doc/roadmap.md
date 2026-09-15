@@ -44,16 +44,24 @@
   仍在的缺口不在本轮范围：
   - A 的 `tests/unit/test_pipeline_tools.py::test_role_stage_without_registry_does_not_bind_tools`
     仍是过期前置条件，测试未全绿（需改为 `set_tool_registry_factory(lambda: None)`）；
-  - 真实 Jaeger/Prometheus 实例上的抓取结果尚未核对（配置已通过 `promtool check config`，
-    运行中的容器要重建镜像/重启后才会提供 `/metrics`）；
-  - 本地 qwen2.5-coder:7b 在真实运行中把工具调用当文本输出，未返回原生 `tool_calls`，
-    所以真实流水线跑出来的审计行为 0 条（工具审计本身已在真实库上单独验证通过）。
+  - 本地 qwen2.5-coder:7b 在真实运行中把工具调用当文本输出（例如
+    `{"name": "web_search", "arguments": {...}}`），未返回原生 `tool_calls`，
+    所以真实流水线的审计记录是 0 条；工具审计本身已在真实库上单独验证通过。
+    这是模型/Prompt 行为问题，属 A 的模型接入范围。
 - **端到端联调（2026-09-15 已跑通）**：真实 PostgreSQL + Dapr Workflow + Ollama 提交消息
   → Workflow `completed`（collect/analyze/report 三段）→ `metrics` 表写入 16 条采样
   （`stage_duration_ms`、`stage_runs`、`input_tokens`/`output_tokens`/`total_tokens`、
   `workflow_runs`）→ `GET /api/v1/metrics` 返回 `availability=available`；
   工具审计经真实注册表调用后落 `tool_calls` 一行（`calculator` `21*2` → `42`，
   `status=succeeded`）→ `GET /api/v1/workflows/{id}/tool-calls` 可读回。
+  容器侧：`deploy/start.ps1` 重建镜像后 `backend:8000/metrics` 返回 6 个指标族，
+  Prometheus 抓到 `backend`（`http://backend:8000/metrics`）与 `dapr-sidecar` 两个
+  target 均为 `up`，`count({__name__=~"macp_.*"})` = 43 条序列；
+  `GET /api/v1/tools` 在容器内返回 4 个工具且 `availability=available`；
+  Jaeger 里 `macp-backend` 服务可查到 `stage.run`、`llm.chat` 等 span。
+  追踪导出原先没有任何调用点（`configure_tracing()` 只在测试里被调用，真实运行中
+  span 全进空操作 Tracer），本轮在 `app/workflows/worker.py::main()` 启动时补上配置，
+  属成员 B 的 worker 入口。
 - **其他未实现**：`PATCH /api/v1/config/agents/{agent_id}` 配置热更新（见 `doc/api.md` §6）。
 
 ### 验证记录

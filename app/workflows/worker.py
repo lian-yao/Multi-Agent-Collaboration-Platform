@@ -7,6 +7,7 @@ import uvicorn
 
 from app.core.checkpoint import init_checkpoint_schema
 from app.observability.logging import configure_logging
+from app.observability.tracing import configure_tracing
 from app.workflows.service import get_workflow_service
 
 logger = logging.getLogger("app.workflows.worker")
@@ -30,6 +31,8 @@ def start_runtime_in_background() -> threading.Thread:
 
 def main() -> None:
     configure_logging()
+    # 追踪导出必须在业务开始前配置，否则 span 只进空操作 Tracer（doc/deployment.md 可观测数据）。
+    configure_tracing()
     init_checkpoint_schema()
     start_runtime_in_background()
 
