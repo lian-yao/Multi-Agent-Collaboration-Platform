@@ -35,7 +35,7 @@
 | 完成内置工具、沙箱、可观测接入 | C | 已完成（代码与单元级证据） | `app/tools` 四个内置工具（计算器 AST 白名单、网页搜索、沙箱代码执行、只读 SQL）、`app/sandbox` 策略层 + Docker 隔离后端、`app/mcp` Server/Client/注册表（inprocess/stdio/http 三种传输）、`app/observability` 追踪 + Prometheus 指标 + `metrics` 采样 + 模型回调（ADR-012） |
 | 展示调用链路与 Token 统计 | D | 已完成（只读层与接线） | 新增只读接口 `/providers`、`/agents/{id}`、`/tools`、`/workflows/{id}/tool-calls`、`/metrics`，Web 工作台接入工具调用详情与 Token 采样展示（`doc/api.md` §5）；`app/api/main.py` 已注入 `tool_catalog` 并新增 Prometheus 文本端点 `/metrics`（`doc/api.md` §5.6），2026-09-15 补齐 |
 
-- **M4 缺口（2026-09-15 全部落地）**：MCP 注册表与 4 个内置工具、工具沙箱隔离、
+- **M4 落地情况（2026-09-15）**：原缺口已全部落地——MCP 注册表与 4 个内置工具、工具沙箱隔离、
   OpenTelemetry 追踪、Prometheus 指标采集（ADR-012）；读取接线（工具目录注入与
   Prometheus 文本端点，`doc/api.md` §5.3、§5.6）；`metrics` 建表
   （`app/core/checkpoint.py::MetricRecord` + `init_checkpoint_schema()`，
