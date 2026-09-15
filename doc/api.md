@@ -4,7 +4,7 @@
 
 ## 1. 通用约定
 
-- 基础路径：`/api/v1`；健康检查为 `/health`。
+- 基础路径：`/api/v1`；健康检查为 `/health`；Prometheus 文本指标端点为 `/metrics`（见 §5.6）。
 - 请求与响应使用 `application/json`。
 - 时间字段为 ISO 8601 UTC（带 `Z` 或明确时区偏移）。
 - ID 当前以 UUID 字符串返回；Agent 角色 ID 为稳定字符串。
@@ -242,7 +242,9 @@ GET /api/v1/agents/{agent_id}
 
 GET /api/v1/tools?page=1&page_size=20
 
-item 字段为 name、description、input_schema（JSON 对象）、status。C 的注册表与目录已就位（`app/mcp/registry.py::tool_catalog()`，返回 calculator / web_search / code_execution / sql_query 四项，见 ADR-012）；`app/api/main.py` 尚未把它注入 `InspectionStore(tool_catalog=...)`，因此当前仍返回 availability=not_integrated，接线属 D。接入后 item 的 status 为 available。不会把四种规划工具当成已注册工具。
+item 字段为 name、description、input_schema（JSON 对象）、status。数据来自 C 的注册表目录（`app/mcp/registry.py::tool_catalog()`，见 ADR-012），返回 calculator / web_search / code_execution / sql_query 四项，status 为 available；不会把规划中的工具当成已注册工具。
+
+API 进程默认按 `MCP_TRANSPORT` 注入该目录（`InspectionStore(tool_catalog=tool_catalog)`）。注册表构建或读取失败返回 `503 DATA_SOURCE_UNAVAILABLE`，不吞掉错误伪装成空目录；只有显式构造为「未注入目录」的读取器才返回 availability=not_integrated。该接口只列目录，不探测每个工具的运行期可用性（例如沙箱后端是否可连）。
 
 ### 5.4 查询 Workflow 工具调用
 
@@ -257,6 +259,16 @@ GET /api/v1/metrics?page=1&page_size=20
 item 字段为 metric_name、value（有限数值）、labels（JSON 对象）、recorded_at。读取 doc/data-model.md 的 metrics 表，按 recorded_at、id 降序分页。可选 workflow_id 查询参数按 labels.workflow_id 严格过滤，未知 Workflow 返回 404；无参数时展示全局采样记录。表不存在返回 not_integrated。
 
 指标展示保留原始 metric_name、labels、采样时间，不累加分页中可能重复的采样值。Token 名称交接约定为 input_tokens/output_tokens/total_tokens，数值 0 显示为 0，缺少采样显示“暂无采样”；比率和耗时由采集方定义后写入，前端不估算。C 负责采集、去重和 labels.workflow_id（可选 agent_id/model）关联，B 负责建表与审计写入，D 只负责读取和呈现；此约定需 A/B/C 联调验收。
+
+### 5.6 Prometheus 文本指标
+
+`GET /metrics`
+
+`200`，`Content-Type` 为 prometheus_client 0.26.0 的 `CONTENT_TYPE_LATEST`，当前取值 `text/plain; version=1.0.0; charset=utf-8`（跟随依赖版本，前端与抓取配置不应硬编码版本号），响应体为进程内 Prometheus 注册表的文本格式，供 Prometheus 按实例抓取。该端点不在 `/api/v1` 下，与 `/health` 同级，不属于 JSON 契约，错误响应也不使用 §1 的统一错误体。
+
+- 指标名与 §5.5 的 `metrics` 表采样同名同标签（`macp_tool_calls_total`、`macp_tool_duration_seconds`、`macp_stage_duration_seconds`、`macp_llm_tokens_total`、`macp_workflow_runs_total`、`macp_metrics_buffer_samples`），便于与表内采样交叉核对。
+- 只读进程内注册表：不连接数据库、不写审计、不因 `metrics` 表缺失而失败。API 进程（`uvicorn` 托管 `app.api.main:app`）与 Workflow Worker 是同一进程时指标合并在一处；多副本部署按实例分别抓取。
+- 该端点只反映本进程观测到的调用；无任何调用时返回空的指标族（仅 HELP/TYPE 行）。
 
 ## 6. 规划接口（当前未实现）
 
@@ -288,6 +300,6 @@ PATCH /api/v1/config/agents/{agent_id}
 
 ## 8. 版本与变更规则
 
-- 文档版本：`v0.3`，更新时间：2026-09-11。
+- 文档版本：`v0.4`，更新时间：2026-09-15。
 - 任何新增或修改路由，先更新本文件的“已实现接口/规划接口”和对象 Schema，再修改代码。
 - 若 OpenAPI 与本文档冲突，以实际路由和响应模型为准，并在同一变更中修正文档。

@@ -116,7 +116,7 @@ pytest 集成用例尚未落地，E-03 仍按 M5 手工验收。
 | I-06 MCP 工具发现与调用 | 部分 | `tests/unit/test_mcp_tools.py` 走 `mcp.shared.memory` 的**真实 MCP 协议往返**（发现、调用、错误还原、目录）；缺跨进程 stdio 与真实 PostgreSQL 上的 `tool_calls` 落库验收 |
 | I-07 可观测数据输出 | 部分 | `tests/unit/test_observability_metrics.py`：Span 与属性/异常、指标去重、Prometheus 文本、`metrics` 表写入（SQLite 与表缺失两种路径）、降级不阻塞；缺 Jaeger/Prometheus 实例上的实际抓取验收，且 `metrics` 表尚未建（B） |
 | I-08 配置热更新 | 未实现 | `PATCH /api/v1/config/agents/{agent_id}` 未实现（`doc/api.md` §6） |
-| I-09 只读巡检接口 | 通过 | `tests/integration/test_inspection_api.py`；用 SQLite 内存表与注入目录数据，不等于真实 PostgreSQL/MCP 验收 |
+| I-09 只读巡检接口 | 通过 | `tests/integration/test_inspection_api.py`；覆盖分页、`availability` 区分「未接入」与「零条记录」、默认工具目录接线（`/tools` 返回 4 个注册工具）与 Prometheus 文本端点（`/metrics`）；用 SQLite 内存表与注入目录数据，不等于真实 PostgreSQL/MCP 验收 |
 
 运行命令与结果：`uv run pytest -q` → **288 passed / 1 failed**。
 
@@ -125,6 +125,9 @@ pytest 集成用例尚未落地，E-03 仍按 M5 手工验收。
 C 落地注册表后 `default_tool_registry()` 不再返回 `None`，前置条件失效。
 用例意图（没有注册表时不绑定工具、不产生调用记录）仍然成立，
 需改为 `set_tool_registry_factory(lambda: None)` 显式构造；该文件属成员 A（见 ADR-012）。
+
+2026-09-15（成员 D 补齐只读接线后）：`uv run pytest -q` → **291 passed / 1 failed**，
+失败项与上面同一处，仍属成员 A 的过期前置条件。
 
 ## 5. 失败处理约定
 

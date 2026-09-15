@@ -33,17 +33,19 @@
 | 流水线接入 MCP 工具并验收 | A | 已完成 | 编排层冻结工具契约（`ToolSpec`/`ToolCall`/`ToolCallRecord`/`ToolRegistry`）与模型驱动的 ReAct 调用循环，阶段载荷回传 `tool_calls`，注册表缺失时保持原行为（ADR-009）；并补充结构化行为日志（ADR-010） |
 | 支持工具调用审计落库 | B | 已完成 | `tool_calls` 表与 `app/core/tool_audit.py`：先写 running 再执行，成功/失败回写，按 `call_id` 幂等缓存、并发重放拒绝；阶段活动透传 `run_id`/`workflow_run_id` 接入审计（ADR-011） |
 | 完成内置工具、沙箱、可观测接入 | C | 已完成（代码与单元级证据） | `app/tools` 四个内置工具（计算器 AST 白名单、网页搜索、沙箱代码执行、只读 SQL）、`app/sandbox` 策略层 + Docker 隔离后端、`app/mcp` Server/Client/注册表（inprocess/stdio/http 三种传输）、`app/observability` 追踪 + Prometheus 指标 + `metrics` 采样 + 模型回调（ADR-012） |
-| 展示调用链路与 Token 统计 | D | 已完成（只读层） | 新增只读接口 `/providers`、`/agents/{id}`、`/tools`、`/workflows/{id}/tool-calls`、`/metrics`，Web 工作台接入工具调用详情与 Token 采样展示，契约见 `doc/api.md` §5 |
+| 展示调用链路与 Token 统计 | D | 已完成（只读层与接线） | 新增只读接口 `/providers`、`/agents/{id}`、`/tools`、`/workflows/{id}/tool-calls`、`/metrics`，Web 工作台接入工具调用详情与 Token 采样展示（`doc/api.md` §5）；`app/api/main.py` 已注入 `tool_catalog` 并新增 Prometheus 文本端点 `/metrics`（`doc/api.md` §5.6），2026-09-15 补齐 |
 
-- **M4 缺口（C 侧已清）**：MCP 注册表与 4 个内置工具、工具沙箱隔离、
-  OpenTelemetry 追踪、Prometheus 指标采集均已落地（ADR-012）。剩下的缺口不在 C：
+- **M4 缺口（C 侧与 D 侧已清）**：MCP 注册表与 4 个内置工具、工具沙箱隔离、
+  OpenTelemetry 追踪、Prometheus 指标采集均已落地（ADR-012）；D 侧的读取接线
+  （工具目录注入与 Prometheus 文本端点，见 `doc/api.md` §5.3、§5.6）2026-09-15 落地。
+  剩下的缺口属 B 与部署侧：
   - `metrics` 表尚未建，`PostgresMetricSink` 只反射不建表，因此采样写入静默跳过、
-    `/metrics` 仍返回 `availability=not_integrated`——建表属 B；
-  - `/metrics` 与 `/tools` 的读取接线（把 `app.mcp.registry.tool_catalog()` 注入
-    `InspectionStore`、暴露 Prometheus 文本端点）属 D，见 `doc/api.md` §5；
-  - 容器环境变量（`OBS_TRACING_ENDPOINT` 等）与 Prometheus 抓取配置属部署侧。
+    `/api/v1/metrics` 仍返回 `availability=not_integrated`——建表属 B；
+  - 容器环境变量（`OBS_TRACING_ENDPOINT` 等）与 Prometheus 抓取配置（当前
+    `deploy/prometheus/prometheus.yml` 只抓 `dapr-sidecar:9090`，未抓后端 `/metrics`）属部署侧。
 - **待联调**：真实 `tool_calls` / `metrics` 写入的端到端链路（PostgreSQL + Dapr Worker）。
-  审计链路（B）、注册表与工具（C）、只读接口（D）均已就位，缺的是真实数据库上的跑通。
+  审计链路（B）、注册表与工具（C）、只读接口与文本指标端点（D）均已就位，
+  缺的是真实数据库与真实 Prometheus 实例上的跑通。
 - **其他未实现**：`PATCH /api/v1/config/agents/{agent_id}` 配置热更新（见 `doc/api.md` §6）。
 
 ### 验证记录
@@ -57,7 +59,9 @@
   唯一失败是 A 的 `tests/unit/test_pipeline_tools.py::test_role_stage_without_registry_does_not_bind_tools`：
   它用「C 的模块不存在」构造「没有注册表」的前置条件，注册表落地后该前置条件不再成立
   （见 ADR-012「影响」）。
-- 前端 TypeScript 与 Vite 构建通过（D 侧记录）。
+- 2026-09-15（D 侧接线后）：`uv run pytest -q` → **291 passed / 1 failed**，
+  新增工具目录默认接线与 Prometheus 文本端点用例；失败仍是上面 A 的过期用例。
+  前端在 `npm ci` 后 `npm run build` 通过（首次失败是本地 `node_modules` 缺依赖，非代码问题）。
 - 注意事项：数据库读取用例使用 SQLite 内存表与注入目录数据，MCP 用例走内存协议往返而非
   跨进程 stdio，因此不代表真实 PostgreSQL、真实 MCP Server 或浏览器端到端验收。
 
