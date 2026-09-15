@@ -203,3 +203,72 @@ def test_agent_team_matches_d5_d6_pipeline(monkeypatch) -> None:
         "analyst",
         "reporter",
     ]
+
+
+def test_create_agent_registry_entry(monkeypatch) -> None:
+    """`POST /api/v1/config/agents` 登记自定义角色；内置 id 返回 409。"""
+
+    registry: dict[str, dict] = {}
+
+    def fake_list() -> list[dict]:
+        return list(registry.values())
+
+    def fake_create(**kwargs) -> dict:
+        entry = {
+            "id": kwargs["agent_id"],
+            "name": kwargs["name"],
+            "role": kwargs["role"],
+            "description": kwargs.get("description"),
+            "system_prompt": kwargs.get("system_prompt"),
+            "builtin": False,
+            "enabled": kwargs.get("enabled", True),
+            "created_at": None,
+            "updated_at": None,
+        }
+        registry[kwargs["agent_id"]] = entry
+        return entry
+
+    monkeypatch.setattr(api_main, "agent_config_reader", dict)
+    monkeypatch.setattr(api_main, "list_agent_registry", fake_list)
+    monkeypatch.setattr(api_main, "create_agent_registry", fake_create)
+    client = TestClient(app)
+
+    ok = client.post(
+        "/api/v1/config/agents",
+        json={"id": "summarizer", "name": "摘要 Agent", "role": "summarizer"},
+    )
+    assert ok.status_code == 201
+    assert ok.json()["id"] == "summarizer"
+    assert ok.json()["builtin"] is False
+    assert ok.json()["name"] == "摘要 Agent"
+
+    conflict = client.post(
+        "/api/v1/config/agents",
+        json={"id": "collector", "name": "x", "role": "x"},
+    )
+    assert conflict.status_code == 409
+    assert conflict.json()["code"] == "VALIDATION_ERROR"
+
+
+def test_delete_agent_registry_entry(monkeypatch) -> None:
+    """`DELETE /api/v1/config/agents/{id}`：内置角色 409，不存在 404，自定义删除 204。"""
+
+    monkeypatch.setattr(api_main, "agent_config_reader", dict)
+    monkeypatch.setattr(api_main, "list_agent_registry", lambda: [])
+
+    def fake_delete(agent_id: str) -> bool:
+        return agent_id == "summarizer"
+
+    monkeypatch.setattr(api_main, "delete_agent_registry", fake_delete)
+    client = TestClient(app)
+
+    builtin = client.delete("/api/v1/config/agents/collector")
+    assert builtin.status_code == 409
+    assert builtin.json()["code"] == "AGENT_BUILTIN"
+
+    missing = client.delete("/api/v1/config/agents/ghost")
+    assert missing.status_code == 404
+    assert missing.json()["code"] == "AGENT_NOT_FOUND"
+
+    removed = client.delete("/api/v1/config/agents/summarizer")
+    assert removed.status_code == 204

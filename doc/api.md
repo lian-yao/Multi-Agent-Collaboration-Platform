@@ -282,12 +282,18 @@ item 字段为 metric_name、value（有限数值）、labels（JSON 对象）�
 - 只读进程内注册表：不连接数据库、不写审计、不因 `metrics` 表缺失而失败。API 进程（`uvicorn` 托管 `app.api.main:app`）与 Workflow Worker 是同一进程时指标合并在一处；多副本部署按实例分别抓取。
 - 该端点只反映本进程观测到的调用；无任何调用时返回空的指标族（仅 HELP/TYPE 行）。
 
-### 5.7 修改 Agent 配置（热更新）
+### 5.7 Agent 角色目录与配置（热更新）
 
-`GET /api/v1/config/agents`、`PATCH /api/v1/config/agents/{agent_id}`
+`GET /api/v1/config/agents`、`POST /api/v1/config/agents`、
+`PATCH /api/v1/config/agents/{agent_id}`、`DELETE /api/v1/config/agents/{agent_id}`
 
 修改某个角色的模型绑定与调参覆盖值，**无需重启进程**：下一次阶段执行即按新配置建模
 （见 `doc/decisions/013-agent-config-hot-update.md`、`doc/decisions/017-multi-provider-model-registry.md`）。
+
+角色目录来自 `agent_registry` 表（ADR-017 的 `chatModels` 同构扩展）：三个内置流水线角色
+（collector / analyst / reporter）作为 `builtin=true` 的种子数据，**不可删除**；自定义角色
+（`builtin=false`）可自由增删启停。自定义角色暂不接入固定三步流水线，仅作为可绑定模型的
+配置单元存在（意图路由属后续架构演进）。
 
 `GET /api/v1/config/agents` 返回全部角色的生效配置与可选模型清单，供「Agent 团队」页
 （`frontend/src/config/AgentPanel.tsx`）一次加载；`PATCH` 只提交被改动的字段：
@@ -308,7 +314,10 @@ item 字段为 metric_name、value（有限数值）、labels（JSON 对象）�
       "max_output_tokens": null,
       "reasoning_type": "none",
       "status": "idle",
-      "override_keys": ["temperature"]
+      "override_keys": ["temperature"],
+      "builtin": true,
+      "description": "收集、检索并整理任务主题相关的事实与要点。",
+      "enabled": true
     }
   ],
   "available_models": [
@@ -319,7 +328,26 @@ item 字段为 metric_name、value（有限数值）、labels（JSON 对象）�
 
 `override_keys` 列出该角色**当前被覆盖**的字段名（未列出的字段来自环境配置或默认路由），
 供前端区分「显式覆盖」与「回退值」。`available_models` 只含 `enabled=true` 的模型条目，
-按 `provider_id`、`model` 升序。
+按 `provider_id`、`model` 升序。`builtin` / `description` / `enabled` 来自角色目录。
+
+`POST /api/v1/config/agents` 登记自定义角色（请求体）：
+
+```json
+{
+  "id": "summarizer",
+  "name": "摘要 Agent",
+  "role": "summarizer",
+  "description": "收集、归纳并输出摘要。",
+  "enabled": true
+}
+```
+
+- `id`：1–50 字符，`^[A-Za-z0-9._-]+$`；不可与内置角色 id 冲突，重复登记返回 `409`。
+- `name`：1–100 字符；`role`：1–50 字符；`description` 可选（≤ 1000 字符）。
+- `system_prompt` 可选（≤ 8000 字符），本期前端暂不暴露编辑入口。
+
+`DELETE /api/v1/config/agents/{agent_id}` 删除自定义角色（连同其 `agent_configs` 覆盖行）：
+内置角色返回 `409 AGENT_BUILTIN`，不存在的角色返回 `404 AGENT_NOT_FOUND`。
 
 `PATCH` 请求体（所有字段都可选，但至少要给一个）：
 
@@ -354,10 +382,13 @@ item 字段为 metric_name、value（有限数值）、labels（JSON 对象）�
 | HTTP | code | 含义 |
 | --- | --- | --- |
 | 404 | `AGENT_NOT_FOUND` | 角色不存在 |
-| 422 | 框架默认或 `VALIDATION_ERROR` | Pydantic 校验失败（空 body、非法 temperature/top_p、超长 model、空白 model、未知 llm_model_id、未知 reasoning_type） |
+| 409 | `VALIDATION_ERROR` | `POST` 时 id 与内置角色冲突或已存在 |
+| 409 | `AGENT_BUILTIN` | `DELETE` 目标是内置流水线角色 |
+| 422 | 框架默认或 `VALIDATION_ERROR` | Pydantic 校验失败（空 body、非法 temperature/top_p、超长 model、空白 model、未知 llm_model_id、未知 reasoning_type、非法 id 格式） |
 | 503 | `DATA_SOURCE_UNAVAILABLE` | 覆盖值写入失败（写操作必须显式失败，不回退、不静默成功） |
 
-持久化：覆盖值写入 `agent_configs` 表（`doc/data-model.md` §3），只存被覆盖的字段。
+持久化：覆盖值写入 `agent_configs` 表、角色目录写入 `agent_registry` 表
+（`doc/data-model.md` §3），覆盖表只存被覆盖的字段。
 审计：每次成功写入产生结构化日志 `event=config.agent.updated`（含 `agent_id`、`actor`、
 `before`/`after`、`request_id`），表内同时记录 `updated_by` / `updated_at`；
 `updated_by` 取请求头 `X-Request-ID`，缺省为空。
@@ -636,6 +667,10 @@ item 字段为 metric_name、value（有限数值）、labels（JSON 对象）�
 
 `PATCH /api/v1/config/models/{model_id}`：字段省略 = 不改动，显式 `null` = 清除该字段
 （回到「未设置」而非 Provider 默认值）。`provider_id` 不可通过 `PATCH` 修改。
+
+`model_id` 由 `{provider_id}:{model}` 派生，model 名常含 `/`（如 `BAAI/bge-m3`），
+路由按 `{model_id:path}` 匹配——客户端把 id 整体 `encodeURIComponent` 后拼进路径即可，
+`%2F` 会被服务端正确解析为 id 的一部分（普通单段路由会 404，此为 2026-09-16 修复）。
 
 `DELETE /api/v1/config/models/{model_id}` 响应 `204`。
 

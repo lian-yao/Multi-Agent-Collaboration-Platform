@@ -55,6 +55,10 @@ __all__ = [
     "OVERRIDE_FIELDS",
     "agent_config_overrides",
     "effective_override_keys",
+    "list_agent_registry",
+    "get_agent_registry",
+    "create_agent_registry",
+    "delete_agent_registry",
     "resolve_agent_settings",
     "update_agent_config",
 ]
@@ -159,6 +163,49 @@ def agent_config_overrides() -> dict[str, dict[str, Any]]:
         )
         return {}
     return {row["agent_id"]: row for row in rows}
+
+
+def list_agent_registry() -> list[dict[str, Any]]:
+    """角色目录全量（内置 + 自定义）。读取失败返回空表，不阻断配置页。"""
+
+    try:
+        return checkpoint.list_agent_registry()
+    except Exception as exc:
+        log_event(
+            logger,
+            "config.agent.registry_read_fallback",
+            level=logging.WARNING,
+            error=f"{type(exc).__name__}: {exc}",
+            hint="角色目录回退为空",
+        )
+        return []
+
+
+def get_agent_registry(agent_id: str) -> dict[str, Any] | None:
+    return checkpoint.get_agent_registry(agent_id)
+
+
+def create_agent_registry(
+    *,
+    agent_id: str,
+    name: str,
+    role: str,
+    description: str | None = None,
+    system_prompt: str | None = None,
+    enabled: bool = True,
+) -> dict[str, Any]:
+    return checkpoint.create_agent_registry(
+        agent_id=agent_id,
+        name=name,
+        role=role,
+        description=description,
+        system_prompt=system_prompt,
+        enabled=enabled,
+    )
+
+
+def delete_agent_registry(agent_id: str) -> bool:
+    return checkpoint.delete_agent_registry(agent_id)
 
 
 def effective_override_keys(row: dict[str, Any] | None) -> list[str]:

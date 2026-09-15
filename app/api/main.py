@@ -19,7 +19,10 @@ from app.core.agent_config import (
     AgentConfigError,
     OVERRIDE_FIELDS,
     agent_config_overrides,
+    create_agent_registry,
+    delete_agent_registry,
     effective_override_keys,
+    list_agent_registry,
     resolve_agent_settings,
     update_agent_config,
 )
@@ -162,6 +165,8 @@ class AgentResponse(BaseModel):
 
     `override_keys` 列出该角色**当前被显式覆盖**的字段名：前端据此区分「显式覆盖」
     与「回退值」，不必猜测某个值来自哪一层（ADR-013、ADR-017）。
+    `builtin` / `description` / `enabled` 来自角色目录（`agent_registry`），
+    用于区分「内置流水线角色」与「自定义角色」。
     """
 
     id: str
@@ -177,6 +182,9 @@ class AgentResponse(BaseModel):
     reasoning_type: str = "none"
     status: str
     override_keys: list[str] = Field(default_factory=list)
+    builtin: bool = False
+    description: str | None = None
+    enabled: bool = True
 
 
 class AgentListResponse(BaseModel):
@@ -228,6 +236,20 @@ class AgentConfigPatchRequest(BaseModel):
         if not self.model_fields_set:
             raise ValueError("至少需要提供 llm_model_id/model/temperature/top_p/max_output_tokens/reasoning_type 之一")
         return self
+
+
+class AgentRegistryCreateRequest(BaseModel):
+    """`POST /api/v1/config/agents` 的请求体（`doc/api.md` §5.7）。
+
+    新建一个自定义角色条目；`id` 不可与内置角色（collector/analyst/reporter）冲突。
+    """
+
+    id: str = Field(min_length=1, max_length=50, pattern=r"^[A-Za-z0-9._-]+$")
+    name: str = Field(min_length=1, max_length=100)
+    role: str = Field(min_length=1, max_length=50)
+    description: str | None = Field(default=None, max_length=1000)
+    system_prompt: str | None = Field(default=None, max_length=8000)
+    enabled: bool = True
 
 
 class ProviderResponse(BaseModel):
@@ -1002,17 +1024,25 @@ _AGENT_NAMES = {
 
 
 def _agent_response(agent_id: str) -> AgentResponse:
-    """角色的生效配置 + 「哪些字段被显式覆盖」。"""
+    """角色的生效配置 + 「哪些字段被显式覆盖」。
 
-    if agent_id not in _AGENT_NAMES:
-        raise ApiError("AGENT_NOT_FOUND", "Agent 不存在", status.HTTP_404_NOT_FOUND)
+    角色元数据（name/role/description/builtin/enabled）优先从角色目录读，
+    目录缺失该条目时回退到内置 `_AGENT_NAMES`（兼容未跑种子迁移的旧环境）。
+    """
+
     # 覆盖表读一次喂给解析与 override_keys，避免同一请求读两遍存储。
     overrides = agent_config_reader()
+    registry = _agent_registry_map()
+    entry = registry.get(agent_id)
+
+    if entry is None and agent_id not in _AGENT_NAMES:
+        raise ApiError("AGENT_NOT_FOUND", "Agent 不存在", status.HTTP_404_NOT_FOUND)
+
     settings = resolve_agent_settings(agent_id, get_settings(), overrides=overrides)
     return AgentResponse(
         id=agent_id,
-        name=_AGENT_NAMES[agent_id],
-        role=agent_id,
+        name=(entry["name"] if entry else _AGENT_NAMES[agent_id]),
+        role=(entry["role"] if entry else agent_id),
         model=settings.ollama_model if settings.llm_provider == "ollama" else settings.openai_model,
         provider=settings.llm_provider,
         provider_name=settings.provider_name or None,
@@ -1023,7 +1053,19 @@ def _agent_response(agent_id: str) -> AgentResponse:
         reasoning_type=settings.reasoning_type,
         status="idle",
         override_keys=effective_override_keys(overrides.get(agent_id)),
+        builtin=bool(entry["builtin"]) if entry else True,
+        description=entry["description"] if entry else None,
+        enabled=bool(entry["enabled"]) if entry else True,
     )
+
+
+def _agent_registry_map() -> dict[str, dict[str, Any]]:
+    """角色目录的 id → 条目映射；读取失败返回空表（回退 `_AGENT_NAMES`）。"""
+
+    try:
+        return {row["id"]: row for row in list_agent_registry()}
+    except Exception:  # pragma: no cover - 存储不可用时回退
+        return {}
 
 
 def _available_models() -> list[dict[str, Any]]:
@@ -1098,15 +1140,62 @@ def patch_agent_config(
 def list_agent_configs() -> AgentConfigListResponse:
     """一次取回全部角色的生效配置与可选模型清单（`doc/api.md` §5.7）。
 
-    配置页据此渲染「角色 → 模型绑定 + 调参」表单，不需要 N+1 次请求。
+    角色列表来自 `agent_registry`（内置 + 自定义）；目录为空时回退到内置三角色。
     """
 
+    registry = _agent_registry_map()
+    agent_ids = list(registry) if registry else list(_AGENT_NAMES)
     return AgentConfigListResponse(
-        items=[_agent_response(agent_id) for agent_id in _AGENT_NAMES],
+        items=[_agent_response(agent_id) for agent_id in agent_ids],
         available_models=[
             AvailableModelResponse(**item) for item in _available_models()
         ],
     )
+
+
+@app.post(
+    "/api/v1/config/agents",
+    response_model=AgentResponse,
+    status_code=201,
+)
+def create_agent_registry_entry(
+    payload: AgentRegistryCreateRequest,
+    request: Request,
+) -> AgentResponse:
+    """登记一个自定义角色（`doc/api.md` §5.7）。
+
+    内置角色 id（collector/analyst/reporter）不可重复登记。
+    """
+
+    if payload.id in _AGENT_NAMES:
+        raise ApiError("VALIDATION_ERROR", "该 id 属于内置流水线角色，不能重复登记", status.HTTP_409_CONFLICT)
+    try:
+        create_agent_registry(
+            agent_id=payload.id,
+            name=payload.name,
+            role=payload.role,
+            description=payload.description,
+            system_prompt=payload.system_prompt,
+            enabled=payload.enabled,
+        )
+    except SQLAlchemyError as exc:
+        raise ApiError("VALIDATION_ERROR", "角色 id 已存在", status.HTTP_409_CONFLICT) from exc
+    return _agent_response(payload.id)
+
+
+@app.delete("/api/v1/config/agents/{agent_id}", status_code=204)
+def delete_agent_registry_entry(agent_id: str) -> Response:
+    """删除自定义角色（`doc/api.md` §5.7）。
+
+    内置角色返回 `409 AGENT_BUILTIN`；不存在的角色返回 `404`。
+    """
+
+    if agent_id in _AGENT_NAMES:
+        raise ApiError("AGENT_BUILTIN", "内置流水线角色不可删除", status.HTTP_409_CONFLICT)
+    deleted = delete_agent_registry(agent_id)
+    if not deleted:
+        raise ApiError("AGENT_NOT_FOUND", "Agent 不存在", status.HTTP_404_NOT_FOUND)
+    return Response(status_code=204)
 
 
 @app.get("/api/v1/config/provider", response_model=ProviderConfigResponse)
@@ -1448,7 +1537,10 @@ def batch_import_model_registry(
     return ModelBatchImportResponse.model_validate(data)
 
 
-@app.patch("/api/v1/config/models/{model_id}", response_model=ModelRegistryResponse)
+# model_id 由 `{provider_id}:{model}` 派生（§5.10），model 名常含 `/`（如 BAAI/bge-m3）。
+# :path 转换器允许 id 里的斜杠命中路由——客户端把 id 编码成 %2F 后，ASGI 解码成 `/`，
+# 普通 {model_id} 段匹配会直接 404（这就是「模型开关关不掉」的根因）。
+@app.patch("/api/v1/config/models/{model_id:path}", response_model=ModelRegistryResponse)
 def patch_model_registry(
     model_id: str,
     payload: ModelRegistryUpdateRequest,
@@ -1489,7 +1581,7 @@ def patch_model_registry(
     return ModelRegistryResponse.model_validate(data)
 
 
-@app.delete("/api/v1/config/models/{model_id}", status_code=204)
+@app.delete("/api/v1/config/models/{model_id:path}", status_code=204)
 def delete_model_registry(model_id: str, request: Request) -> Response:
     """删除模型条目（`doc/api.md` §5.10）。
 

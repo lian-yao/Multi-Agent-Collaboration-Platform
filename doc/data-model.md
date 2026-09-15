@@ -144,11 +144,46 @@ erDiagram
 读取方是只读接口 `GET /api/v1/metrics`（成员 D）。采样侧**不建表**：表缺失时记一次
 日志并跳过写入，`/api/v1/metrics` 返回 `availability=not_integrated`。
 
+### agent_registry（Agent 角色目录）
+
+| 字段 | 类型 | 约束/默认 | 说明 |
+| --- | --- | --- | --- |
+| id | VARCHAR(50) | PK | 角色 id：内置为 `collector` / `analyst` / `reporter`，自定义为自由 slug |
+| name | VARCHAR(100) | 非空 | 展示名 |
+| role | VARCHAR(50) | 非空 | 角色语义键；内置对齐流水线角色，自定义为自由文本 |
+| description | TEXT | NULL | 职责说明（卡片/详情展示） |
+| system_prompt | TEXT | NULL | 角色系统 Prompt（预留，本期前端不暴露编辑） |
+| builtin | BOOLEAN | `false` | 内置流水线角色标记；`true` 不可删除 |
+| enabled | BOOLEAN | `true` | 停用后不参与配置列表展示 |
+| created_at | TIMESTAMPTZ | `now()` | 创建时间 |
+| updated_at | TIMESTAMPTZ | `now()` | 更新时间 |
+
+角色目录把「代码写死的 `_AGENT_NAMES`」提升为可增删启停的注册表（ADR-017 的
+`chatModels` 同构扩展）。三个内置角色由 `init_checkpoint_schema()` 幂等种子写入；
+自定义角色可自由增删，删除时连同 `agent_configs` 覆盖行一并清理。建表归属：
+`app/core/checkpoint.py::AgentRegistryRecord`。写入方是 `POST/DELETE
+/api/v1/config/agents`（`doc/api.md` §5.7），读取方是同接口的 GET 列表。
+
+**与 `app/agents/roles.py` 的关系（角色定义三处来源，需保持一致）**：
+
+1. `app/agents/roles.py::RoleDefinition`（成员 C 的静态 Prompt 层）—— 内置角色的
+   `system_prompt` **唯一事实源**，同时含默认 `model` / `temperature`。流水线阶段活动
+   仍从这里取角色 Prompt，本表**不取代**它。
+2. `agent_registry`（本表）—— 角色目录的**可增删启停**层，负责「有哪些角色」及其
+   展示名 `name` / 职责 `description` / 启停 `enabled`。内置三行的 `name` / `description`
+   由 `BUILTIN_AGENT_SEED` 种子写入，**与 roles.py 的展示名保持一致**；`system_prompt`
+   列本期预留为空（前端不暴露编辑），真实 Prompt 仍走 roles.py。
+3. `app/api/main.py::_AGENT_NAMES` —— API 层的展示名回退 dict，仅在 `agent_registry`
+   尚未种子化（旧环境未跑迁移）时兜底，**不是**事实源。
+
+三者的内置角色 `name` 语义一致（信息收集 / 数据分析 / 报告生成）；改角色展示名或
+Prompt 时需同步 roles.py 与 `BUILTIN_AGENT_SEED`，避免目录与 Prompt 层漂移。
+
 ### agent_configs（Agent 配置覆盖）
 
 | 字段 | 类型 | 约束/默认 | 说明 |
 | --- | --- | --- | --- |
-| agent_id | VARCHAR(50) | PK | 角色 id：`collector` / `analyst` / `reporter` |
+| agent_id | VARCHAR(50) | PK | 角色 id，指向 `agent_registry.id`（逻辑引用，不建外键） |
 | model | VARCHAR(200) | NULL | 覆盖模型名；NULL 表示回退环境配置 |
 | temperature | DOUBLE PRECISION | NULL | 覆盖温度（0.0–2.0）；NULL 表示回退环境配置 |
 | llm_model_id | VARCHAR(80) | NULL | 指向 `llm_models.id`；设置后由该模型条目提供端点、凭据与特化参数（ADR-017） |
@@ -163,7 +198,7 @@ erDiagram
 `init_checkpoint_schema()` 创建。写入方是 `PATCH /api/v1/config/agents/{agent_id}`
 （`doc/api.md` §5.7），读取方是同接口的 GET 列表面与 Workflow 阶段活动
 （`app/core/agent_config.py::resolve_agent_settings`）。索引：主键即可，无额外索引
-（数据量与角色数同阶，恒为 3 行以内）。
+（数据量与角色数同阶）。
 `llm_model_id` 无外键约束：模型条目被删除时角色退化为「未绑定」并按 `model` 列回退，
 不留悬挂引用导致的读取失败（ADR-017）。
 

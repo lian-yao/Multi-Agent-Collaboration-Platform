@@ -219,6 +219,36 @@ class AgentConfigRecord(Base):
     )
 
 
+class AgentRegistryRecord(Base):
+    """`agent_registry` 表：Agent 角色目录（ADR-017 的 `chatModels` 同构扩展）。
+
+    把角色从「代码写死的 `_AGENT_NAMES`」提升为可增删启停的注册表条目，
+    供 Agent 配置页按 obsidian-yolo 的方式管理。三个内置流水线角色
+    （collector / analyst / reporter）作为 `builtin=True` 的种子数据，
+    不可删除（删除会破坏固定三步流水线拓扑）；自定义角色 `builtin=False`，
+    可自由增删。
+
+    `role` 是流水线语义键（collector 等），自定义角色为自由文本键，
+    仅作标识，不接入固定流水线（意图路由属后续架构演进）。
+    """
+
+    __tablename__ = "agent_registry"
+
+    id: Mapped[str] = mapped_column(String(50), primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    role: Mapped[str] = mapped_column(String(50), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    system_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    builtin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+
 class ProviderConfigRecord(Base):
     """`provider_configs` 表：默认模型路由 + 直连覆盖（`doc/data-model.md` §3）。
 
@@ -443,6 +473,137 @@ def list_agent_configs() -> list[dict[str, Any]]:
     with get_session_factory()() as session:
         rows = session.scalars(select(AgentConfigRecord)).all()
         return [_agent_config_to_dict(row) for row in rows]
+
+
+# ---------------------------------------------------------------------------
+# agent_registry：Agent 角色目录（可增删启停的注册表，ADR-017 同构）
+# ---------------------------------------------------------------------------
+
+# 三个内置流水线角色作为种子数据（对齐 app/agents/roles.py 的展示名与角色键）。
+BUILTIN_AGENT_SEED: tuple[dict[str, Any], ...] = (
+    {
+        "id": "collector",
+        "name": "信息收集 Agent",
+        "role": "collector",
+        "description": "收集、检索并整理任务主题相关的事实与要点，输出结构化信息清单。",
+    },
+    {
+        "id": "analyst",
+        "name": "数据分析 Agent",
+        "role": "analyst",
+        "description": "基于信息清单进行归纳、对比与提炼，识别关键结论、趋势与风险。",
+    },
+    {
+        "id": "reporter",
+        "name": "报告生成 Agent",
+        "role": "reporter",
+        "description": "整合分析摘要，生成结构清晰、可读的正式报告。",
+    },
+)
+
+
+def _agent_registry_to_dict(row: AgentRegistryRecord) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "name": row.name,
+        "role": row.role,
+        "description": row.description,
+        "system_prompt": row.system_prompt,
+        "builtin": row.builtin,
+        "enabled": row.enabled,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+    }
+
+
+def list_agent_registry() -> list[dict[str, Any]]:
+    """返回全部角色目录条目（内置在前，自定义在后，按 id 排序）。"""
+
+    with get_session_factory()() as session:
+        rows = session.scalars(
+            select(AgentRegistryRecord).order_by(
+                AgentRegistryRecord.builtin.desc(), AgentRegistryRecord.id
+            )
+        ).all()
+        return [_agent_registry_to_dict(row) for row in rows]
+
+
+def get_agent_registry(agent_id: str) -> dict[str, Any] | None:
+    with get_session_factory()() as session:
+        row = session.get(AgentRegistryRecord, agent_id)
+        return _agent_registry_to_dict(row) if row else None
+
+
+def create_agent_registry(
+    *,
+    agent_id: str,
+    name: str,
+    role: str,
+    description: str | None = None,
+    system_prompt: str | None = None,
+    enabled: bool = True,
+) -> dict[str, Any]:
+    """插入自定义角色；id 重复抛 `IntegrityError`（上层转 409）。"""
+
+    row = AgentRegistryRecord(
+        id=agent_id,
+        name=name,
+        role=role,
+        description=description,
+        system_prompt=system_prompt,
+        builtin=False,
+        enabled=enabled,
+    )
+    with get_session_factory()() as session:
+        session.add(row)
+        session.commit()
+        session.refresh(row)
+        return _agent_registry_to_dict(row)
+
+
+def delete_agent_registry(agent_id: str) -> bool:
+    """删除自定义角色；内置角色返回 False（由上层区分 409/404）。
+
+    同时清理该角色的覆盖行（`agent_configs` 逻辑关联，无外键）。
+    """
+
+    with get_session_factory()() as session:
+        row = session.get(AgentRegistryRecord, agent_id)
+        if row is None:
+            return False
+        if row.builtin:
+            return False
+        session.delete(row)
+        # 覆盖行随角色一起清掉，不留孤儿。
+        session.query(AgentConfigRecord).filter(
+            AgentConfigRecord.agent_id == agent_id
+        ).delete(synchronize_session=False)
+        session.commit()
+        return True
+
+
+def seed_builtin_agents() -> int:
+    """把三个内置角色写入目录（幂等：已存在则跳过），返回新增条数。"""
+
+    with get_session_factory()() as session:
+        created = 0
+        for seed in BUILTIN_AGENT_SEED:
+            if session.get(AgentRegistryRecord, seed["id"]) is not None:
+                continue
+            session.add(
+                AgentRegistryRecord(
+                    id=seed["id"],
+                    name=seed["name"],
+                    role=seed["role"],
+                    description=seed["description"],
+                    system_prompt=None,
+                    builtin=True,
+                    enabled=True,
+                )
+            )
+            created += 1
+        session.commit()
+        return created
 
 
 def upsert_agent_config(
@@ -1344,6 +1505,8 @@ def init_checkpoint_schema() -> None:
     Base.metadata.create_all(engine)
     # ADR-017：补齐既有表的新增列（新库由 `create_all` 直接建全，此处为幂等空操作）。
     _apply_registry_migrations(engine)
+    # 内置流水线角色种子（幂等）。
+    seed_builtin_agents()
 
 
 def create_workflow_run(

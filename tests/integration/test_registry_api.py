@@ -657,6 +657,37 @@ def test_delete_model_returns_204(api):
     assert registry["delete_model"].calls
 
 
+def test_patch_model_with_slashed_id_reaches_registry(api):
+    """模型 id 含 `/`（如 gateway-main:BAAI/bge-m3）时路由仍要命中（§5.10）。
+
+    id 里的 `/` 被客户端编码成 %2F 后，ASGI 层会先解码回 `/`，
+    普通 `{model_id}` 单段匹配直接 404——路由必须用 `{model_id:path}`。
+    这是「模型开关关不掉」的回归测试。
+    """
+
+    registry, client = api
+
+    response = client.patch(
+        "/api/v1/config/models/gateway-main:BAAI/bge-m3",
+        json={"enabled": False},
+    )
+
+    assert response.status_code == 200
+    args, kwargs = registry["update_model"].last_call
+    assert args[0] == "gateway-main:BAAI/bge-m3"
+    assert kwargs["enabled"] is False
+
+
+def test_delete_model_with_slashed_id_reaches_registry(api):
+    registry, client = api
+
+    response = client.delete("/api/v1/config/models/gateway-main:BAAI/bge-m3")
+
+    assert response.status_code == 204
+    args, _ = registry["delete_model"].last_call
+    assert args[0] == "gateway-main:BAAI/bge-m3"
+
+
 def test_model_registry_validation_error_is_422(api):
     registry, client = api
     registry["create_model"].outcome = model_registry.ModelRegistryError("modalities 只能是 text / vision / pdf")

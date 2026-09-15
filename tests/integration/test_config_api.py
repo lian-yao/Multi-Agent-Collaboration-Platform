@@ -78,6 +78,9 @@ def config_api(monkeypatch):
     monkeypatch.setattr(api_main, "get_settings", lambda: AgentSettings(**ENV_SETTINGS))
     monkeypatch.setattr(api_main, "agent_config_reader", reader)
     monkeypatch.setattr(api_main, "update_agent_config", update)
+    # 角色目录隔离：让 `_agent_response` 走 `_AGENT_NAMES` 回退（builtin=True/
+    # description=None/enabled=True），不触碰真实 agent_registry 表。
+    monkeypatch.setattr(api_main, "list_agent_registry", lambda: [])
     # 模型清单走固定替身：这些用例只关心 §5.7 的契约，不触碰真实注册表。
     monkeypatch.setattr(
         model_registry,
@@ -159,6 +162,10 @@ def test_patch_updates_effective_config(config_api):
         "status": "idle",
         # 只覆盖了两个字段，`override_keys` 就该只有这两个（§5.7）。
         "override_keys": ["model", "temperature"],
+        # 角色目录回退到内置 `_AGENT_NAMES` 时的元数据。
+        "builtin": True,
+        "description": None,
+        "enabled": True,
     }
     assert state["calls"] == [
         _call(model="custom:1b", temperature=0.4)
