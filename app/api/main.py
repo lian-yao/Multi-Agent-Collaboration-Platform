@@ -5,7 +5,6 @@ import logging
 import uuid
 from datetime import datetime
 from typing import Any, Callable, Literal
-from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import FastAPI, Query, Request, Response, status
 from fastapi.responses import JSONResponse
@@ -23,6 +22,13 @@ from app.core.agent_config import (
     update_agent_config,
 )
 from app.core.checkpoint import UNSET
+from app.core.provider_config import (
+    ProviderConfigError,
+    effective_provider_view,
+    resolve_provider_settings,
+    sanitize_base_url,
+    update_provider_config,
+)
 from app.mcp.registry import tool_catalog
 from app.observability.logging import get_logger, log_event
 from app.observability.metrics import render_prometheus_metrics
@@ -151,6 +157,40 @@ class ProviderResponse(BaseModel):
 
 class ProviderListResponse(BaseModel):
     items: list[ProviderResponse]
+
+
+class ProviderConfigResponse(BaseModel):
+    """`GET/PUT /api/v1/config/provider` 的响应（doc/api.md §5.8）。
+
+    永不包含 `api_key` 原值，只回 `api_key_configured`。
+    """
+
+    provider: str
+    model: str
+    base_url: str | None = None
+    temperature: float
+    api_key_configured: bool
+    updated_by: str | None = None
+    updated_at: datetime | None = None
+
+
+class ProviderConfigUpdateRequest(BaseModel):
+    """`PUT /api/v1/config/provider` 的请求体（doc/api.md §5.8）。
+
+    字段缺省 = 不改动；显式 `null` = 清除覆盖、回退环境配置。
+    """
+
+    provider: str | None = Field(default=None, max_length=20)
+    model: str | None = Field(default=None, max_length=200)
+    base_url: str | None = Field(default=None, max_length=500)
+    api_key: str | None = Field(default=None, max_length=500)
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+
+    @model_validator(mode="after")
+    def _require_any_field(self) -> ProviderConfigUpdateRequest:
+        if not self.model_fields_set:
+            raise ValueError("至少需要提供 provider/model/base_url/api_key/temperature 之一")
+        return self
 
 
 class ToolResponse(BaseModel):
@@ -476,7 +516,7 @@ def _authorize_config_write(token: str | None) -> None:
         )
 
 
-def _patch_field(payload: AgentConfigPatchRequest, field: str) -> Any:
+def _patch_field(payload: BaseModel, field: str) -> Any:
     """把「字段缺省」映射成 UNSET、「显式 null」映射成 None（清除覆盖）。"""
 
     return getattr(payload, field) if field in payload.model_fields_set else UNSET
@@ -510,18 +550,49 @@ def patch_agent_config(
     return _agent_response(agent_id)
 
 
+@app.get("/api/v1/config/provider", response_model=ProviderConfigResponse)
+def get_model_provider_config() -> ProviderConfigResponse:
+    """读取生效的模型 Provider 配置（不返回密钥，见 doc/api.md §5.8）。"""
+
+    settings = resolve_provider_settings(get_settings())
+    return ProviderConfigResponse(**effective_provider_view(settings))
+
+
+@app.put("/api/v1/config/provider", response_model=ProviderConfigResponse)
+def put_model_provider_config(
+    payload: ProviderConfigUpdateRequest,
+    request: Request,
+) -> ProviderConfigResponse:
+    """写入 Provider 覆盖值（PostgreSQL 事实源 + Redis 镜像），下一次任务即生效。"""
+
+    _authorize_config_write(request.headers.get("X-Admin-Token"))
+    try:
+        update_provider_config(
+            provider=_patch_field(payload, "provider"),
+            model=_patch_field(payload, "model"),
+            base_url=_patch_field(payload, "base_url"),
+            api_key=_patch_field(payload, "api_key"),
+            temperature=_patch_field(payload, "temperature"),
+            actor=request.headers.get("X-Request-ID"),
+        )
+    except ProviderConfigError as exc:
+        raise ApiError("VALIDATION_ERROR", str(exc), status.HTTP_422_UNPROCESSABLE_ENTITY) from exc
+    except (SQLAlchemyError, OSError, ValueError, KeyError) as exc:
+        raise ApiError("DATA_SOURCE_UNAVAILABLE", "配置写入失败，请稍后重试", 503) from exc
+    settings = resolve_provider_settings(get_settings())
+    return ProviderConfigResponse(**effective_provider_view(settings))
+
+
 @app.get("/api/v1/providers", response_model=ProviderListResponse)
 def list_providers() -> ProviderListResponse:
-    settings = get_settings()
+    settings = resolve_provider_settings(get_settings())
     if settings.llm_provider == "ollama":
         model = settings.ollama_model
         base_url = settings.ollama_base_url
     else:
         model = settings.openai_model
-        base_url = None
-    if base_url:
-        parts = urlsplit(base_url)
-        base_url = urlunsplit((parts.scheme, parts.netloc.rsplit("@", 1)[-1], parts.path, "", ""))
+        base_url = settings.openai_base_url
+    base_url = sanitize_base_url(base_url)
     model_status = "configured" if model else "missing_model"
     return ProviderListResponse(
         items=[

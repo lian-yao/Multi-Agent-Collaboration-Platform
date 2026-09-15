@@ -129,7 +129,7 @@ Dapr Agents 1.0.6 已引入，OpenTelemetry SDK 固定为 1.39.1 以满足其语
 |:---|:---|
 | Dapr与Agent框架的集成复杂度 | 聚焦核心集成场景（持久化 + 状态管理），暂不深入Service Invocation和Actor模型；从单Agent模式起步，再扩展到多Agent |
 | 编排框架选择 | 固定使用LangGraph，不引入CrewAI，集中深度实现完整工作流编排 |
-| LLM API调用成本和延迟 | 优先使用Ollama本地部署小模型（Qwen2.5-Coder 7B量化版），降低延迟和成本；使用OpenAI作为备选方案 |
+| LLM API调用成本和延迟 | 默认使用OpenAI兼容API（凭据由使用者在运行期配置），本地Ollama小模型（Qwen2.5-Coder 7B量化版）作为备用方案，用于降低延迟和成本 |
 | 多Agent状态一致性的管理 | Dapr Workflow自动维护状态快照，无需手动同步；Workflow引擎保证状态变更在持久化后才推进下一步 |
 | 工具调用的安全性 | 对代码执行等敏感工具实现沙箱隔离（Docker容器或Wasm运行时），限制系统资源访问和网络权限 |
 

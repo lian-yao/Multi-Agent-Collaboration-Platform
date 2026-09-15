@@ -184,6 +184,13 @@ class MetricRecord(Base):
     )
 
 
+UNSET = object()
+"""哨兵：区分「调用方没有传该字段」与「显式传 null 清除覆盖」（`doc/api.md` §5.7、§5.8）。"""
+
+PROVIDER_CONFIG_ID = "default"
+"""`provider_configs` 单行表的主键固定值（`doc/data-model.md` §3）。"""
+
+
 class AgentConfigRecord(Base):
     """`agent_configs` 表：Agent 模型的覆盖配置（`doc/data-model.md` §3）。
 
@@ -201,6 +208,86 @@ class AgentConfigRecord(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
     )
+
+
+class ProviderConfigRecord(Base):
+    """`provider_configs` 表：模型 Provider 的运行期覆盖配置（`doc/data-model.md` §3）。
+
+    单行表（`id='default'`），只存**被覆盖的字段**：列值为 NULL 表示回退 API 进程的
+    环境配置。写入方是 `PUT /api/v1/config/provider`（`doc/api.md` §5.8），
+    读取方是 `app/core/provider_config.py`（API 与阶段活动共用）。
+
+    `api_key` 以明文存储，属于运行期凭据：不回传、不落日志，访问边界由数据库与
+    `ADMIN_TOKEN` 保证（ADR-014）。
+    """
+
+    __tablename__ = "provider_configs"
+
+    id: Mapped[str] = mapped_column(String(20), primary_key=True)
+    provider: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    base_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    temperature: Mapped[float | None] = mapped_column(Float, nullable=True)
+    updated_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+
+def _provider_config_to_dict(row: ProviderConfigRecord) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "provider": row.provider,
+        "model": row.model,
+        "base_url": row.base_url,
+        "api_key": row.api_key,
+        "temperature": row.temperature,
+        "updated_by": row.updated_by,
+        "updated_at": row.updated_at,
+    }
+
+
+def get_provider_config() -> dict[str, Any] | None:
+    """返回 Provider 覆盖行；没有写入过返回 None。"""
+
+    with get_session_factory()() as session:
+        row = session.get(ProviderConfigRecord, PROVIDER_CONFIG_ID)
+        return _provider_config_to_dict(row) if row else None
+
+
+def upsert_provider_config(
+    *,
+    provider: Any = UNSET,
+    model: Any = UNSET,
+    base_url: Any = UNSET,
+    api_key: Any = UNSET,
+    temperature: Any = UNSET,
+    updated_by: str | None = None,
+) -> dict[str, Any]:
+    """写入 Provider 覆盖值；未传的字段保持原值，显式传 None 表示清除该字段。"""
+
+    with get_session_factory()() as session:
+        row = session.get(ProviderConfigRecord, PROVIDER_CONFIG_ID)
+        if row is None:
+            row = ProviderConfigRecord(id=PROVIDER_CONFIG_ID)
+            session.add(row)
+        if provider is not UNSET:
+            row.provider = provider
+        if model is not UNSET:
+            row.model = model
+        if base_url is not UNSET:
+            row.base_url = base_url
+        if api_key is not UNSET:
+            row.api_key = api_key
+        if temperature is not UNSET:
+            row.temperature = temperature
+        if updated_by is not None:
+            row.updated_by = updated_by
+        row.updated_at = _utcnow()
+        session.commit()
+        session.refresh(row)
+        return _provider_config_to_dict(row)
 
 
 def _agent_config_to_dict(row: AgentConfigRecord) -> dict[str, Any]:
@@ -227,10 +314,6 @@ def list_agent_configs() -> list[dict[str, Any]]:
     with get_session_factory()() as session:
         rows = session.scalars(select(AgentConfigRecord)).all()
         return [_agent_config_to_dict(row) for row in rows]
-
-
-UNSET = object()
-"""哨兵：区分「调用方没有传该字段」与「显式传 null 清除覆盖」（`doc/api.md` §5.7）。"""
 
 
 def upsert_agent_config(

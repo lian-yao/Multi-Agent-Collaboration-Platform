@@ -21,6 +21,7 @@ from typing import Any
 from app.config import AgentSettings, get_settings
 from app.core import checkpoint
 from app.core.checkpoint import UNSET
+from app.core.provider_config import resolve_provider_settings
 from app.observability.logging import get_logger, log_event
 
 logger = get_logger("core.agent_config")
@@ -85,14 +86,18 @@ def resolve_agent_settings(
     base: AgentSettings | None = None,
     *,
     overrides: dict[str, dict[str, Any]] | None = None,
+    provider_row: dict[str, Any] | None = UNSET,
 ) -> AgentSettings:
-    """把角色覆盖值合并进环境配置，返回生效配置。
+    """把运行期 Provider 配置与角色覆盖值依次合并进环境配置，返回生效配置。
 
     `overrides` 用于调用方（例如 API 进程或测试）注入已读取的覆盖行，
-    缺省时从 `agent_configs` 读取。
+    缺省时从 `agent_configs` 读取；`provider_row` 同理，缺省时经
+    `app/core/provider_config.py` 读取（Redis → PostgreSQL → 环境回退）。
+
+    合并顺序：环境配置 → Provider 覆盖（ADR-014）→ 角色覆盖（ADR-013）。
     """
 
-    resolved = base or get_settings()
+    resolved = resolve_provider_settings(base or get_settings(), row=provider_row)
     rows = agent_config_overrides() if overrides is None else overrides
     override = rows.get(agent_id)
     if not override:

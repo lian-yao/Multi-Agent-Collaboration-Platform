@@ -172,10 +172,12 @@ npm run dev
 
 | 变量 | 说明 |
 | --- | --- |
-| `AGENT_LLM_PROVIDER` | `ollama` 或 `openai` |
-| `AGENT_OLLAMA_BASE_URL` | Ollama 地址 |
+| `AGENT_LLM_PROVIDER` | `openai`（默认，OpenAI 兼容 API）或 `ollama`（备用） |
+| `AGENT_OPENAI_MODEL` | OpenAI 兼容 API 的模型名（默认提供方下必填） |
+| `AGENT_OPENAI_BASE_URL` | 兼容端点地址，留空用官方端点 |
+| `AGENT_OPENAI_API_KEY` | API 凭据（未设置时回退标准 `OPENAI_API_KEY`） |
+| `AGENT_OLLAMA_BASE_URL` | Ollama 地址（`AGENT_LLM_PROVIDER=ollama` 时使用） |
 | `AGENT_OLLAMA_MODEL` | Ollama 模型名 |
-| `AGENT_OPENAI_MODEL` | OpenAI 模型名 |
 | `REDIS_URL` | Redis 连接 |
 | `DATABASE_URL` | PostgreSQL 连接（也是只读 SQL 工具的默认数据源） |
 | `LOG_LEVEL` | 应用行为日志级别，默认 `INFO`（见 ADR-010） |
@@ -193,7 +195,13 @@ npm run dev
 | `OBS_TRACING_SAMPLE_RATIO` | 采样比例，默认 `1.0` |
 | `OBS_METRICS_ENABLED` | 是否采集指标，默认 `true` |
 | `OBS_METRICS_FLUSH_SIZE` | 采样批量落库阈值，默认 `50` |
-| `ADMIN_TOKEN` | 配置写入（`PATCH /api/v1/config/agents/{agent_id}`）所需的 `X-Admin-Token` 值；留空表示禁用该接口（返回 403，fail-closed，见 `doc/api.md` §5.7） |
+| `ADMIN_TOKEN` | 配置写入（`PATCH /api/v1/config/agents/{agent_id}`、`PUT /api/v1/config/provider`）所需的 `X-Admin-Token` 值；留空表示禁用写接口（返回 403，fail-closed，见 `doc/api.md` §5.7、§5.8） |
+
+模型接入默认走 OpenAI 兼容 API（ADR-014）。`AGENT_OPENAI_*` 是**环境回退值**：
+运行期可用 `PUT /api/v1/config/provider`（`doc/api.md` §5.8）写入覆盖，覆盖值落
+PostgreSQL `provider_configs`（事实源）并镜像到 Redis `provider:config`。
+Redis 不可用只影响镜像：写仍然成功、读回源 PostgreSQL，两处都不可用时回退上面的
+环境变量，因此删掉 Redis 不会丢配置。
 
 `deploy/compose.yaml` 的 backend 显式设置 `OBS_TRACING_ENDPOINT=http://jaeger:4318/v1/traces`
 与 `OBS_METRICS_SINK=postgres`，避免容器内默认值 `localhost` 指不到 Jaeger。

@@ -24,7 +24,7 @@
 
 - 编排框架固定为 LangGraph，不引入 CrewAI；Dapr Agents 1.0.6 已引入，使用 OpenTelemetry 1.39.1 兼容组合。
 - 优先集成持久化执行与状态管理，暂不深入 Service Invocation 与 Actor 模型。
-- 模型优先 Ollama 本地小模型，OpenAI 作为备选。
+- 模型接入以 OpenAI 兼容 API 为主（凭据由使用者在运行期通过 `PUT /api/v1/config/provider` 提供），Ollama 本地小模型作为备用，见 ADR-014。
 - 代码执行等敏感工具必须沙箱隔离（Docker 或 Wasm）。
 
 ### 目录结构

@@ -231,7 +231,7 @@
 
 GET /api/v1/providers
 
-响应为 `{items: Provider[]}`，当前只返回选中的 Provider。字段：id、name、model、base_url（可空）、status、temperature。数据来自 API 进程 AGENT_* 环境配置；status 为 configured 或 missing_model，不代表模型服务可达。base_url 去除用户信息、query、fragment；不返回密钥，不主动探测模型端点。
+响应为 `{items: Provider[]}`，当前只返回选中的 Provider。字段：id、name、model、base_url（可空）、status、temperature。数据来自运行期 Provider 配置（§5.8）与环境配置 `AGENT_*` 的合并结果；status 为 configured 或 missing_model，不代表模型服务可达（凭据是否配置也不反映在该字段上）。base_url 去除用户信息、query、fragment；不返回密钥，不主动探测模型端点。
 
 ### 5.2 查询 Agent 详情
 
@@ -291,7 +291,7 @@ item 字段为 metric_name、value（有限数值）、labels（JSON 对象）�
 - 字段省略 = 不改动该字段；显式传 `null` = 清除该字段的覆盖，回退环境配置。
 - `model`：1–200 字符，去除首尾空白后不能为空。
 - `temperature`：`0.0`–`2.0`（闭区间）。
-- `provider` 不在本接口范围：它由 API 进程的 `AGENT_LLM_PROVIDER` 决定（涉及 base_url 与凭据），修改需要改部署配置并重启。
+- `provider` 不在本接口范围：它涉及 base_url 与凭据，由 §5.8 单独管理；未写入覆盖时回退 API 进程的 `AGENT_LLM_PROVIDER`。
 
 权限边界：必须携带请求头 `X-Admin-Token`，其值等于服务端环境变量 `ADMIN_TOKEN`。服务端未配置 `ADMIN_TOKEN`（空字符串）时**一律拒绝**（fail-closed），返回 `403 CONFIG_WRITE_FORBIDDEN`；令牌错误或缺头同样是 `403`。错误响应体不包含令牌内容。
 
@@ -309,6 +309,68 @@ item 字段为 metric_name、value（有限数值）、labels（JSON 对象）�
 持久化：覆盖值写入 `agent_configs` 表（`doc/data-model.md` §3），只存被覆盖的字段。审计：每次成功写入产生结构化日志 `event=config.agent.updated`（含 `agent_id`、`actor`、`before`/`after`、`request_id`），表内同时记录 `updated_by` / `updated_at`；`updated_by` 取请求头 `X-Request-ID`，缺省为空。
 
 并发与顺序：接口是「最后写入者生效」，不提供乐观锁或版本号；覆盖值按角色粒度，互不影响。
+
+### 5.8 读取与修改模型 Provider 配置
+
+`GET /api/v1/config/provider`、`PUT /api/v1/config/provider`
+
+读取生效的模型 Provider 配置，或写入运行期覆盖值（**无需重启进程**，与 §5.7 同构，见 ADR-014）。
+
+`GET` 响应（`api_key` 永不回传）：
+
+```json
+{
+  "provider": "openai",
+  "model": "gpt-4o-mini",
+  "base_url": "https://api.example.com/v1",
+  "temperature": 0.2,
+  "api_key_configured": true,
+  "updated_by": "req-7f3",
+  "updated_at": "2026-09-15T08:00:00Z"
+}
+```
+
+- 字段是「存储配置 → 环境配置」合并后的生效值；`base_url` 为空表示使用提供方官方端点。
+- `api_key_configured` 只表示是否已有可用凭据（存储值或环境变量），**不代表凭据有效**。
+- `updated_*` 反映最近一次通过本接口写入的时间与来源；从未写入过时为 `null`。
+- `base_url` 去掉用户信息、query、fragment 后再返回，不返回密钥。
+
+`PUT` 请求体（五个字段都可选，但至少要给一个）：
+
+```json
+{
+  "provider": "openai",
+  "model": "gpt-4o-mini",
+  "base_url": "https://api.example.com/v1",
+  "api_key": "sk-...",
+  "temperature": 0.2
+}
+```
+
+- 字段省略 = 不改动该字段；显式传 `null` = 清除该字段的覆盖，回退环境配置。
+- `provider`：`openai` 或 `ollama`。
+- `model`：1–200 字符，去除首尾空白后不能为空。
+- `base_url`：不超过 500 字符；必须是 `http`/`https` URL；显式空串按 `null`（清除覆盖）处理。
+- `api_key`：1–500 字符；**只写入、不回读**，响应与日志都不含原值。
+- `temperature`：`0.0`–`2.0`（闭区间）。
+
+权限边界：`PUT` 必须携带请求头 `X-Admin-Token`，规则与 §5.7 完全一致（`ADMIN_TOKEN` 未配置时一律 `403`，fail-closed）。`GET` 是只读接口，不需要令牌。
+
+响应：两者都返回上面的 `GET` 结构（`PUT` 返回写入后的生效值，同样不含密钥）。
+
+错误码：
+
+| HTTP | code | 含义 |
+| --- | --- | --- |
+| 403 | `CONFIG_WRITE_FORBIDDEN` | 未配置/缺少/错误的 `X-Admin-Token`（仅 `PUT`） |
+| 422 | 框架默认或 `VALIDATION_ERROR` | Pydantic 校验失败或取值非法（空 body、非法 provider、超长字段、非 http(s) base_url、temperature 越界） |
+| 503 | `DATA_SOURCE_UNAVAILABLE` | 覆盖值写入失败（写操作必须显式失败，不回退、不静默成功） |
+
+持久化与一致性：覆盖值写入 `provider_configs`（单行，`doc/data-model.md` §3）；**PostgreSQL 为事实源**，写入成功后把同一份配置镜像到 Redis `provider:config`（`doc/data-model.md` §4）。Redis 写失败只记警告、不影响响应，读取时未命中会回源 PostgreSQL 并回填；Redis 与 PostgreSQL 都不可用时回退环境配置并记警告，读接口不因此失败。解密/加密不在本期范围，`api_key` 以明文存储在事实源与镜像中，访问边界由数据库与 `ADMIN_TOKEN` 保证。
+
+审计：每次成功写入产生结构化日志 `event=config.provider.updated`（含 `actor`、变更字段名、`before`/`after` 的**脱敏**快照——`api_key` 只记 `set`/`unset`）。
+
+模型构造语义：合并后的配置在阶段活动执行时解析，因此 `PUT` 后的下一次任务即生效；`provider=openai` 而缺少 `model` 或凭据时，模型构造抛出明确错误并让任务失败，**不静默回退到其他提供方**。
 
 ## 6. 规划接口（当前未实现）
 
@@ -336,11 +398,11 @@ POST /api/v1/agents/{agent_id}/run
 - 初始化顺序：并行调用 `GET /agents` 与 `POST /sessions`。
 - 发送消息后保存 `workflow_id`，每 2 秒轮询一次 Workflow；终态为 `completed`、`failed`、`cancelled` 时停止轮询。
 - Token 与调用明细由 §5 读取；区分加载、失败、未接入、无记录、有记录，运行时轮询，终态补刷。切换 Workflow 时丢弃旧请求结果；调用和指标独立失败，不能阻断会话功能。主决策 Agent 选择仍为预览，任务标题取用户消息摘要。
-- 配置写入（§5.7）当前没有前端入口：写接口需要 `ADMIN_TOKEN`，令牌不能下发到浏览器。前端若要展示覆盖状态，只读取 §4.9 / §5.2 的生效值。
+- 配置写入（§5.7、§5.8 的 `PUT`）当前没有前端入口：写接口需要 `ADMIN_TOKEN`，令牌不能下发到浏览器。前端若要展示生效配置，只读取 §5.1 / §4.9 / §5.2，以及 §5.8 的 `GET`（该接口不返回密钥，可以安全展示）。
 - Agent 执行台根据 Workflow 的 `checkpoint.completed_steps` 与 `current_step` 展示阶段状态；不得在无 Workflow 时预填三张 Agent 卡片。
 
 ## 8. 版本与变更规则
 
-- 文档版本：`v0.5`，更新时间：2026-09-15。
+- 文档版本：`v0.6`，更新时间：2026-09-15。
 - 任何新增或修改路由，先更新本文件的“已实现接口/规划接口”和对象 Schema，再修改代码。
 - 若 OpenAPI 与本文档冲突，以实际路由和响应模型为准，并在同一变更中修正文档。
