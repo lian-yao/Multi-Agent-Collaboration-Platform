@@ -37,7 +37,7 @@
 | 流水线接入 MCP 工具并验收 | A | 代码完成，验收未闭环 | 编排层冻结工具契约（`ToolSpec`/`ToolCall`/`ToolCallRecord`/`ToolRegistry`）与模型驱动的 ReAct 调用循环，阶段载荷回传 `tool_calls`，注册表缺失时保持原行为（ADR-009）；并补充结构化行为日志（ADR-010）。代码与单元级证据齐备，但真实模型路径未产生工具调用，验收证据待补 |
 | 支持工具调用审计落库 | B | 已完成 | `tool_calls` 表与 `app/core/tool_audit.py`：先写 running 再执行，成功/失败回写，按 `call_id` 幂等缓存、并发重放拒绝；阶段活动透传 `run_id`/`workflow_run_id` 接入审计（ADR-011） |
 | 完成内置工具、沙箱、可观测接入 | C | 已完成（代码与单元级证据） | `app/tools` 四个内置工具（计算器 AST 白名单、网页搜索、沙箱代码执行、只读 SQL）、`app/sandbox` 策略层 + Docker 隔离后端、`app/mcp` Server/Client/注册表（inprocess/stdio/http 三种传输）、`app/observability` 追踪 + Prometheus 指标 + `metrics` 采样 + 模型回调（ADR-012） |
-| 展示调用链路与 Token 统计 | D | 已完成（含 Provider 配置写入面板） | 新增只读接口 `/providers`、`/agents/{id}`、`/tools`、`/workflows/{id}/tool-calls`、`/metrics`，Web 工作台接入工具调用详情与 Token 采样展示（`doc/api.md` §5）；`app/api/main.py` 已注入 `tool_catalog` 并新增 Prometheus 文本端点 `/metrics`（`doc/api.md` §5.6），2026-09-15 补齐；同日「工具与配置」页新增 Provider 配置表单，读写 §5.8（含 403 提示、清空即回退环境配置、清除覆盖按钮），令牌由操作者手动输入且只留内存 |
+| 展示调用链路与 Token 统计 | D | 已完成（含 Provider 配置写入面板） | 新增只读接口 `/providers`、`/agents/{id}`、`/tools`、`/workflows/{id}/tool-calls`、`/metrics`，Web 工作台接入工具调用详情与 Token 采样展示（`doc/api.md` §5）；`app/api/main.py` 已注入 `tool_catalog` 并新增 Prometheus 文本端点 `/metrics`（`doc/api.md` §5.6），2026-09-15 补齐；同日「工具与配置」页新增 Provider 配置表单，读写 §5.8（清空即回退环境配置、清除覆盖按钮），写入不鉴权（ADR-015） |
 
 - **M4 代码落地情况（2026-09-15）**：代码侧原缺口已全部落地——MCP 注册表与 4 个内置工具、工具沙箱隔离、
   OpenTelemetry 追踪、Prometheus 指标采集（ADR-012）；读取接线（工具目录注入与
@@ -80,6 +80,7 @@
   `ResponseError: model 'qwen2.5-coder:7b-does-not-exist' not found (404)`
   （collect 已用环境配置跑完）；清除覆盖后再次提交任务恢复 `completed`。
   容器未配置 `ADMIN_TOKEN` 时同一请求返回 `403 CONFIG_WRITE_FORBIDDEN`。
+  **2026-09-15 更新**：该令牌边界已按 ADR-015 取消，上面的令牌步骤不再适用。
 
 ### 验证记录
 
@@ -120,6 +121,13 @@
   `/providers` 反映合并后的生效值；删除 `provider:config` 缓存后 `GET` 仍返回
   存储值并自动回填。冒烟写入的行与缓存键已清理。前端目前没有测试框架，
   门禁是类型检查 + 构建，见 `doc/testing.md` §3.3。
+- 2026-09-15（取消写入令牌后，ADR-015）：`uv run pytest -q` → **359 passed / 0 failed**
+  （删除 7 个令牌用例、各留 1 例「裸请求可写」；`AdminSettings`/`get_admin_settings()`
+  一并移除，用例数下降属预期），`npm --prefix frontend run build` 通过。
+  真实环境复测（本机 PostgreSQL 5433 + Redis 6380 + uvicorn，**不配置任何令牌**）：
+  `PUT /api/v1/config/provider` → `200` 且响应不含密钥；`GET` 回读生效值；
+  `/providers` 反映新值；删除 `provider:config` 后 `GET` 仍返回存储值并自动回填。
+  冒烟数据与缓存键已清理。
 - 注意事项：数据库读取用例使用 SQLite 内存表与注入目录数据，MCP 用例走内存协议往返而非
   跨进程 stdio，因此不代表真实 PostgreSQL、真实 MCP Server 或浏览器端到端验收。
 

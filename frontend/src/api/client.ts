@@ -39,10 +39,9 @@ export const api = {
  getAgents: async () => (await json<{ items: Agent[] }>("/api/v1/agents")).items,
   getProviders: async () => (await json<{ items: Provider[] }>("/api/v1/providers")).items,
   getProviderConfig: () => json<ProviderConfig>("/api/v1/config/provider"),
-  updateProviderConfig: (update: ProviderConfigUpdate, adminToken: string) =>
+  updateProviderConfig: (update: ProviderConfigUpdate) =>
     json<ProviderConfig>("/api/v1/config/provider", {
       method: "PUT",
-      headers: { "X-Admin-Token": adminToken },
       body: JSON.stringify(update),
     }),
   getTools: (page = 1) => json<DataPage<Tool>>(`/api/v1/tools?page=${page}&page_size=20`),

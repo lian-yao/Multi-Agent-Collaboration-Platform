@@ -195,7 +195,6 @@ npm run dev
 | `OBS_TRACING_SAMPLE_RATIO` | 采样比例，默认 `1.0` |
 | `OBS_METRICS_ENABLED` | 是否采集指标，默认 `true` |
 | `OBS_METRICS_FLUSH_SIZE` | 采样批量落库阈值，默认 `50` |
-| `ADMIN_TOKEN` | 配置写入（`PATCH /api/v1/config/agents/{agent_id}`、`PUT /api/v1/config/provider`）所需的 `X-Admin-Token` 值；留空表示禁用写接口（返回 403，fail-closed，见 `doc/api.md` §5.7、§5.8） |
 
 模型接入默认走 OpenAI 兼容 API（ADR-014）。`AGENT_OPENAI_*` 是**环境回退值**：
 运行期可用 `PUT /api/v1/config/provider`（`doc/api.md` §5.8）写入覆盖，覆盖值落
@@ -206,8 +205,11 @@ Redis 不可用只影响镜像：写仍然成功、读回源 PostgreSQL，两处
 `deploy/compose.yaml` 的 backend 显式设置 `OBS_TRACING_ENDPOINT=http://jaeger:4318/v1/traces`
 与 `OBS_METRICS_SINK=postgres`，避免容器内默认值 `localhost` 指不到 Jaeger。
 
-> `ADMIN_TOKEN` 未写入 `deploy/compose.yaml`：容器默认不开放配置写入，需要在
-> `deploy/.env` 或 compose 覆盖里显式提供，避免示例部署带上一个可猜的默认口令。
+> **安全边界（ADR-015）**：配置写接口（`PATCH /api/v1/config/agents/{agent_id}`、
+> `PUT /api/v1/config/provider`）不再鉴权，任何能访问 API 的调用方都能改写模型端点与
+> 凭据。`ADMIN_TOKEN` 已于 2026-09-15 取消。因此请把 API 限制在本机或可信内网
+> （compose 默认只映射到宿主机端口，不要直接暴露到公网）；若将来需要公网或多租户，
+> 应引入会话级身份或 API 网关，而不是静态令牌。
 
 > 工具、沙箱与可观测的完整配置项见 `app/tools/config.py`、`app/sandbox/config.py`、
 > `app/mcp/config.py`、`app/observability/config.py`（ADR-012）。

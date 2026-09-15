@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hmac
 import logging
 import uuid
 from datetime import datetime
@@ -14,7 +13,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.store import SqlApiStore
 from app.api.inspection import InspectionStore
-from app.config import get_admin_settings, get_settings
+from app.config import get_settings
 from app.core.agent_config import (
     AgentConfigError,
     agent_config_overrides,
@@ -498,24 +497,6 @@ def _agent_response(agent_id: str) -> AgentResponse:
     )
 
 
-def _authorize_config_write(token: str | None) -> None:
-    """配置写入的权限边界：fail-closed（doc/api.md §5.7、ADR-013）。"""
-
-    expected = get_admin_settings().admin_token
-    if not expected or not token or not hmac.compare_digest(token, expected):
-        log_event(
-            logger,
-            "config.write_rejected",
-            level=logging.WARNING,
-            reason="token_not_configured" if not expected else "token_mismatch",
-        )
-        raise ApiError(
-            "CONFIG_WRITE_FORBIDDEN",
-            "配置写入被拒绝：需要管理员令牌",
-            status.HTTP_403_FORBIDDEN,
-        )
-
-
 def _patch_field(payload: BaseModel, field: str) -> Any:
     """把「字段缺省」映射成 UNSET、「显式 null」映射成 None（清除覆盖）。"""
 
@@ -535,7 +516,6 @@ def patch_agent_config(
 
     if agent_id not in _AGENT_NAMES:
         raise ApiError("AGENT_NOT_FOUND", "Agent 不存在", status.HTTP_404_NOT_FOUND)
-    _authorize_config_write(request.headers.get("X-Admin-Token"))
     try:
         update_agent_config(
             agent_id,
@@ -565,7 +545,6 @@ def put_model_provider_config(
 ) -> ProviderConfigResponse:
     """写入 Provider 覆盖值（PostgreSQL 事实源 + Redis 镜像），下一次任务即生效。"""
 
-    _authorize_config_write(request.headers.get("X-Admin-Token"))
     try:
         update_provider_config(
             provider=_patch_field(payload, "provider"),

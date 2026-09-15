@@ -217,8 +217,8 @@ class ProviderConfigRecord(Base):
     环境配置。写入方是 `PUT /api/v1/config/provider`（`doc/api.md` §5.8），
     读取方是 `app/core/provider_config.py`（API 与阶段活动共用）。
 
-    `api_key` 以明文存储，属于运行期凭据：不回传、不落日志，访问边界由数据库与
-    `ADMIN_TOKEN` 保证（ADR-014）。
+    `api_key` 以明文存储，属于运行期凭据：不回传、不落日志，访问边界由数据库权限与
+    部署网络保证（ADR-014、ADR-015）。
     """
 
     __tablename__ = "provider_configs"

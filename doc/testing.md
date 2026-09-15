@@ -55,7 +55,7 @@ cd deploy; .\start.ps1                     # 起完整环境
 | I-07 | 可观测数据输出 | 关键 Span 与指标可在 Jaeger/Prometheus 查到 | M4 |
 | I-08 | 配置热更新 | PATCH agent 后新执行使用新配置 | M4 |
 | I-09 | D7-D8 只读巡检接口 | Provider/Agent/工具/调用/指标接口的分页、`availability` 区分「未接入」与「零条记录」、404/422/503 契约 | M4 |
-| I-10 | Provider 配置读写 | `GET/PUT /api/v1/config/provider`：403 fail-closed、200 生效值与回退、422 校验、503 写失败；覆盖值落 `provider_configs` 并镜像 Redis，响应与日志不含密钥（ADR-014） | M4 |
+| I-10 | Provider 配置读写 | `GET/PUT /api/v1/config/provider`：200 生效值与回退、422 校验、503 写失败、裸请求可写（不鉴权，ADR-015）；覆盖值落 `provider_configs` 并镜像 Redis，响应与日志不含密钥（ADR-014） | M4 |
 
 ### 2.3 端到端测试（E）
 
@@ -100,10 +100,10 @@ pytest 集成用例尚未落地，E-03 仍按 M5 手工验收。
 
 Provider 配置面板（`frontend/src/Inspection.tsx::ProviderConfigPanel`）的验证步骤：
 
-1. 起后端（真实 PostgreSQL + Redis，配置 `ADMIN_TOKEN`）与 `npm run dev`；
+1. 起后端（真实 PostgreSQL + Redis）与 `npm run dev`；
 2. 「工具与配置」页应显示生效的 provider/model/地址/温度与凭据状态；
-3. 不填或填错管理员令牌提交 → 页面提示 403，配置不变；
-4. 填对令牌、改模型或地址提交 → 提示已保存，页面回读生效值，关键字段不出现密钥；
+3. 填入非法取值（例如 Temperature 填 3）提交 → 页面给出取值错误，配置不变；
+4. 改模型或地址后提交 → 提示已保存，页面回读生效值，响应与页面都不出现密钥；
 5. 点「清除覆盖并回退环境配置」→ 页面回到环境配置值。
 
 浏览器端的自动化用例（Playwright 之类）尚未引入，属后续增量。
@@ -135,9 +135,9 @@ Provider 配置面板（`frontend/src/Inspection.tsx::ProviderConfigPanel`）的
 | U-10 行为日志事件 | 通过 | `tests/unit/test_observability.py`（ADR-010） |
 | I-06 MCP 工具发现与调用 | 部分 | `tests/unit/test_mcp_tools.py` 走 `mcp.shared.memory` 的**真实 MCP 协议往返**（发现、调用、错误还原、目录）；真实 PostgreSQL 上的 `tool_calls` 落库与读回已于 2026-09-15 验收（`calculator` `21*2`→`42`，`GET /workflows/{id}/tool-calls` 返回 1 条）；缺跨进程 stdio |
 | I-07 可观测数据输出 | 通过 | `tests/unit/test_observability_metrics.py`：Span 与属性/异常、指标去重、Prometheus 文本、`metrics` 表写入（SQLite 与表缺失两种路径）、降级不阻塞；`metrics` 表已由 `app/core/checkpoint.py::MetricRecord` 建出，2026-09-15 在真实 PostgreSQL 上跑通采样落库与 `/api/v1/metrics` 读回（16 条采样），真实 Prometheus 上抓到 `backend`/`dapr-sidecar` 两个 `up` target（43 条 `macp_*` 序列），真实 Jaeger 上查到 `stage.run`/`llm.chat` span |
-| I-08 配置热更新 | 通过 | `PATCH /api/v1/config/agents/{agent_id}` 已实现（`doc/api.md` §5.7、ADR-013）：覆盖写 `agent_configs`，阶段活动执行时解析生效配置，无需重启；单元用例 `tests/unit/test_agent_config.py`（合并/校验/回退/表契约），集成用例 `tests/integration/test_config_api.py`（403/404/422/503/200 与生效值）；真实 PostgreSQL 上已跑通写入—读回—新执行生效 |
+| I-08 配置热更新 | 通过 | `PATCH /api/v1/config/agents/{agent_id}` 已实现（`doc/api.md` §5.7、ADR-013）：覆盖写 `agent_configs`，阶段活动执行时解析生效配置，无需重启；单元用例 `tests/unit/test_agent_config.py`（合并/校验/回退/表契约），集成用例 `tests/integration/test_config_api.py`（404/422/503/200 与生效值，裸请求可写见 ADR-015）；真实 PostgreSQL 上已跑通写入—读回—新执行生效 |
 | I-09 只读巡检接口 | 通过 | `tests/integration/test_inspection_api.py`；覆盖分页、`availability` 区分「未接入」与「零条记录」、默认工具目录接线（`/tools` 返回 4 个注册工具）与 Prometheus 文本端点（`/metrics`）；用 SQLite 内存表与注入目录数据，不等于真实 PostgreSQL/MCP 验收 |
-| I-10 Provider 配置读写 | 通过（含真实环境冒烟） | 单元与集成用例：`tests/unit/test_provider_config.py`（26 例：表契约、合并顺序、Redis 命中/回源/回填、镜像失败降级、密钥脱敏、字段校验）与 `tests/integration/test_provider_config_api.py`（15 例：403/422/503/200、显式 null 清除、provider 切换）。2026-09-15 真实环境冒烟（本机 PostgreSQL 5433 + Redis 6380 + uvicorn）：无令牌/错误令牌 `PUT` → `403 CONFIG_WRITE_FORBIDDEN`；正确令牌 `PUT` → `200` 且响应不含密钥；`GET` 回读生效值；`/providers` 反映新值；删除 `provider:config` 后 `GET` 仍返回存储值并自动回填缓存。测试数据已清理 |
+| I-10 Provider 配置读写 | 通过（含真实环境冒烟） | 单元与集成用例：`tests/unit/test_provider_config.py`（26 例：表契约、合并顺序、Redis 命中/回源/回填、镜像失败降级、密钥脱敏、字段校验）与 `tests/integration/test_provider_config_api.py`（11 例：422/503/200、显式 null 清除、provider 切换、裸请求可写）。2026-09-15 真实环境冒烟（本机 PostgreSQL 5433 + Redis 6380 + uvicorn）：`PUT` 不带任何令牌 → `200` 且响应不含密钥；`GET` 回读生效值；`/providers` 反映新值；删除 `provider:config` 后 `GET` 仍返回存储值并自动回填缓存。测试数据已清理 |
 
 运行命令与结果：`uv run pytest -q` → **288 passed / 1 failed**。
 
@@ -167,6 +167,12 @@ M4 未闭环的剩余缺口只剩真实流水线的工具调用行为（模型�
 新增 I-10（Provider 配置读写）的单元与集成用例；默认提供方改为 OpenAI 兼容 API
 （ADR-014），覆盖值落 `provider_configs` 并镜像 Redis。剩余缺口不变：**尚未在真实
 API 模型下跑通工具调用**，因此 M4 仍是「代码完成、验收未闭环」。
+
+2026-09-15（取消写入令牌后，ADR-015）：`uv run pytest -q` → **359 passed / 0 failed**。
+删除 7 个令牌相关用例（`test_config_api.py` 4 例、`test_provider_config_api.py` 4 例，
+其中两例为参数化），改为各留 1 例「裸请求即可写入」；`AdminSettings` 与
+`get_admin_settings()` 一并移除，因此用例总数下降属于预期，不是跳过或删除有效断言。
+`npm --prefix frontend run build` 通过（前端同步删除令牌输入框与 403 分支）。
 
 ## 5. 失败处理约定
 

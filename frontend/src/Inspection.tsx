@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type ChangeEvent, type FormEvent, type ReactNode } from "react";
-import { ApiError, api } from "./api/client";
+import { api } from "./api/client";
 import type { DataPage, Metric, ProviderConfig, ProviderConfigUpdate, Workflow } from "./types/api";
 
 function Records<T>({ title, load, render, poll = false, refreshKey = "" }: {
@@ -123,7 +123,6 @@ export function ProviderConfigPanel() {
   const [config, setConfig] = useState<ProviderConfig | null>(null);
   const [initial, setInitial] = useState<ProviderForm | null>(null);
   const [form, setForm] = useState<ProviderForm | null>(null);
-  const [token, setToken] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -165,10 +164,6 @@ export function ProviderConfigPanel() {
   };
 
   const reportFailure = (cause: unknown, fallback: string) => {
-    if (cause instanceof ApiError && cause.status === 403) {
-      setNotice({ tone: "bad", text: "管理员令牌缺失或不正确，服务端拒绝了写入（403）。" });
-      return;
-    }
     setNotice({ tone: "bad", text: cause instanceof Error ? cause.message : fallback });
   };
 
@@ -183,13 +178,9 @@ export function ProviderConfigPanel() {
       setNotice({ tone: "bad", text: "没有需要保存的改动。" });
       return;
     }
-    if (!token.trim()) {
-      setNotice({ tone: "bad", text: "请先填写管理员令牌（ADMIN_TOKEN）再保存。" });
-      return;
-    }
     setSaving(true);
     try {
-      await api.updateProviderConfig(buildUpdate(initial, form), token.trim());
+      await api.updateProviderConfig(buildUpdate(initial, form));
       await load();
       setNotice({ tone: "ok", text: "已保存。下一次任务即按新配置执行。" });
     } catch (cause) {
@@ -200,15 +191,10 @@ export function ProviderConfigPanel() {
   };
 
   const clearOverrides = async () => {
-    if (!token.trim()) {
-      setNotice({ tone: "bad", text: "请先填写管理员令牌（ADMIN_TOKEN）再操作。" });
-      return;
-    }
     setSaving(true);
     try {
       await api.updateProviderConfig(
         { model: null, base_url: null, api_key: null, temperature: null },
-        token.trim(),
       );
       await load();
       setNotice({ tone: "ok", text: "已清除覆盖，全部回退环境配置。" });
@@ -315,18 +301,6 @@ export function ProviderConfigPanel() {
                   autoComplete="off"
                 />
                 <small>只写入、不回读，保存后输入框会清空；接口与日志都不会返回原值。</small>
-              </div>
-              <div className="config-field config-field-wide">
-                <label htmlFor="provider-admin-token">管理员令牌</label>
-                <input
-                  id="provider-admin-token"
-                  type="password"
-                  value={token}
-                  onChange={(event) => { setToken(event.target.value); setNotice(null); }}
-                  placeholder="服务端环境变量 ADMIN_TOKEN"
-                  autoComplete="off"
-                />
-                <small>只保留在本页内存中，不写入浏览器存储；未配置令牌的服务端一律拒绝写入。</small>
               </div>
             </div>
 
