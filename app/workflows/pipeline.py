@@ -21,6 +21,7 @@ from typing import Any
 import dapr.ext.workflow as wf
 
 from app.config import AgentSettings
+from app.core.agent_config import resolve_agent_settings
 from app.core.tool_audit import AuditedToolRegistry
 from app.core.checkpoint import (
     update_agent_run_status,
@@ -43,7 +44,7 @@ from app.orchestration.pipeline import (
     serialize_pipeline_state,
     start,
 )
-from app.orchestration.pipeline_graph import run_role_stage
+from app.orchestration.pipeline_graph import role_for_stage, run_role_stage
 from app.orchestration.tools import ToolRegistry, default_tool_registry
 from app.observability.metrics import flush_metrics, record_workflow_terminal
 from app.workflows.state import save_step_result
@@ -184,11 +185,15 @@ def _run_stage_activity(
         or task.get("workflow_id")
         or ctx.workflow_id
     )
+    use_fake_model = bool(task.get("use_fake_model"))
     outcome = advance_pipeline_stage(
         state,
         stage,
         task["task"],
-        use_fake_model=bool(task.get("use_fake_model")),
+        # 阶段执行时解析生效配置：PATCH 后新执行立即使用新模型/温度（ADR-013）。
+        # 假模型只用于恢复演练，不读配置表。
+        settings=None if use_fake_model else resolve_agent_settings(role_for_stage(stage).value),
+        use_fake_model=use_fake_model,
         workflow_id=workflow_id,
         run_id=task.get("agent_run_id"),
         workflow_run_id=workflow_id,

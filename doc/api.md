@@ -4,7 +4,7 @@
 
 ## 1. 通用约定
 
-- 基础路径：`/api/v1`；健康检查为 `/health`。
+- 基础路径：`/api/v1`；健康检查为 `/health`；Prometheus 文本指标端点为 `/metrics`（见 §5.6）。
 - 请求与响应使用 `application/json`。
 - 时间字段为 ISO 8601 UTC（带 `Z` 或明确时区偏移）。
 - ID 当前以 UUID 字符串返回；Agent 角色 ID 为稳定字符串。
@@ -34,6 +34,7 @@
 | 500 | `INTERNAL_ERROR` | 已实现 | Workflow 调度失败等内部错误 |
 | 404 | `AGENT_NOT_FOUND` | 已实现 | 查询的 Agent 角色不存在 |
 | 503 | `DATA_SOURCE_UNAVAILABLE` | 已实现 | 审计或指标数据源读取失败 |
+| 403 | `CONFIG_WRITE_FORBIDDEN` | 已实现 | 配置写入被拒绝：缺少/错误的管理员令牌，或服务端未配置 `ADMIN_TOKEN` |
 | 404 | `TOOL_NOT_FOUND` | 规划 | 工具不存在；当前没有工具路由 |
 
 ## 2. 核心对象与状态
@@ -105,7 +106,7 @@
 | `analyst` | 数据分析 Agent | `analyst` | `analyze` |
 | `reporter` | 报告生成 Agent | `reporter` | `report` |
 
-列表与详情统一读取 API 进程的 `AGENT_*` 配置，返回当前 provider 对应的 model、temperature。`status=idle` 为静态角色状态，不代表模型服务健康；运行状态由 Workflow 展示。API 与 Worker 必须使用相同环境配置，配置修改需要重启对应进程。
+列表与详情返回**生效配置**：先取数据库 `agent_configs` 里该角色的覆盖值，未覆盖的字段回退 API 进程的 `AGENT_*` 环境配置（见 §5.7）。`status=idle` 为静态角色状态，不代表模型服务健康；运行状态由 Workflow 展示。`agent_configs` 读取失败时回退环境配置并记日志，不影响列表可用性。
 
 ## 3. 执行语义
 
@@ -230,19 +231,21 @@
 
 GET /api/v1/providers
 
-响应为 `{items: Provider[]}`，当前只返回选中的 Provider。字段：id、name、model、base_url（可空）、status、temperature。数据来自 API 进程 AGENT_* 环境配置；status 为 configured 或 missing_model，不代表模型服务可达。base_url 去除用户信息、query、fragment；不返回密钥，不主动探测模型端点。
+响应为 `{items: Provider[]}`，当前只返回选中的 Provider。字段：id、name、model、base_url（可空）、status、temperature。数据来自运行期 Provider 配置（§5.8）与环境配置 `AGENT_*` 的合并结果；status 为 configured 或 missing_model，不代表模型服务可达（凭据是否配置也不反映在该字段上）。base_url 去除用户信息、query、fragment；不返回密钥，不主动探测模型端点。
 
 ### 5.2 查询 Agent 详情
 
 GET /api/v1/agents/{agent_id}
 
-响应字段为 id、name、role、model、provider、temperature、status。未知角色返回 404 AGENT_NOT_FOUND。当前 Agent 配置由运行时默认配置提供。
+响应字段为 id、name、role、model、provider、temperature、status。未知角色返回 404 AGENT_NOT_FOUND。字段含义同 §4.9：model 与 temperature 为「数据库覆盖 + 环境配置回退」后的生效值，provider 始终来自 API 进程环境配置（不通过 API 修改）。
 
 ### 5.3 查询工具目录
 
 GET /api/v1/tools?page=1&page_size=20
 
-item 字段为 name、description、input_schema（JSON 对象）、status。C 的注册表与目录已就位（`app/mcp/registry.py::tool_catalog()`，返回 calculator / web_search / code_execution / sql_query 四项，见 ADR-012）；`app/api/main.py` 尚未把它注入 `InspectionStore(tool_catalog=...)`，因此当前仍返回 availability=not_integrated，接线属 D。接入后 item 的 status 为 available。不会把四种规划工具当成已注册工具。
+item 字段为 name、description、input_schema（JSON 对象）、status。数据来自 C 的注册表目录（`app/mcp/registry.py::tool_catalog()`，见 ADR-012），返回 calculator / web_search / code_execution / sql_query 四项，status 为 available；不会把规划中的工具当成已注册工具。
+
+API 进程默认按 `MCP_TRANSPORT` 注入该目录（`InspectionStore(tool_catalog=tool_catalog)`）。注册表构建或读取失败返回 `503 DATA_SOURCE_UNAVAILABLE`，不吞掉错误伪装成空目录；只有显式构造为「未注入目录」的读取器才返回 availability=not_integrated。该接口只列目录，不探测每个工具的运行期可用性（例如沙箱后端是否可连）。
 
 ### 5.4 查询 Workflow 工具调用
 
@@ -256,7 +259,120 @@ GET /api/v1/metrics?page=1&page_size=20
 
 item 字段为 metric_name、value（有限数值）、labels（JSON 对象）、recorded_at。读取 doc/data-model.md 的 metrics 表，按 recorded_at、id 降序分页。可选 workflow_id 查询参数按 labels.workflow_id 严格过滤，未知 Workflow 返回 404；无参数时展示全局采样记录。表不存在返回 not_integrated。
 
+`metrics` 表由 `app/core/checkpoint.py::MetricRecord` 定义，随 `init_checkpoint_schema()` 在 backend 进程启动时创建（见 `doc/data-model.md` §3）；从未启动过后端的空库会返回 `not_integrated`，这表示没建表，不等于“没有采样”。
+
 指标展示保留原始 metric_name、labels、采样时间，不累加分页中可能重复的采样值。Token 名称交接约定为 input_tokens/output_tokens/total_tokens，数值 0 显示为 0，缺少采样显示“暂无采样”；比率和耗时由采集方定义后写入，前端不估算。C 负责采集、去重和 labels.workflow_id（可选 agent_id/model）关联，B 负责建表与审计写入，D 只负责读取和呈现；此约定需 A/B/C 联调验收。
+
+### 5.6 Prometheus 文本指标
+
+`GET /metrics`
+
+`200`，`Content-Type` 为 prometheus_client 0.26.0 的 `CONTENT_TYPE_LATEST`，当前取值 `text/plain; version=1.0.0; charset=utf-8`（跟随依赖版本，前端与抓取配置不应硬编码版本号），响应体为进程内 Prometheus 注册表的文本格式，供 Prometheus 按实例抓取。该端点不在 `/api/v1` 下，与 `/health` 同级，不属于 JSON 契约，错误响应也不使用 §1 的统一错误体。
+
+- 指标名与 §5.5 的 `metrics` 表采样同名同标签（`macp_tool_calls_total`、`macp_tool_duration_seconds`、`macp_stage_duration_seconds`、`macp_llm_tokens_total`、`macp_workflow_runs_total`、`macp_metrics_buffer_samples`），便于与表内采样交叉核对。
+- 只读进程内注册表：不连接数据库、不写审计、不因 `metrics` 表缺失而失败。API 进程（`uvicorn` 托管 `app.api.main:app`）与 Workflow Worker 是同一进程时指标合并在一处；多副本部署按实例分别抓取。
+- 该端点只反映本进程观测到的调用；无任何调用时返回空的指标族（仅 HELP/TYPE 行）。
+
+### 5.7 修改 Agent 配置（热更新）
+
+`PATCH /api/v1/config/agents/{agent_id}`
+
+修改某个角色的 `model` / `temperature` 覆盖值，**无需重启进程**：下一次阶段执行即按新配置建模（见 `doc/decisions/013-agent-config-hot-update.md`）。
+
+请求体（两个字段都可选，但至少要给一个）：
+
+```json
+{
+  "model": "qwen2.5-coder:7b",
+  "temperature": 0.3
+}
+```
+
+- 字段省略 = 不改动该字段；显式传 `null` = 清除该字段的覆盖，回退环境配置。
+- `model`：1–200 字符，去除首尾空白后不能为空。
+- `temperature`：`0.0`–`2.0`（闭区间）。
+- `provider` 不在本接口范围：它涉及 base_url 与凭据，由 §5.8 单独管理；未写入覆盖时回退 API 进程的 `AGENT_LLM_PROVIDER`。
+
+权限边界：必须携带请求头 `X-Admin-Token`，其值等于服务端环境变量 `ADMIN_TOKEN`。服务端未配置 `ADMIN_TOKEN`（空字符串）时**一律拒绝**（fail-closed），返回 `403 CONFIG_WRITE_FORBIDDEN`；令牌错误或缺头同样是 `403`。错误响应体不包含令牌内容。
+
+响应 `200` 返回与 §5.2 完全同构的 Agent 对象（生效配置）。
+
+错误码：
+
+| HTTP | code | 含义 |
+| --- | --- | --- |
+| 403 | `CONFIG_WRITE_FORBIDDEN` | 未配置/缺少/错误的 `X-Admin-Token` |
+| 404 | `AGENT_NOT_FOUND` | 角色不存在 |
+| 422 | 框架默认 | Pydantic 校验失败（空 body、非法 temperature、超长 model、空白 model） |
+| 503 | `DATA_SOURCE_UNAVAILABLE` | 覆盖值写入失败（写操作必须显式失败，不回退、不静默成功） |
+
+持久化：覆盖值写入 `agent_configs` 表（`doc/data-model.md` §3），只存被覆盖的字段。审计：每次成功写入产生结构化日志 `event=config.agent.updated`（含 `agent_id`、`actor`、`before`/`after`、`request_id`），表内同时记录 `updated_by` / `updated_at`；`updated_by` 取请求头 `X-Request-ID`，缺省为空。
+
+并发与顺序：接口是「最后写入者生效」，不提供乐观锁或版本号；覆盖值按角色粒度，互不影响。
+
+### 5.8 读取与修改模型 Provider 配置
+
+`GET /api/v1/config/provider`、`PUT /api/v1/config/provider`
+
+读取生效的模型 Provider 配置，或写入运行期覆盖值（**无需重启进程**，与 §5.7 同构，见 ADR-014）。
+
+`GET` 响应（`api_key` 永不回传）：
+
+```json
+{
+  "provider": "openai",
+  "model": "gpt-4o-mini",
+  "base_url": "https://api.example.com/v1",
+  "temperature": 0.2,
+  "api_key_configured": true,
+  "updated_by": "req-7f3",
+  "updated_at": "2026-09-15T08:00:00Z"
+}
+```
+
+- 字段是「存储配置 → 环境配置」合并后的生效值；`base_url` 为空表示使用提供方官方端点。
+- `api_key_configured` 只表示是否已有可用凭据（存储值或环境变量），**不代表凭据有效**。
+- `updated_*` 反映最近一次通过本接口写入的时间与来源；从未写入过时为 `null`。
+- `base_url` 去掉用户信息、query、fragment 后再返回，不返回密钥。
+
+`PUT` 请求体（五个字段都可选，但至少要给一个）：
+
+```json
+{
+  "provider": "openai",
+  "model": "gpt-4o-mini",
+  "base_url": "https://api.example.com/v1",
+  "api_key": "sk-...",
+  "temperature": 0.2
+}
+```
+
+- 字段省略 = 不改动该字段；显式传 `null` = 清除该字段的覆盖，回退环境配置。
+- `provider`：`openai` 或 `ollama`。
+- `model`：1–200 字符，去除首尾空白后不能为空。
+- `base_url`：不超过 500 字符；必须是 `http`/`https` URL；显式空串按 `null`（清除覆盖）处理。
+- `api_key`：1–500 字符；**只写入、不回读**，响应与日志都不含原值。
+- `temperature`：`0.0`–`2.0`（闭区间）。
+
+权限边界：`PUT` 必须携带请求头 `X-Admin-Token`，规则与 §5.7 完全一致（`ADMIN_TOKEN` 未配置时一律 `403`，fail-closed）。`GET` 是只读接口，不需要令牌。
+
+响应：两者都返回上面的 `GET` 结构（`PUT` 返回写入后的生效值，同样不含密钥）。
+
+错误码：
+
+| HTTP | code | 含义 |
+| --- | --- | --- |
+| 403 | `CONFIG_WRITE_FORBIDDEN` | 未配置/缺少/错误的 `X-Admin-Token`（仅 `PUT`） |
+| 422 | 框架默认或 `VALIDATION_ERROR` | Pydantic 校验失败或取值非法（空 body、非法 provider、超长字段、非 http(s) base_url、temperature 越界） |
+| 503 | `DATA_SOURCE_UNAVAILABLE` | 覆盖值写入失败（写操作必须显式失败，不回退、不静默成功） |
+
+持久化与一致性：覆盖值写入 `provider_configs`（单行，`doc/data-model.md` §3）；**PostgreSQL 为事实源**，写入成功后把同一份配置镜像到 Redis `provider:config`（`doc/data-model.md` §4）。Redis 写失败只记警告、不影响响应，读取时未命中会回源 PostgreSQL 并回填；Redis 与 PostgreSQL 都不可用时回退环境配置并记警告，读接口不因此失败。解密/加密不在本期范围，`api_key` 以明文存储在事实源与镜像中，访问边界由数据库与 `ADMIN_TOKEN` 保证。
+
+审计：每次成功写入产生结构化日志 `event=config.provider.updated`（含 `actor`、变更字段名、`before`/`after` 的**脱敏**快照——`api_key` 只记 `set`/`unset`）。
+
+模型构造语义：合并后的配置在阶段活动执行时解析，因此 `PUT` 后的下一次任务即生效；`provider=openai` 而缺少 `model` 或凭据时，模型构造抛出明确错误并让任务失败，**不静默回退到其他提供方**。
+
+前端入口：工作台「工具与配置」页（`frontend/src/Inspection.tsx::ProviderConfigPanel`）读写本接口。页面读取生效值并显示凭据是否配置；提交时只发送被改动的字段，清空某项并按保存 = 清除该覆盖（回退环境配置），凭据输入框留空表示不修改；「清除覆盖并回退环境配置」一次性清除 `model`/`base_url`/`api_key`/`temperature`。响应不含密钥，因此页面无法回显密钥原值。
 
 ## 6. 规划接口（当前未实现）
 
@@ -265,29 +381,31 @@ item 字段为 metric_name、value（有限数值）、labels（JSON 对象）�
 | 方法 | 路径 | 规划用途 |
 | --- | --- | --- |
 | POST | `/api/v1/agents/{agent_id}/run` | 单 Agent 调试执行 |
-| PATCH | `/api/v1/config/agents/{agent_id}` | 修改 Agent 模型与参数 |
 
 ### 6.1 规划请求示例（不保证可用）
 
 ```json
-PATCH /api/v1/config/agents/{agent_id}
+POST /api/v1/agents/{agent_id}/run
 {
-  "model": "qwen2.5-coder:7b",
-  "temperature": 0.3
+  "content": "只跑收集阶段的调试输入"
 }
 ```
 
-这些接口落地前，必须先补充 Pydantic Schema、存储写入、权限边界、审计记录和测试，并同步更新本文档。
+该接口落地前，必须先补充 Pydantic Schema、存储写入、权限边界、审计记录和测试，并同步更新本文档。
+
+`PATCH /api/v1/config/agents/{agent_id}` 已按上述要求实现，见 §5.7。
 
 ## 7. 前端对接约束
 
 - 初始化顺序：并行调用 `GET /agents` 与 `POST /sessions`。
 - 发送消息后保存 `workflow_id`，每 2 秒轮询一次 Workflow；终态为 `completed`、`failed`、`cancelled` 时停止轮询。
 - Token 与调用明细由 §5 读取；区分加载、失败、未接入、无记录、有记录，运行时轮询，终态补刷。切换 Workflow 时丢弃旧请求结果；调用和指标独立失败，不能阻断会话功能。主决策 Agent 选择仍为预览，任务标题取用户消息摘要。
+- Provider 配置（§5.8）已有前端入口：写接口需要 `ADMIN_TOKEN`，而**令牌不由服务端下发**——由操作者在页面上手动输入，只保留在页面内存（不写 `localStorage`/`sessionStorage`，不入日志、不入构建产物），刷新页面后需重新输入。服务端未配置 `ADMIN_TOKEN` 时写入一律 `403`，页面按 403 提示令牌缺失或不正确。其余只读展示继续走 §5.1 / §4.9 / §5.2 与 §5.8 的 `GET`。
+- Agent 覆盖（§5.7 的 `PATCH`）仍没有前端入口：它只调整角色模型与温度，本期经脚本或接口直接调用。
 - Agent 执行台根据 Workflow 的 `checkpoint.completed_steps` 与 `current_step` 展示阶段状态；不得在无 Workflow 时预填三张 Agent 卡片。
 
 ## 8. 版本与变更规则
 
-- 文档版本：`v0.3`，更新时间：2026-09-11。
+- 文档版本：`v0.6`，更新时间：2026-09-15。
 - 任何新增或修改路由，先更新本文件的“已实现接口/规划接口”和对象 Schema，再修改代码。
 - 若 OpenAPI 与本文档冲突，以实际路由和响应模型为准，并在同一变更中修正文档。

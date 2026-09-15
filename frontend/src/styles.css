@@ -1590,3 +1590,26 @@ body { background:#f3f5f6; color:#334b56; }
 .inspection-grid button { border: 1px solid #dce7ea; border-radius: 5px; padding: 5px 8px; background: #f8fafb; color: #456572; cursor: pointer; }
 .inspection-grid button:disabled { opacity: .5; cursor: default; }
 .inspector .inspection-grid { padding: 12px; }
+
+/* Provider 配置表单：写入运行期模型配置（doc/api.md §5.8、ADR-014）。 */
+.config-form { display: grid; gap: 14px; margin-top: 22px; }
+.config-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.config-field { display: grid; gap: 6px; min-width: 0; }
+.config-field-wide { grid-column: 1 / -1; }
+.config-field label { color: #8499a2; font-size: 10px; }
+.config-field input,
+.config-field select { width: 100%; padding: 9px 10px; border: 1px solid #e1eaed; border-radius: 7px; background: #f8fafb; color: #607b86; font: inherit; font-size: 11px; }
+.config-field input::placeholder { color: #a9b6bb; }
+.config-field input:focus-visible,
+.config-field select:focus-visible { outline: 2px solid #39839c; outline-offset: 2px; border-color: #a8c6d1; }
+.config-field input[aria-invalid="true"] { border-color: #dcb6ab; }
+.config-field small { color: #9aaab0; font-size: 9px; line-height: 1.6; }
+.config-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.config-primary { display: inline-flex; align-items: center; gap: 5px; padding: 7px 12px; border: 1px solid #3f7f93; border-radius: 6px; background: #3f7f93; color: #fff; font-size: 11px; }
+.config-primary:hover { background: #346c7e; }
+.config-primary:disabled { border-color: #cfdde1; background: #cfdde1; color: #f6fafb; }
+.config-status { min-height: 16px; margin: 0; color: #9aaab0; font-size: 10px; }
+.config-status .ok { color: #478166; }
+@media (max-width: 760px) {
+  .config-form-grid { grid-template-columns: 1fr; }
+}

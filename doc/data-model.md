@@ -132,12 +132,55 @@ erDiagram
 
 索引：`idx_metrics_name_time (metric_name, recorded_at DESC)`。
 
+建表归属：DDL 由 `app/core/checkpoint.py` 的 `MetricRecord` 模型定义，随
+`init_checkpoint_schema()` 在 worker 启动时创建（与其他 `*_record` 表同一入口，
+成员 B 负责）。写入方是观测采样 `app/observability/metrics.py::PostgresMetricSink`，
+读取方是只读接口 `GET /api/v1/metrics`（成员 D）。采样侧**不建表**：表缺失时记一次
+日志并跳过写入，`/api/v1/metrics` 返回 `availability=not_integrated`。
+
+### agent_configs（Agent 配置覆盖）
+
+| 字段 | 类型 | 约束/默认 | 说明 |
+| --- | --- | --- | --- |
+| agent_id | VARCHAR(50) | PK | 角色 id：`collector` / `analyst` / `reporter` |
+| model | VARCHAR(200) | NULL | 覆盖模型名；NULL 表示回退环境配置 |
+| temperature | DOUBLE PRECISION | NULL | 覆盖温度（0.0–2.0）；NULL 表示回退环境配置 |
+| updated_by | VARCHAR(100) | NULL | 审计来源，取请求头 `X-Request-ID` |
+| updated_at | TIMESTAMPTZ | `now()` | 最近更新时间 |
+
+只存**被覆盖的字段**（行内 NULL = 回退），不复制环境配置的全量快照；删除覆盖等价于把
+对应列写回 NULL。建表归属：`app/core/checkpoint.py::AgentConfigRecord`，随
+`init_checkpoint_schema()` 创建。写入方是 `PATCH /api/v1/config/agents/{agent_id}`
+（`doc/api.md` §5.7），读取方是同接口的 GET 列表/详情与 Workflow 阶段活动
+（`app/core/agent_config.py::resolve_agent_settings`）。索引：主键即可，无额外索引
+（数据量与角色数同阶，恒为 3 行以内）。
+
+### provider_configs（模型 Provider 配置）
+
+| 字段 | 类型 | 约束/默认 | 说明 |
+| --- | --- | --- | --- |
+| id | VARCHAR(20) | PK | 固定 `default`（单行表，本期只支持一套全局 Provider 配置） |
+| provider | VARCHAR(20) | NULL | `openai` / `ollama`；NULL 表示回退环境配置 |
+| model | VARCHAR(200) | NULL | 模型名；NULL 表示回退环境配置 |
+| base_url | VARCHAR(500) | NULL | OpenAI 兼容端点；NULL/空表示用官方端点或回退环境配置 |
+| api_key | TEXT | NULL | 凭据；**不回传、不落日志**；NULL 表示回退环境配置 |
+| temperature | DOUBLE PRECISION | NULL | 温度（0.0–2.0）；NULL 表示回退环境配置 |
+| updated_by | VARCHAR(100) | NULL | 审计来源，取请求头 `X-Request-ID` |
+| updated_at | TIMESTAMPTZ | `now()` | 最近更新时间 |
+
+只存**被覆盖的字段**（行内 NULL = 回退环境配置），是环境配置之上的运行期覆盖层，
+不复制全量快照。建表归属：`app/core/checkpoint.py::ProviderConfigRecord`，随
+`init_checkpoint_schema()` 创建。写入方是 `PUT /api/v1/config/provider`
+（`doc/api.md` §5.8），读取方是 `app/core/provider_config.py`（API 与 Workflow 阶段活动
+共用），合并顺序为「存储配置 → 环境配置」，见 ADR-014。索引：主键即可，恒为 1 行。
+
 ## 4. Redis 结构
 
 | Key | 类型 | TTL | 用途 | 一致性说明 |
 | --- | --- | --- | --- | --- |
 | `session:{id}:messages` | List（JSON 消息） | 7 天 | 会话上下文缓存 | 可丢失，PostgreSQL 为事实源 |
 | `agent:{id}:memory` | Hash | 无 | 跨会话长期记忆 | 记忆层写入前先落审计 |
+| `provider:config` | String（JSON） | 无 | 模型 Provider 配置缓存镜像（含密钥，见 ADR-014） | 可丢失；PostgreSQL 为唯一事实源，写成功后写缓存，未命中回源并回填 |
 | `workflow:{id}:state` | Hash | 与 Workflow 生命周期一致 | Dapr State Store 状态 | 由 Dapr state store 组件管理，应用不直接改写 |
 | `pubsub:agent-events` | Stream | 消息保留策略 | Agent 间事件 | Dapr Pub/Sub 管理 |
 

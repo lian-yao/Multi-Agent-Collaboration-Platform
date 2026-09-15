@@ -91,6 +91,8 @@ OpenTelemetry + Jaeger 追踪与 Prometheus 指标。ADR-009 已把编排层的�
   用例意图（没有注册表时不绑定工具、不产生调用记录）仍然有效，
   但需要用 `set_tool_registry_factory(lambda: None)` 显式构造该前置条件。
   该文件属成员 A，本决策只记录，不改动。
+  **2026-09-15 已由成员 A 按上述方式修复**，用例意图与断言未变；
+  `uv run pytest -q` → 323 passed / 0 failed（见 `doc/testing.md` §4.1）。
 - **I-06 仍未端到端验收**：本 ADR 的证据走的是 `mcp.shared.memory` 的真实协议往返，
   没有跨进程 stdio 与真实 PostgreSQL 写入，端到端验收待容器环境。
 - **`prometheus-client` 与 `docker` 提升为直接依赖**：两者原先只作为传递依赖存在，

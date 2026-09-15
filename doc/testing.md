@@ -55,6 +55,7 @@ cd deploy; .\start.ps1                     # 起完整环境
 | I-07 | 可观测数据输出 | 关键 Span 与指标可在 Jaeger/Prometheus 查到 | M4 |
 | I-08 | 配置热更新 | PATCH agent 后新执行使用新配置 | M4 |
 | I-09 | D7-D8 只读巡检接口 | Provider/Agent/工具/调用/指标接口的分页、`availability` 区分「未接入」与「零条记录」、404/422/503 契约 | M4 |
+| I-10 | Provider 配置读写 | `GET/PUT /api/v1/config/provider`：403 fail-closed、200 生效值与回退、422 校验、503 写失败；覆盖值落 `provider_configs` 并镜像 Redis，响应与日志不含密钥（ADR-014） | M4 |
 
 ### 2.3 端到端测试（E）
 
@@ -117,6 +118,21 @@ uv run python scripts/perf_concurrency.py --sessions 10 --concurrency 10 --json 
   （修复前是集成类名或缺失），因此按模型归因 Token 效率具备前提。
 - 失败率超过 `--max-failure-rate`（默认 0）时脚本以非零码退出。
 - 脚本纯逻辑（百分位口径、日志解析、报告汇总）由 `tests/unit/test_perf_tooling.py` 固定。
+### 3.3 前端验证现状（成员 D）
+
+前端当前**没有测试框架**，自动化门禁是类型检查 + 构建：`npm --prefix frontend run build`
+（`tsc --noEmit && vite build`）。因此前端改动按「构建通过 + 真实后端冒烟」两步验证，
+不把构建通过当作功能验收。
+
+Provider 配置面板（`frontend/src/Inspection.tsx::ProviderConfigPanel`）的验证步骤：
+
+1. 起后端（真实 PostgreSQL + Redis，配置 `ADMIN_TOKEN`）与 `npm run dev`；
+2. 「工具与配置」页应显示生效的 provider/model/地址/温度与凭据状态；
+3. 不填或填错管理员令牌提交 → 页面提示 403，配置不变；
+4. 填对令牌、改模型或地址提交 → 提示已保存，页面回读生效值，关键字段不出现密钥；
+5. 点「清除覆盖并回退环境配置」→ 页面回到环境配置值。
+
+浏览器端的自动化用例（Playwright 之类）尚未引入，属后续增量。
 
 ## 4. 里程碑验收清单
 
@@ -125,35 +141,50 @@ uv run python scripts/perf_concurrency.py --sessions 10 --concurrency 10 --json 
 | M1（单 Agent） | U-01、U-02、U-03 |
 | M2（Dapr 持久化） | I-01、I-02、I-03 |
 | M3（多 Agent） | U-04、U-05、I-04、I-05、E-03 手工版 |
-| M4（工具 + 可观测） | U-06、U-07、U-08、U-09、U-10、I-06、I-07、I-08、I-09 |
+| M4（工具 + 可观测） | U-06、U-07、U-08、U-09、U-10、I-06、I-07、I-08、I-09、I-10 |
 | M5（交付） | E-01 至 E-05 全部 |
 
-### 4.1 M4 当前状态（2026-09-14）
+### 4.1 M4 当前状态（2026-09-15）
 
 成员 C 的 D7-8（内置工具/沙箱/可观测接入）落地后的实测状态。
-**M4 仍未整体完成**，剩余缺口已不在 C 侧，见每行的「缺口」。
+**M4 代码完成、验收未闭环**（口径与 `doc/roadmap.md` D7-D8 一致）：代码与测试
+证据齐备（`uv run pytest -q` → 323 passed / 0 failed），但 U-09/I-06 在真实模型
+路径下的端到端验收未通过，剩余缺口已不在 C 侧，见每行的「缺口」。
+**测试全绿 ≠ M4 完成**，缺口的判定依据是验收证据而不是用例数量。
 
 | 用例 | 状态 | 证据 / 缺口 |
 | --- | --- | --- |
 | U-06 工具函数独立行为 | 通过 | `tests/unit/test_builtin_tools.py`：计算器返回值与拒绝面、只读 SQL 校验与真实只读执行、注册表发现/调用、`web_search` 注入 fetcher 的离线解析（ADR-012） |
 | U-07 工具调用幂等键 | 通过 | `tests/unit/test_tool_audit.py`（ADR-011） |
 | U-08 沙箱边界拒绝越权 | 通过 | `tests/unit/test_sandbox_policy.py`：Python/Shell 越权拒绝、策略先于后端、`denied` 后端不降级执行（ADR-012） |
-| U-09 流水线接入 MCP 工具 | 通过 | `tests/unit/test_pipeline_tools.py`，含「阶段活动消费默认注册表」（ADR-009） |
+| U-09 流水线接入 MCP 工具 | 单元级通过，真实路径未验收 | `tests/unit/test_pipeline_tools.py`（15 例全绿，含「阶段活动消费默认注册表」，ADR-009）；假模型返回规范 `tool_calls`，真实模型返回裸 JSON、流水线不产生调用，故该用例不能作为 M4 验收证据 |
 | U-10 行为日志事件 | 通过 | `tests/unit/test_observability.py`（ADR-010） |
-| I-06 MCP 工具发现与调用 | 部分 | `tests/unit/test_mcp_tools.py` 走 `mcp.shared.memory` 的**真实 MCP 协议往返**（发现、调用、错误还原、目录）；缺跨进程 stdio 与真实 PostgreSQL 上的 `tool_calls` 落库验收 |
-| I-07 可观测数据输出 | 部分 | `tests/unit/test_observability_metrics.py`：Span 与属性/异常、指标去重、Prometheus 文本、`metrics` 表写入（SQLite 与表缺失两种路径）、降级不阻塞、Token 按真实模型名归因（F-03 回归）；缺 Jaeger/Prometheus 实例上的实际抓取验收，且 `metrics` 表尚未建（B） |
-| I-08 配置热更新 | 未实现 | `PATCH /api/v1/config/agents/{agent_id}` 未实现（`doc/api.md` §6） |
-| I-09 只读巡检接口 | 通过 | `tests/integration/test_inspection_api.py`；用 SQLite 内存表与注入目录数据，不等于真实 PostgreSQL/MCP 验收 |
+| I-06 MCP 工具发现与调用 | 部分 | `tests/unit/test_mcp_tools.py` 走 `mcp.shared.memory` 的**真实 MCP 协议往返**（发现、调用、错误还原、目录）；真实 PostgreSQL 上的 `tool_calls` 落库与读回已于 2026-09-15 验收（`calculator` `21*2`→`42`，`GET /workflows/{id}/tool-calls` 返回 1 条）；缺跨进程 stdio |
+| I-07 可观测数据输出 | 通过 | `tests/unit/test_observability_metrics.py`：Span 与属性/异常、指标去重、Prometheus 文本、`metrics` 表写入（SQLite 与表缺失两种路径）、降级不阻塞；`metrics` 表已由 `app/core/checkpoint.py::MetricRecord` 建出，2026-09-15 在真实 PostgreSQL 上跑通采样落库与 `/api/v1/metrics` 读回（16 条采样），真实 Prometheus 上抓到 `backend`/`dapr-sidecar` 两个 `up` target（43 条 `macp_*` 序列），真实 Jaeger 上查到 `stage.run`/`llm.chat` span；Token 按真实模型名归因（F-03 回归，见 §4.2） |
+| I-08 配置热更新 | 通过 | `PATCH /api/v1/config/agents/{agent_id}` 已实现（`doc/api.md` §5.7、ADR-013）：覆盖写 `agent_configs`，阶段活动执行时解析生效配置，无需重启；单元用例 `tests/unit/test_agent_config.py`（合并/校验/回退/表契约），集成用例 `tests/integration/test_config_api.py`（403/404/422/503/200 与生效值）；真实 PostgreSQL 上已跑通写入—读回—新执行生效 |
+| I-09 只读巡检接口 | 通过 | `tests/integration/test_inspection_api.py`；覆盖分页、`availability` 区分「未接入」与「零条记录」、默认工具目录接线（`/tools` 返回 4 个注册工具）与 Prometheus 文本端点（`/metrics`）；用 SQLite 内存表与注入目录数据，不等于真实 PostgreSQL/MCP 验收 |
+| I-10 Provider 配置读写 | 通过（含真实环境冒烟） | 单元与集成用例：`tests/unit/test_provider_config.py`（26 例：表契约、合并顺序、Redis 命中/回源/回填、镜像失败降级、密钥脱敏、字段校验）与 `tests/integration/test_provider_config_api.py`（15 例：403/422/503/200、显式 null 清除、provider 切换）。2026-09-15 真实环境冒烟（本机 PostgreSQL 5433 + Redis 6380 + uvicorn）：无令牌/错误令牌 `PUT` → `403 CONFIG_WRITE_FORBIDDEN`；正确令牌 `PUT` → `200` 且响应不含密钥；`GET` 回读生效值；`/providers` 反映新值；删除 `provider:config` 后 `GET` 仍返回存储值并自动回填缓存。测试数据已清理 |
 
-运行命令与结果（2026-09-15，C 的 D9-10 落地后）：`uv run pytest -q` →
-**300 passed / 1 failed / 5 skipped**（新增 E 系列回归网、性能工具用例与 F-03 的
-模型归因回归用例；5 skipped 为需要 compose 环境的 `tests/e2e/test_live_e2e.py`）。
+2026-09-15（M4 收口后）：`uv run pytest -q` → **294 passed / 1 failed**，
+失败项与上面同一处，仍属成员 A 的过期前置条件；新增
+`tests/unit/test_metrics_table_schema.py` 校验 `metrics` 表 DDL 与索引契约。
 
-唯一失败是 `tests/unit/test_pipeline_tools.py::test_role_stage_without_registry_does_not_bind_tools`：
-该用例用「成员 C 的 `app/mcp` 不存在」来构造「没有注册表」的前置条件，
-C 落地注册表后 `default_tool_registry()` 不再返回 `None`，前置条件失效。
-用例意图（没有注册表时不绑定工具、不产生调用记录）仍然成立，
-需改为 `set_tool_registry_factory(lambda: None)` 显式构造；该文件属成员 A（见 ADR-012）。
+2026-09-15（I-08 落地后）：`uv run pytest -q` → **322 passed / 1 failed**，
+失败项仍是上面同一处。新增 `tests/unit/test_agent_config.py`（13 例：表契约、
+合并回退、provider 字段映射、读取失败回退、校验与审计日志）与
+`tests/integration/test_config_api.py`（15 例：403 fail-closed、200 生效值、
+局部更新、显式 null 清除、404、422、503）。
+
+2026-09-15（A 修复过期前置条件后）：`uv run pytest -q` → **323 passed / 0 failed**。
+上面唯一失败项已按本文档约定改为 `set_tool_registry_factory(lambda: None)` 显式构造
+「没有注册表」的前置条件，用例意图与两条断言未变；未跳过或删除任何用例。
+M4 未闭环的剩余缺口只剩真实流水线的工具调用行为（模型把调用当文本输出，
+见 `doc/roadmap.md`），不在测试层面；因此测试全绿不构成 M4 验收通过。
+
+2026-09-15（API 优先接入落地后）：`uv run pytest -q` → **366 passed / 0 failed**。
+新增 I-10（Provider 配置读写）的单元与集成用例；默认提供方改为 OpenAI 兼容 API
+（ADR-014），覆盖值落 `provider_configs` 并镜像 Redis。剩余缺口不变：**尚未在真实
+API 模型下跑通工具调用**，因此 M4 仍是「代码完成、验收未闭环」。
 
 ### 4.2 E 系列当前状态（2026-09-15，成员 C D9-10）
 

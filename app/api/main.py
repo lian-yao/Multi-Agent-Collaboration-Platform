@@ -1,20 +1,44 @@
 from __future__ import annotations
 
+import hmac
+import logging
 import uuid
 from datetime import datetime
-from typing import Any, Literal
-from urllib.parse import urlsplit, urlunsplit
+from typing import Any, Callable, Literal
 
-from fastapi import FastAPI, Query, Request, status
+from fastapi import FastAPI, Query, Request, Response, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, FiniteFloat
+from pydantic import BaseModel, Field, FiniteFloat, field_validator, model_validator
+from prometheus_client import CONTENT_TYPE_LATEST
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.store import SqlApiStore
 from app.api.inspection import InspectionStore
-from app.config import get_settings
+from app.config import get_admin_settings, get_settings
+from app.core.agent_config import (
+    AgentConfigError,
+    agent_config_overrides,
+    resolve_agent_settings,
+    update_agent_config,
+)
+from app.core.checkpoint import UNSET
+from app.core.provider_config import (
+    ProviderConfigError,
+    effective_provider_view,
+    resolve_provider_settings,
+    sanitize_base_url,
+    update_provider_config,
+)
+from app.mcp.registry import tool_catalog
+from app.observability.logging import get_logger, log_event
+from app.observability.metrics import render_prometheus_metrics
 from app.workflows.pipeline import WorkflowTask
 from app.workflows.service import get_workflow_service
+
+logger = get_logger("api.inspection")
+
+# 覆盖值读取器：默认读 `agent_configs`，测试可替换为固定表（与 api_store 同一模式）。
+agent_config_reader: Callable[[], dict[str, dict[str, Any]]] = agent_config_overrides
 
 
 class ApiError(Exception):
@@ -96,6 +120,32 @@ class AgentListResponse(BaseModel):
     items: list[AgentResponse]
 
 
+class AgentConfigPatchRequest(BaseModel):
+    """`PATCH /api/v1/config/agents/{agent_id}` 的请求体（doc/api.md §5.7）。
+
+    字段缺省 = 不改动；显式 `null` = 清除覆盖、回退环境配置。
+    """
+
+    model: str | None = Field(default=None, max_length=200)
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+
+    @field_validator("model")
+    @classmethod
+    def _normalize_model(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        resolved = value.strip()
+        if not resolved:
+            raise ValueError("model 不能为空")
+        return resolved
+
+    @model_validator(mode="after")
+    def _require_any_field(self) -> AgentConfigPatchRequest:
+        if not self.model_fields_set:
+            raise ValueError("至少需要提供 model 或 temperature 之一")
+        return self
+
+
 class ProviderResponse(BaseModel):
     id: str
     name: str
@@ -107,6 +157,40 @@ class ProviderResponse(BaseModel):
 
 class ProviderListResponse(BaseModel):
     items: list[ProviderResponse]
+
+
+class ProviderConfigResponse(BaseModel):
+    """`GET/PUT /api/v1/config/provider` 的响应（doc/api.md §5.8）。
+
+    永不包含 `api_key` 原值，只回 `api_key_configured`。
+    """
+
+    provider: str
+    model: str
+    base_url: str | None = None
+    temperature: float
+    api_key_configured: bool
+    updated_by: str | None = None
+    updated_at: datetime | None = None
+
+
+class ProviderConfigUpdateRequest(BaseModel):
+    """`PUT /api/v1/config/provider` 的请求体（doc/api.md §5.8）。
+
+    字段缺省 = 不改动；显式 `null` = 清除覆盖、回退环境配置。
+    """
+
+    provider: str | None = Field(default=None, max_length=20)
+    model: str | None = Field(default=None, max_length=200)
+    base_url: str | None = Field(default=None, max_length=500)
+    api_key: str | None = Field(default=None, max_length=500)
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+
+    @model_validator(mode="after")
+    def _require_any_field(self) -> ProviderConfigUpdateRequest:
+        if not self.model_fields_set:
+            raise ValueError("至少需要提供 provider/model/base_url/api_key/temperature 之一")
+        return self
 
 
 class ToolResponse(BaseModel):
@@ -168,7 +252,29 @@ app = FastAPI(
 # The worker process uses the SQL adapter. Tests can replace this value with
 # InMemoryApiStore without changing route behavior or requiring PostgreSQL.
 api_store: Any = SqlApiStore()
-inspection_store = InspectionStore()
+
+
+def _tool_catalog() -> list[dict[str, Any]]:
+    """注册表目录读取失败统一归一化为 503（doc/api.md §5.3）。
+
+    MCP 传输（stdio/http）与注册表构建会抛出各不相同的异常类型，这里统一转成
+    契约里的 `DATA_SOURCE_UNAVAILABLE`，避免把「工具源不可用」表现为 500。
+    """
+
+    try:
+        return tool_catalog()
+    except Exception as exc:
+        log_event(
+            logger,
+            "tools.catalog_failed",
+            level=logging.ERROR,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        raise ApiError("DATA_SOURCE_UNAVAILABLE", "工具注册表读取失败，请稍后重试", 503) from exc
+
+
+# 工具目录接线（doc/api.md §5.3）：注册表由成员 C 提供，API 只读取，不建表、不调用工具。
+inspection_store = InspectionStore(tool_catalog=_tool_catalog)
 
 
 def _inspection_read(read, **kwargs):
@@ -214,6 +320,18 @@ def _workflow_response(row: dict[str, Any]) -> WorkflowResponse:
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get(
+    "/metrics",
+    summary="Prometheus 文本指标（doc/api.md §5.6）",
+    response_class=Response,
+    responses={200: {"content": {"text/plain": {}}}},
+)
+def prometheus_metrics() -> Response:
+    """输出进程内 Prometheus 注册表文本；不读数据库，表缺失也不影响。"""
+
+    return Response(content=render_prometheus_metrics(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.post("/api/v1/sessions", response_model=SessionResponse, status_code=201)
@@ -353,38 +471,8 @@ def get_workflow(workflow_id: str) -> WorkflowResponse:
 @app.get("/api/v1/agents", response_model=AgentListResponse)
 def list_agents() -> AgentListResponse:
     """Return the fixed D5-D6 team represented by the three pipeline roles."""
-    settings = get_settings()
-    model = settings.ollama_model if settings.llm_provider == "ollama" else settings.openai_model
     return AgentListResponse(
-        items=[
-            AgentResponse(
-                id="collector",
-                name="信息收集 Agent",
-                role="collector",
-                model=model,
-                provider=settings.llm_provider,
-                temperature=settings.temperature,
-                status="idle",
-            ),
-            AgentResponse(
-                id="analyst",
-                name="数据分析 Agent",
-                role="analyst",
-                model=model,
-                provider=settings.llm_provider,
-                temperature=settings.temperature,
-                status="idle",
-            ),
-            AgentResponse(
-                id="reporter",
-                name="报告生成 Agent",
-                role="reporter",
-                model=model,
-                provider=settings.llm_provider,
-                temperature=settings.temperature,
-                status="idle",
-            ),
-        ]
+        items=[_agent_response(agent_id) for agent_id in _AGENT_NAMES]
     )
 
 
@@ -398,7 +486,7 @@ _AGENT_NAMES = {
 def _agent_response(agent_id: str) -> AgentResponse:
     if agent_id not in _AGENT_NAMES:
         raise ApiError("AGENT_NOT_FOUND", "Agent 不存在", status.HTTP_404_NOT_FOUND)
-    settings = get_settings()
+    settings = resolve_agent_settings(agent_id, get_settings(), overrides=agent_config_reader())
     return AgentResponse(
         id=agent_id,
         name=_AGENT_NAMES[agent_id],
@@ -410,18 +498,101 @@ def _agent_response(agent_id: str) -> AgentResponse:
     )
 
 
+def _authorize_config_write(token: str | None) -> None:
+    """配置写入的权限边界：fail-closed（doc/api.md §5.7、ADR-013）。"""
+
+    expected = get_admin_settings().admin_token
+    if not expected or not token or not hmac.compare_digest(token, expected):
+        log_event(
+            logger,
+            "config.write_rejected",
+            level=logging.WARNING,
+            reason="token_not_configured" if not expected else "token_mismatch",
+        )
+        raise ApiError(
+            "CONFIG_WRITE_FORBIDDEN",
+            "配置写入被拒绝：需要管理员令牌",
+            status.HTTP_403_FORBIDDEN,
+        )
+
+
+def _patch_field(payload: BaseModel, field: str) -> Any:
+    """把「字段缺省」映射成 UNSET、「显式 null」映射成 None（清除覆盖）。"""
+
+    return getattr(payload, field) if field in payload.model_fields_set else UNSET
+
+
+@app.patch(
+    "/api/v1/config/agents/{agent_id}",
+    response_model=AgentResponse,
+)
+def patch_agent_config(
+    agent_id: str,
+    payload: AgentConfigPatchRequest,
+    request: Request,
+) -> AgentResponse:
+    """修改角色的 model / temperature 覆盖值，下一次阶段执行即生效。"""
+
+    if agent_id not in _AGENT_NAMES:
+        raise ApiError("AGENT_NOT_FOUND", "Agent 不存在", status.HTTP_404_NOT_FOUND)
+    _authorize_config_write(request.headers.get("X-Admin-Token"))
+    try:
+        update_agent_config(
+            agent_id,
+            model=_patch_field(payload, "model"),
+            temperature=_patch_field(payload, "temperature"),
+            actor=request.headers.get("X-Request-ID"),
+        )
+    except AgentConfigError as exc:
+        raise ApiError("VALIDATION_ERROR", str(exc), status.HTTP_422_UNPROCESSABLE_ENTITY) from exc
+    except (SQLAlchemyError, OSError, ValueError, KeyError) as exc:
+        raise ApiError("DATA_SOURCE_UNAVAILABLE", "配置写入失败，请稍后重试", 503) from exc
+    return _agent_response(agent_id)
+
+
+@app.get("/api/v1/config/provider", response_model=ProviderConfigResponse)
+def get_model_provider_config() -> ProviderConfigResponse:
+    """读取生效的模型 Provider 配置（不返回密钥，见 doc/api.md §5.8）。"""
+
+    settings = resolve_provider_settings(get_settings())
+    return ProviderConfigResponse(**effective_provider_view(settings))
+
+
+@app.put("/api/v1/config/provider", response_model=ProviderConfigResponse)
+def put_model_provider_config(
+    payload: ProviderConfigUpdateRequest,
+    request: Request,
+) -> ProviderConfigResponse:
+    """写入 Provider 覆盖值（PostgreSQL 事实源 + Redis 镜像），下一次任务即生效。"""
+
+    _authorize_config_write(request.headers.get("X-Admin-Token"))
+    try:
+        update_provider_config(
+            provider=_patch_field(payload, "provider"),
+            model=_patch_field(payload, "model"),
+            base_url=_patch_field(payload, "base_url"),
+            api_key=_patch_field(payload, "api_key"),
+            temperature=_patch_field(payload, "temperature"),
+            actor=request.headers.get("X-Request-ID"),
+        )
+    except ProviderConfigError as exc:
+        raise ApiError("VALIDATION_ERROR", str(exc), status.HTTP_422_UNPROCESSABLE_ENTITY) from exc
+    except (SQLAlchemyError, OSError, ValueError, KeyError) as exc:
+        raise ApiError("DATA_SOURCE_UNAVAILABLE", "配置写入失败，请稍后重试", 503) from exc
+    settings = resolve_provider_settings(get_settings())
+    return ProviderConfigResponse(**effective_provider_view(settings))
+
+
 @app.get("/api/v1/providers", response_model=ProviderListResponse)
 def list_providers() -> ProviderListResponse:
-    settings = get_settings()
+    settings = resolve_provider_settings(get_settings())
     if settings.llm_provider == "ollama":
         model = settings.ollama_model
         base_url = settings.ollama_base_url
     else:
         model = settings.openai_model
-        base_url = None
-    if base_url:
-        parts = urlsplit(base_url)
-        base_url = urlunsplit((parts.scheme, parts.netloc.rsplit("@", 1)[-1], parts.path, "", ""))
+        base_url = settings.openai_base_url
+    base_url = sanitize_base_url(base_url)
     model_status = "configured" if model else "missing_model"
     return ProviderListResponse(
         items=[

@@ -59,10 +59,14 @@ def test_run_agent_keeps_conversation_messages():
     ]
 
 
-def test_default_settings_use_ollama_from_doc():
+def test_default_settings_use_openai_api_and_keep_ollama_fallback():
+    """默认提供方是 OpenAI 兼容 API，Ollama 作为显式回退（ADR-014）。"""
+
     settings = AgentSettings(_env_file=None)
 
-    assert settings.llm_provider == "ollama"
+    assert settings.llm_provider == "openai"
+    # Ollama 仍保留为备用接入，配置项不删除
+    assert settings.ollama_base_url == "http://localhost:11434"
     assert settings.ollama_model == "qwen2.5-coder:7b"
 
 
@@ -95,6 +99,7 @@ def test_factory_openai_branch_builds_chat_openai(monkeypatch):
     settings = AgentSettings(
         llm_provider="openai",
         openai_model="gpt-4o-mini",
+        openai_base_url="https://api.example.com/v1",
         temperature=0.3,
         _env_file=None,
     )
@@ -104,6 +109,36 @@ def test_factory_openai_branch_builds_chat_openai(monkeypatch):
     assert isinstance(model, ChatOpenAI)
     assert model.model_name == "gpt-4o-mini"
     assert model.temperature == 0.3
+    assert str(model.openai_api_base) == "https://api.example.com/v1"
+    assert model.openai_api_key.get_secret_value() == "test-key"
+
+
+def test_factory_openai_requires_api_key(monkeypatch):
+    """缺凭据时直接失败，不静默回退到 Ollama（ADR-014 决策 3）。"""
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    settings = AgentSettings(
+        llm_provider="openai",
+        openai_model="gpt-4o-mini",
+        _env_file=None,
+    )
+
+    with pytest.raises(ValueError, match="AGENT_OPENAI_API_KEY"):
+        build_chat_model(settings)
+
+
+def test_factory_openai_prefers_configured_key_over_environment(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "env-key")
+    settings = AgentSettings(
+        llm_provider="openai",
+        openai_model="gpt-4o-mini",
+        openai_api_key="configured-key",
+        _env_file=None,
+    )
+
+    model = build_chat_model(settings)
+
+    assert model.openai_api_key.get_secret_value() == "configured-key"
 
 
 def test_factory_rejects_unknown_provider():
