@@ -6,3 +6,10 @@ scrape_configs:
     static_configs:
       - targets:
           - dapr-sidecar:9090
+
+  # 后端进程内指标（doc/api.md §5.6）；文本端点在 API 进程直接渲染，不读数据库。
+  - job_name: backend
+    metrics_path: /metrics
+    static_configs:
+      - targets:
+          - backend:8000

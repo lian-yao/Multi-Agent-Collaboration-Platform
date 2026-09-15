@@ -37,6 +37,10 @@ services:
       DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/multi_agent
       DAPR_HTTP_ENDPOINT: http://dapr-sidecar:3500
       DAPR_GRPC_ENDPOINT: dapr-sidecar:50001
+      # 容器内 localhost 指不到同网络的 Jaeger；显式指向 compose 服务名。
+      OBS_TRACING_ENDPOINT: http://jaeger:4318/v1/traces
+      OBS_TRACING_ENABLED: "true"
+      OBS_METRICS_SINK: postgres
     extra_hosts:
       - host.docker.internal:host-gateway
     ports:
@@ -56,6 +60,8 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+      jaeger:
+        condition: service_started
 
   dapr-sidecar:
     image: ghcr.io/dapr/daprd:1.18.2
