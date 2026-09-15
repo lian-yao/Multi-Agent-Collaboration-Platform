@@ -152,8 +152,21 @@ npm run dev
 - `deploy/docker/frontend.Dockerfile`：前端镜像（Node 构建 + nginx 托管）
 - `deploy/docker/nginx.conf`：Web UI 静态托管与 `/api` 反向代理
 - `deploy/dapr/components/`：Dapr State Store 与 Pub/Sub
-- `deploy/prometheus/prometheus.yml`：Prometheus 抓取配置
+- `deploy/prometheus/prometheus.yml`：Prometheus 抓取配置（`dapr-sidecar:9090` 与
+  `backend:8000/metrics` 两个 job）
 - `deploy/start.ps1` / `deploy/stop.ps1`：一键启动与停止
+
+## 可观测数据
+
+| 数据 | 地址 | 说明 |
+| --- | --- | --- |
+| Jaeger UI | http://localhost:16686 | 追踪浏览；后端按 `OBS_TRACING_ENDPOINT` 上报，容器内指向 `http://jaeger:4318/v1/traces` |
+| Prometheus UI | http://localhost:9090 | 抓取 `backend:8000/metrics` 与 `dapr-sidecar:9090`；`/api/v1/metrics` 的采样表数据在 PostgreSQL，不在 Prometheus |
+| 后端指标文本 | http://localhost:8000/metrics | 进程内 Prometheus 注册表，契约见 `doc/api.md` §5.6；不读数据库 |
+| 指标采样表 | PostgreSQL `metrics` | 由 `app/core/checkpoint.py::MetricRecord` 经 `init_checkpoint_schema()` 在 backend 启动时建表（`doc/data-model.md` §3） |
+
+> `metrics` 表缺失时观测采样只记日志并跳过，Prometheus 指标与追踪不受影响；
+> 表建好后重启 backend 即可看到 `/api/v1/metrics` 由 `not_integrated` 变为 `available`。
 
 ## 环境变量
 
@@ -176,6 +189,13 @@ npm run dev
 | `OBS_TRACING_ENDPOINT` | OTLP HTTP 追踪导出地址，默认 `http://localhost:4318/v1/traces`（Jaeger） |
 | `OBS_TRACING_ENABLED` | 是否启用追踪导出，默认 `true` |
 | `OBS_METRICS_SINK` | `metrics` 采样写入：`postgres`（默认）/ `none` |
+| `OBS_SERVICE_NAME` | 追踪服务名，默认 `macp-backend` |
+| `OBS_TRACING_SAMPLE_RATIO` | 采样比例，默认 `1.0` |
+| `OBS_METRICS_ENABLED` | 是否采集指标，默认 `true` |
+| `OBS_METRICS_FLUSH_SIZE` | 采样批量落库阈值，默认 `50` |
+
+`deploy/compose.yaml` 的 backend 显式设置 `OBS_TRACING_ENDPOINT=http://jaeger:4318/v1/traces`
+与 `OBS_METRICS_SINK=postgres`，避免容器内默认值 `localhost` 指不到 Jaeger。
 
 > 工具、沙箱与可观测的完整配置项见 `app/tools/config.py`、`app/sandbox/config.py`、
 > `app/mcp/config.py`、`app/observability/config.py`（ADR-012）。

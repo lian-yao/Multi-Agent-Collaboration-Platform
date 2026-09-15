@@ -132,6 +132,12 @@ erDiagram
 
 索引：`idx_metrics_name_time (metric_name, recorded_at DESC)`。
 
+建表归属：DDL 由 `app/core/checkpoint.py` 的 `MetricRecord` 模型定义，随
+`init_checkpoint_schema()` 在 worker 启动时创建（与其他 `*_record` 表同一入口，
+成员 B 负责）。写入方是观测采样 `app/observability/metrics.py::PostgresMetricSink`，
+读取方是只读接口 `GET /api/v1/metrics`（成员 D）。采样侧**不建表**：表缺失时记一次
+日志并跳过写入，`/api/v1/metrics` 返回 `availability=not_integrated`。
+
 ## 4. Redis 结构
 
 | Key | 类型 | TTL | 用途 | 一致性说明 |
