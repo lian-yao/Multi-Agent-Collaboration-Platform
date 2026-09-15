@@ -28,7 +28,7 @@ def schedule(
         task = WorkflowTask(
             workflow_id=workflow_id,
             task="分析技术文章并生成报告",
-            session_id="demo-session",
+            session_id=None,
             hold_seconds=hold_seconds,
             use_fake_model=use_fake_model,
         )
@@ -61,7 +61,24 @@ def schedule(
         if state is None:
             update_workflow_run(workflow_id, status="failed", error="state not found")
             raise SystemExit("workflow state not found")
-        workflow_result = json.loads(state.serialized_output or "null")
+        if state.runtime_status is not wf.WorkflowStatus.COMPLETED:
+            details = state.to_json()
+            update_workflow_run(
+                workflow_id,
+                status="failed",
+                error=f"workflow ended with {state.runtime_status.name}: {details}",
+            )
+            raise SystemExit(
+                f"workflow ended with {state.runtime_status.name}: {details}"
+            )
+        if not state.serialized_output:
+            update_workflow_run(
+                workflow_id,
+                status="failed",
+                error="completed workflow has no serialized output",
+            )
+            raise SystemExit("completed workflow has no serialized output")
+        workflow_result = json.loads(state.serialized_output)
         final_state = deserialize_pipeline_state(workflow_result["state"])
         update_workflow_run(
             workflow_id,
