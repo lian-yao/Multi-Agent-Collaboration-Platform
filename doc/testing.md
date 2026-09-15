@@ -235,14 +235,15 @@ uv run python scripts/measure_recovery.py --hold-seconds 15 --restart-lead-secon
 **提供方前提**：下表除 E-01/E-02 另有注明外，数据都测于本轮 D9-10 落地时的
 Ollama `qwen2.5-coder:7b`（E-03 走 poc 的确定性假模型路径）；此后默认提供方改为
 OpenAI 兼容 API，表中「未达成」的结论已在 API 模型下复测通过（见上一条记录），
-但**并发与恢复两组性能数据尚未在 API 模型下重取**。
+2026-09-15 晚又用 `gpt-5.5` 把依赖模型的 4 条整体补跑通过（见 §4.3.1），
+但**并发与恢复两组性能数据仍未在 API 模型下重取**。
 
 | 用例 | 状态 | 证据 / 缺口 |
 | --- | --- | --- |
 | E-01 单 Agent 问答 | 通过（结论分提供方） | 真实环境跑通：会话→消息→轮询→`completed`，报告消息落库。答复内容在 Ollama `qwen2.5-coder:7b` 下**未达成**——报告正文是 `{"name": "web_search", ...}` 这样的工具调用 JSON 文本（缺口 F-02）；换 OpenAI 兼容 API（`deepseek-flash`）后达成：报告 1877 字并引用工具返回值 `42`（见 §4.1 与 `doc/roadmap.md` 验证记录） |
-| E-02 多 Agent 协作 | 通过（结论分提供方） | 真实环境三步依次完成（`checkpoint.completed_steps=[collect, analyze, report]`，2-4s/条）；同受 F-02 影响（Ollama 下 `tool_calls=0`，工具未真正执行），API 模型下 collector/analyst 各产生一次 `calculator` 调用 |
+| E-02 多 Agent 协作 | 通过（结论分提供方） | 真实环境三步依次完成（`checkpoint.completed_steps=[collect, analyze, report]`，2-4s/条）；同受 F-02 影响（Ollama 下 `tool_calls=0`，工具未真正执行），API 模型下 collector/analyst 各产生一次 `calculator` 调用。2026-09-15 晚以 `gpt-5.5`（API 提供方、`MACP_E2E_TIMEOUT=900`）复测：workflow `completed` 330.9s，报告 3983 字符结构化 Markdown（见 §4.3.1） |
 | E-03 故障恢复 | 通过（旧数据有缺口） | `scripts/measure_recovery.py`：不可用 2.62s、**恢复耗时 ≤0.2s（目标 <5s）**、业务状态保留 `completed`/三步齐全；该次演练的 Dapr 终态为 FAILED（缺口 F-05，**已由 B 修复**），修复后的演练需重跑以确认两个终态同时成功。数据取自 poc 的确定性（假模型）路径 |
-| E-04 Web 会话管理 | 部分（Web 侧数据路径已验，渲染未验） | API 侧通过：暂停 → 新消息被 409 `SESSION_PAUSED` 拒绝 → 恢复 → 原 Workflow 续跑 `completed`。Web 侧由成员 D 补自动化（§4.3）：经 nginx 反代跑完「新建任务 → 暂停 → 暂停期提交被拒 → 恢复 → 回读」六步；浏览器**渲染效果**仍需人工按 `doc/deployment.md` 的核对清单确认，发消息后的三步流水线需要模型凭据 |
+| E-04 Web 会话管理 | 部分（Web 侧数据路径已验，渲染未验） | API 侧通过：暂停 → 新消息被 409 `SESSION_PAUSED` 拒绝 → 恢复 → 原 Workflow 续跑 `completed`（2026-09-15 晚 `gpt-5.5` 下复测 88.3s 到 `completed`，见 §4.3.1）。Web 侧由成员 D 补自动化（§4.3）：经 nginx 反代跑完「新建任务 → 暂停 → 暂停期提交被拒 → 恢复 → 回读」六步；浏览器**渲染效果**仍需人工按 `doc/deployment.md` 的核对清单确认 |
 | E-05 一键部署 | 通过（2026-09-15，成员 D 实跑） | `start.ps1` 退出码 `0` 且 Frontend / Backend / Dapr Sidecar 三段健康检查全部打印 `is healthy`，随后打印 7 行访问地址；`stop.ps1` 退出码 `0` 且 `docker ps -a` 中项目容器全部移除。过程中修复了两个脚本在 Windows PowerShell 5.1 下被 `docker compose` 的 stderr 中断的缺陷（见 §4.3）。容器侧 `/metrics`、`/tools` 与 Prometheus/Jaeger 已由 B/D 验收（`doc/roadmap.md`「M4 代码落地情况」） |
 | 并发会话（§3.2） | 通过 | 10 会话/并发度 10：成功率 1.0、HTTP 5xx 0、受理延迟 p50 0.46s、端到端 p50 16.54s / p95 18.61s、Token 合计 18650（621.7/次调用）、工具调用成功率**无样本**（0 次；Ollama 下模型未发起工具调用，F-02 之外的模型行为差异，API 模型下重测后应不再为 0） |
 
@@ -294,11 +295,49 @@ npm --prefix frontend run build
 7 行访问地址；`stop.ps1` 打印 `Services stopped.` 后
 `docker ps -a --filter "name=multi-agent-collaboration-platform"` 为空。
 
+#### 4.3.1 模型侧补跑（2026-09-15 晚，真实 API 提供方）
+
+上表下面 item 1 里「依赖模型的 4 条未跑」已于同日补跑。环境：`deploy/start.ps1` 起的
+compose 全栈（9 个服务全部 Healthy），模型走宿主机的 OpenAI 兼容网关
+（`PUT /api/v1/config/provider` 写入 `provider=openai`、`model=gpt-5.5`、
+`base_url=http://host.docker.internal:3000/v1`）。
+
+```bash
+MACP_E2E_LIVE=1 MACP_E2E_TIMEOUT=900 uv run pytest tests/e2e/test_live_e2e.py -q -s
+# 7 passed, 1 warning in 714.75s（无 skip）
+```
+
+结果：E-01/E-02 三步流水线 `completed`（workflow `9b48b152`，330.9s，
+`completed_steps=['collect','analyze','report']`、`current_step=None`），报告消息 3983 字符、
+是结构化 Markdown 正文而非工具调用 JSON——ADR-016 F-02 在 API 提供方下确认关闭；
+I-06 `/workflows/{id}/tool-calls` 返回 `availability=available`；E-04 API 侧
+「暂停 → 恢复 → 续跑」88.3s 到达 `completed`。
+
+**两个必须记住的环境约束**：
+
+1. **`MACP_E2E_TIMEOUT` 默认 300s 偏紧。** 单次 LLM 调用实测 24–35s（prompt ≈5000 tokens），
+   三步流水线叠加工具轮次后可达 330s。用默认值跑会**偶发**判为超时失败——首轮实测一个
+   workflow 用了 318s，恰超 300s 上限。按 API 提供方验收时请显式放大该值。
+2. **本机整体没有公网出口，`web_search` 必然失败。** 实测容器内与宿主机访问
+   `https://api.duckduckgo.com` 都超时（宿主机 10s 返回 `000`），而 `host.docker.internal:3000`
+   的模型网关正常 200。模型若选中 `web_search`，该工具会以
+   `ToolExecutionError: 搜索服务不可达: timed out` 落库并重试，进一步拉长耗时。
+   要稳定复现，需把 `TOOL_SEARCH_ENDPOINT` 指向可达的搜索服务，或在该环境下不向 Agent
+   暴露 `web_search`——两者都属工具层配置（成员 C 范围），本轮**未改**。
+
+**另一个已发现的测试隔离缺口**（本轮未修，仅记录）：把 Provider 覆盖写进 PostgreSQL 之后，
+`uv run pytest` 会有 8 条转红——`tests/unit/test_agent_config.py` 3 条、
+`tests/integration/test_config_api.py` 2 条、`tests/integration/test_inspection_api.py` 3 条。
+原因是这些用例 monkeypatch 了 `AgentSettings` / `list_agent_configs`，却没有屏蔽数据库里
+*活的* Provider 覆盖（例如 `test_missing_model` 期望 `missing_model`，实际拿到 `configured`）。
+显式 `PUT` 全 `null` 清除覆盖后这 8 条立即恢复通过（38 passed），全量回到
+**371 passed / 7 skipped**。建议后续给这批用例加一个「清空 Provider 覆盖」的 fixture。
+
 **未完成 / 未验**（不隐瞒）：
 
-1. `tests/e2e/test_live_e2e.py` 中依赖模型的 4 条（E-01/E-02 两条、I-06、
-   E-04 API 侧续跑）本轮**未跑**：本机没有可用的模型凭据。命令与预期不变，
-   配好凭据后可直接重跑。
+1. 依赖模型的 4 条**已补跑通过**（见 §4.3.1）。仍属未验的是环境性路径：本机无公网出口，
+   `web_search` 不可能成功，所以「模型选中 web_search 时流水线仍能产出报告」这条路径
+   在本机**无法**验收——E-01/E-02 目前的通过依赖模型当次未选该工具。
 2. 浏览器渲染，以及「发消息 → 观察 Agent 执行台推进 → 展开协作详情」仍是人工步骤：
    本轮只给核对清单，没有引入浏览器自动化（前端门禁是类型检查 + 构建，见 §3.3）。
 3. 「任务记录」页只显示当前会话最近一次执行（`App.tsx::History`，页面已标注
