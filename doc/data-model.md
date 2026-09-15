@@ -23,6 +23,10 @@ erDiagram
     AGENTS ||--o{ AGENT_RUN : executes
     WORKFLOW_RUN ||--o{ TOOL_CALL : records
     METRICS }o--|| METRICS : aggregated
+    LLM_PROVIDERS ||--o{ LLM_MODELS : exposes
+    LLM_MODELS ||--o{ AGENT_CONFIGS : referenced_by
+    LLM_MODELS ||--o| PROVIDER_CONFIGS : default_route
+    MCP_SERVER_REGISTRY ||--o{ TOOL_CALL : provides
 ```
 
 说明：
@@ -31,6 +35,8 @@ erDiagram
 - `tool_calls.run_id` 指向触发该工具调用的 `agent_runs.id`；若由 Dapr Workflow 活动直接产生，
   同一记录再冗余 `workflow_runs.id` 到 `workflow_run_id`。
 - `workflow_runs.agent_run_id` 为可空唯一外键：AgentRun 不一定需要 Dapr Workflow。
+- `llm_models` → `agent_configs` / `provider_configs` 的引用是**逻辑**引用（列值，不建外键）：
+  删除模型条目不应阻断配置读取，悬空引用按「未绑定」处理并逐字段回退（ADR-017）。
 
 ## 3. PostgreSQL 表结构
 
@@ -138,33 +144,144 @@ erDiagram
 读取方是只读接口 `GET /api/v1/metrics`（成员 D）。采样侧**不建表**：表缺失时记一次
 日志并跳过写入，`/api/v1/metrics` 返回 `availability=not_integrated`。
 
+### agent_registry（Agent 角色目录）
+
+| 字段 | 类型 | 约束/默认 | 说明 |
+| --- | --- | --- | --- |
+| id | VARCHAR(50) | PK | 角色 id：内置为 `collector` / `analyst` / `reporter`，自定义为自由 slug |
+| name | VARCHAR(100) | 非空 | 展示名 |
+| role | VARCHAR(50) | 非空 | 角色语义键；内置对齐流水线角色，自定义为自由文本 |
+| description | TEXT | NULL | 职责说明（卡片/详情展示） |
+| system_prompt | TEXT | NULL | 角色系统 Prompt（预留，本期前端不暴露编辑） |
+| builtin | BOOLEAN | `false` | 内置流水线角色标记；`true` 不可删除 |
+| enabled | BOOLEAN | `true` | 停用后不参与配置列表展示 |
+| created_at | TIMESTAMPTZ | `now()` | 创建时间 |
+| updated_at | TIMESTAMPTZ | `now()` | 更新时间 |
+
+角色目录把「代码写死的 `_AGENT_NAMES`」提升为可增删启停的注册表（ADR-017 的
+`chatModels` 同构扩展）。三个内置角色由 `init_checkpoint_schema()` 幂等种子写入；
+自定义角色可自由增删，删除时连同 `agent_configs` 覆盖行一并清理。建表归属：
+`app/core/checkpoint.py::AgentRegistryRecord`。写入方是 `POST/DELETE
+/api/v1/config/agents`（`doc/api.md` §5.7），读取方是同接口的 GET 列表。
+
+**与 `app/agents/roles.py` 的关系（角色定义三处来源，需保持一致）**：
+
+1. `app/agents/roles.py::RoleDefinition`（成员 C 的静态 Prompt 层）—— 内置角色的
+   `system_prompt` **唯一事实源**，同时含默认 `model` / `temperature`。流水线阶段活动
+   仍从这里取角色 Prompt，本表**不取代**它。
+2. `agent_registry`（本表）—— 角色目录的**可增删启停**层，负责「有哪些角色」及其
+   展示名 `name` / 职责 `description` / 启停 `enabled`。内置三行的 `name` / `description`
+   由 `BUILTIN_AGENT_SEED` 种子写入，**与 roles.py 的展示名保持一致**；`system_prompt`
+   列本期预留为空（前端不暴露编辑），真实 Prompt 仍走 roles.py。
+3. `app/api/main.py::_AGENT_NAMES` —— API 层的展示名回退 dict，仅在 `agent_registry`
+   尚未种子化（旧环境未跑迁移）时兜底，**不是**事实源。
+
+三者的内置角色 `name` 语义一致（信息收集 / 数据分析 / 报告生成）；改角色展示名或
+Prompt 时需同步 roles.py 与 `BUILTIN_AGENT_SEED`，避免目录与 Prompt 层漂移。
+
 ### agent_configs（Agent 配置覆盖）
 
 | 字段 | 类型 | 约束/默认 | 说明 |
 | --- | --- | --- | --- |
-| agent_id | VARCHAR(50) | PK | 角色 id：`collector` / `analyst` / `reporter` |
+| agent_id | VARCHAR(50) | PK | 角色 id，指向 `agent_registry.id`（逻辑引用，不建外键） |
 | model | VARCHAR(200) | NULL | 覆盖模型名；NULL 表示回退环境配置 |
 | temperature | DOUBLE PRECISION | NULL | 覆盖温度（0.0–2.0）；NULL 表示回退环境配置 |
+| llm_model_id | VARCHAR(80) | NULL | 指向 `llm_models.id`；设置后由该模型条目提供端点、凭据与特化参数（ADR-017） |
+| top_p | DOUBLE PRECISION | NULL | 覆盖 nucleus sampling（0.0–1.0）；NULL 表示回退 |
+| max_output_tokens | INTEGER | NULL | 覆盖单次输出上限（≥1）；NULL 表示回退 |
+| reasoning_type | VARCHAR(20) | NULL | 覆盖推理模式：`none` / `openai` / `gemini` / `anthropic`；NULL 表示回退 |
 | updated_by | VARCHAR(100) | NULL | 审计来源，取请求头 `X-Request-ID` |
 | updated_at | TIMESTAMPTZ | `now()` | 最近更新时间 |
 
 只存**被覆盖的字段**（行内 NULL = 回退），不复制环境配置的全量快照；删除覆盖等价于把
 对应列写回 NULL。建表归属：`app/core/checkpoint.py::AgentConfigRecord`，随
 `init_checkpoint_schema()` 创建。写入方是 `PATCH /api/v1/config/agents/{agent_id}`
-（`doc/api.md` §5.7），读取方是同接口的 GET 列表/详情与 Workflow 阶段活动
+（`doc/api.md` §5.7），读取方是同接口的 GET 列表面与 Workflow 阶段活动
 （`app/core/agent_config.py::resolve_agent_settings`）。索引：主键即可，无额外索引
-（数据量与角色数同阶，恒为 3 行以内）。
+（数据量与角色数同阶）。
+`llm_model_id` 无外键约束：模型条目被删除时角色退化为「未绑定」并按 `model` 列回退，
+不留悬挂引用导致的读取失败（ADR-017）。
+
+### llm_providers（模型 Provider 注册表）
+
+| 字段 | 类型 | 约束/默认 | 说明 |
+| --- | --- | --- | --- |
+| id | VARCHAR(50) | PK | 用户可读 slug，如 `gateway-main` |
+| name | VARCHAR(100) | 非空 | 展示名 |
+| preset_type | VARCHAR(40) | 非空 | 预设族：`openai` / `deepseek` / `moonshot` / `openrouter` / `ollama` / `openai-compatible` 等（见 §3.1） |
+| api_type | VARCHAR(30) | 非空 | 协议族：`openai-compatible` / `openai-responses` / `anthropic` / `gemini` / `amazon-bedrock` |
+| base_url | VARCHAR(500) | NULL | 端点；空表示用预设默认端点 |
+| api_key | TEXT | NULL | 凭据；**不回传、不落日志** |
+| custom_headers | JSONB | `{}` | 附加请求头 `{key: value}` |
+| additional_settings | JSONB | `{}` | 预留的协议族专属配置 |
+| enabled | BOOLEAN | `true` | 停用后不参与默认路由解析 |
+| created_at | TIMESTAMPTZ | `now()` | 创建时间 |
+| updated_at | TIMESTAMPTZ | `now()` | 更新时间 |
+| updated_by | VARCHAR(100) | NULL | 审计来源 |
+
+建表归属：`app/core/checkpoint.py::LlmProviderRecord`，随 `init_checkpoint_schema()` 创建。
+写入方是 `POST/PATCH/DELETE /api/v1/config/providers`（`doc/api.md` §5.9），
+读取方是 `app/core/model_registry.py`。索引：主键 + `idx_llm_providers_enabled (enabled)`。
+
+### llm_models（模型注册表）
+
+| 字段 | 类型 | 约束/默认 | 说明 |
+| --- | --- | --- | --- |
+| id | VARCHAR(80) | PK | 条目 id，批量导入时由 `provider_id` + `model` 派生 |
+| provider_id | VARCHAR(50) | FK → llm_providers.id，CASCADE | 所属 Provider |
+| model | VARCHAR(200) | 非空 | 调用时传给 Provider 的模型名 |
+| name | VARCHAR(200) | NULL | 展示名；空则回退 `model` |
+| enabled | BOOLEAN | `true` | 停用后不出现在可选模型列表 |
+| reasoning_type | VARCHAR(20) | `none` | 推理模式：`none` / `openai` / `gemini` / `anthropic` |
+| temperature | DOUBLE PRECISION | NULL | 特化温度（0.0–2.0）；NULL 表示用 Provider 默认 |
+| top_p | DOUBLE PRECISION | NULL | 特化 nucleus sampling（0.0–1.0） |
+| max_context_tokens | INTEGER | NULL | 上下文窗口上限（≥1） |
+| max_output_tokens | INTEGER | NULL | 单次输出上限（≥1） |
+| custom_parameters | JSONB | `[]` | 透传参数 `[{key, value, type}]`，`type` ∈ `text` / `number` / `boolean` / `json` |
+| modalities | JSONB | `["text"]` | 能力标注：`text` / `vision` / `pdf` |
+| created_at | TIMESTAMPTZ | `now()` | 创建时间 |
+| updated_at | TIMESTAMPTZ | `now()` | 更新时间 |
+| updated_by | VARCHAR(100) | NULL | 审计来源 |
+
+唯一约束 `uq_llm_models_provider_model (provider_id, model)`：同一 Provider 下模型名唯一，
+批量导入据此幂等。索引：`idx_llm_models_provider (provider_id)`。
+建表归属：`app/core/checkpoint.py::LlmModelRecord`。
+
+### mcp_server_registry（MCP Server 注册表）
+
+| 字段 | 类型 | 约束/默认 | 说明 |
+| --- | --- | --- | --- |
+| id | VARCHAR(50) | PK | Server id |
+| name | VARCHAR(100) | 非空 | 展示名 |
+| transport | VARCHAR(20) | 非空 | `stdio` / `http` / `sse` / `ws` |
+| command | VARCHAR(500) | NULL | `stdio` 可执行文件 |
+| args | JSONB | `[]` | `stdio` 参数数组 |
+| env | JSONB | `{}` | `stdio` 环境变量 |
+| cwd | VARCHAR(500) | NULL | `stdio` 工作目录 |
+| url | VARCHAR(500) | NULL | `http` / `sse` / `ws` 端点 |
+| headers | JSONB | `{}` | 远程传输附加请求头 |
+| enabled | BOOLEAN | `true` | 停用后不参与工具目录构建 |
+| tool_options | JSONB | `{}` | 工具级选项 `{toolName: {disabled, allowAutoExecution}}` |
+| discovered | JSONB | NULL | 最近一次发现缓存：`{server_info, tool_names, tool_schemas, discovered_at}` |
+| created_at | TIMESTAMPTZ | `now()` | 创建时间 |
+| updated_at | TIMESTAMPTZ | `now()` | 更新时间 |
+| updated_by | VARCHAR(100) | NULL | 审计来源 |
+
+建表归属：`app/core/checkpoint.py::McpServerRecord`。写入方是
+`POST/PATCH/DELETE /api/v1/config/mcp/servers`（`doc/api.md` §5.11），
+发现缓存由 `POST /api/v1/config/mcp/servers/{id}/discover` 写入。
 
 ### provider_configs（模型 Provider 配置）
 
 | 字段 | 类型 | 约束/默认 | 说明 |
 | --- | --- | --- | --- |
-| id | VARCHAR(20) | PK | 固定 `default`（单行表，本期只支持一套全局 Provider 配置） |
+| id | VARCHAR(20) | PK | 固定 `default`（单行表，语义是「默认模型路由」） |
 | provider | VARCHAR(20) | NULL | `openai` / `ollama`；NULL 表示回退环境配置 |
 | model | VARCHAR(200) | NULL | 模型名；NULL 表示回退环境配置 |
 | base_url | VARCHAR(500) | NULL | OpenAI 兼容端点；NULL/空表示用官方端点或回退环境配置 |
 | api_key | TEXT | NULL | 凭据；**不回传、不落日志**；NULL 表示回退环境配置 |
 | temperature | DOUBLE PRECISION | NULL | 温度（0.0–2.0）；NULL 表示回退环境配置 |
+| default_llm_model_id | VARCHAR(80) | NULL | 默认模型条目 `llm_models.id`；设置后按该条目及其 Provider 解析路由（ADR-017） |
 | updated_by | VARCHAR(100) | NULL | 审计来源，取请求头 `X-Request-ID` |
 | updated_at | TIMESTAMPTZ | `now()` | 最近更新时间 |
 
@@ -173,6 +290,28 @@ erDiagram
 `init_checkpoint_schema()` 创建。写入方是 `PUT /api/v1/config/provider`
 （`doc/api.md` §5.8），读取方是 `app/core/provider_config.py`（API 与 Workflow 阶段活动
 共用），合并顺序为「存储配置 → 环境配置」，见 ADR-014。索引：主键即可，恒为 1 行。
+`default_llm_model_id` 是本表在 ADR-017 之后的**首选**表达：它指向注册表条目，
+从而带出 Provider 端点、凭据与模型特化参数；`provider` / `model` / `base_url` / `api_key` /
+`temperature` 五列保留为直连覆盖，二者同时存在时以 `default_llm_model_id` 为先。
+
+### 3.1 Provider 预设族（preset_type）
+
+预设族是**配置层**的概念，决定默认 `api_type`、默认端点与是否需要凭据；运行期只按
+`api_type` 选择协议实现。目录定义在 `app/core/model_registry.py::PROVIDER_PRESETS`，
+由 `GET /api/v1/config/provider-presets` 暴露给前端，用于 Provider 选择器与表单预填。
+
+| 分类 | preset_type |
+| --- | --- |
+| 国际主流 | `openai`、`anthropic`、`gemini`、`xai`、`mistral`、`perplexity`、`groq`、`together-ai`、`cerebras` |
+| 国内 | `deepseek`、`moonshot`、`zhipu`、`doubao`、`siliconflow`、`stepfun`、`minimax`、`hunyuan` |
+| 聚合网关 | `openrouter`、`apimart` |
+| 云托管 | `azure-openai`、`amazon-bedrock` |
+| 本地 | `ollama`、`lm-studio` |
+| 自定义 | `openai-compatible` |
+
+`preset_type` 与 `api_type` 是**正交**的：同一预设族允许切换协议实现
+（例如 `deepseek` 可走 `openai-compatible` 或 `anthropic`）。
+`get_default_api_type_for_preset()` / `get_supported_api_types_for_preset()` 定义二者映射。
 
 ## 4. Redis 结构
 
@@ -219,3 +358,7 @@ erDiagram
 - `ToolCall` ↔ `tool_calls`
 - `AgentInfo` / Agent 配置 ↔ `agents`
 - `metrics` 接口 ↔ `metrics`
+- `LlmProviderRecord` ↔ `LlmProvider`（§5.9）；`LlmModelRecord` ↔ `LlmModel`（§5.10）
+- `McpServerRecord` ↔ `McpServer`（§5.11）
+- Workflow 阶段活动解析生效模型时，读取链是
+  `provider_configs` → `llm_providers` / `llm_models` → `agent_configs`（ADR-017 §2）。

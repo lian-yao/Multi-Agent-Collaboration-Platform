@@ -19,6 +19,33 @@ uv run pytest                              # 全部可用用例
 cd deploy; .\start.ps1                     # 起完整环境
 ```
 
+> **`uv run pytest` 需要可达的 PostgreSQL 与 Redis**（本机 compose 的 `postgres` 与
+> `redis` 即可，见 `doc/deployment.md`）。这两者不可达时，用例**不会快速失败**，而是
+> 长时间阻塞在连接重试上——曾出现 30 分钟仍无结果、起栈后 14.51s 跑完（成员 D D9-10
+> 实测）。跑全量前先确认 `localhost:5433` 与 `localhost:6380` 可连。
+
+> **配置类用例要求「无既有覆盖」的干净存储**（2026-09-15 补充）。`tests/integration/`
+> 里 `test_config_api.py`、`test_inspection_api.py` 断言的是「环境配置 + 无覆盖」的生效值，
+> 而 `provider_configs` 与 Redis 镜像 `provider:config` 都是**跨运行持久**的：只要开发环境
+> 里通过配置页保存过 provider/model，这些用例就会以「存储值优先于环境配置」而失败
+> （表现为 `provider`/`model` 断言不符、`status` 由 `missing_model` 变成 `configured`）。
+>
+> 这是**环境隔离问题，不是代码缺陷**。跑全量前把测试指向独立的库与 Redis DB：
+>
+> ```bash
+> # 一次性：准备空库
+> docker exec <postgres 容器> psql -U postgres -c "DROP DATABASE IF EXISTS macp_test;" \
+>                                          -c "CREATE DATABASE macp_test;"
+> docker exec <redis 容器> redis-cli -n 15 flushdb
+>
+> DATABASE_URL="postgresql+psycopg://postgres:postgres@localhost:5433/macp_test" \
+> REDIS_URL="redis://localhost:6380/15" \
+> uv run pytest
+> ```
+>
+> 不要为了让用例通过而清空开发环境里的 `provider_configs` 或 Redis 的 `provider:config`
+> ——那是真实配置（含在用凭据）。
+
 测试替身：
 
 - LLM 使用 `FakeChatModel`（已有实现），按用例注入固定回复；
@@ -66,6 +93,12 @@ cd deploy; .\start.ps1                     # 起完整环境
 | E-03 | 故障恢复 | 执行中断掉 backend → 重启 | 任务从断点续跑成功，无状态丢失 | M3 起可演练，M5 验收 |
 | E-04 | Web 会话管理 | UI 创建会话、发消息、暂停/恢复 | UI 与 API 状态一致 | M5 |
 | E-05 | 一键部署 | `start.ps1` → 健康检查 → `stop.ps1` | 全部服务健康 | M5 |
+
+E-04/E-05 目前的自动化程度（成员 D D9-10）：会话生命周期（创建 → 暂停 → 暂停期提交被拒
+→ 恢复 → 回读）与「前端容器 + nginx `/api` 反代」走 `tests/e2e/test_live_e2e.py` 的
+Web 侧用例，部署脚本按 `deploy/start.ps1` / `stop.ps1` 实跑并以退出码与三段健康检查判定。
+浏览器里的**渲染效果**仍需人工按 `doc/deployment.md`「演示与验收」的核对清单确认；
+发消息后的三步流水线需要可用的模型凭据（提供方前提见 §4.2）。
 
 ## 3. 关键链路测试设计
 
@@ -130,15 +163,122 @@ uv run python scripts/perf_concurrency.py --sessions 10 --concurrency 10 --json 
 （`tsc --noEmit && vite build`）。因此前端改动按「构建通过 + 真实后端冒烟」两步验证，
 不把构建通过当作功能验收。
 
-Provider 配置面板（`frontend/src/Inspection.tsx::ProviderConfigPanel`）的验证步骤：
+Provider 配置面板的验证步骤（ADR-017 之后：`frontend/src/config/` 下的
+「默认路由」分区 = `DefaultRoutePanel.tsx`）：
 
 1. 起后端（真实 PostgreSQL + Redis）与 `npm run dev`；
-2. 「工具与配置」页应显示生效的 provider/model/地址/温度与凭据状态；
+2. 「工具与配置 → 默认路由」应显示生效的 provider/model/地址/温度与凭据状态；
 3. 填入非法取值（例如 Temperature 填 3）提交 → 页面给出取值错误，配置不变；
 4. 改模型或地址后提交 → 提示已保存，页面回读生效值，响应与页面都不出现密钥；
 5. 点「清除覆盖并回退环境配置」→ 页面回到环境配置值。
 
-浏览器端的自动化用例（Playwright 之类）尚未引入，属后续增量。
+注册表配置页（ADR-017）的分区与验证要点。**三个页面各管一段**，不要在同一页里既写
+配置又做观测：
+
+| 页面 | 组件 | 分区 / 验证要点 |
+| --- | --- | --- |
+| 工具与配置 | `config/ConfigPage.tsx` | 只放写配置的三个分区，见下表三行；三个分区用 `components/PageTabs.tsx` 副路由切换，标题与副路由左对齐（**不整页居中**） |
+| Agent 团队 | `App.tsx::AgentTeamPage` → `config/AgentPanel.tsx` | 角色路由：一次 `GET /config/agents` 取回角色与 `available_models`；角色**一行多个方块**，方块只显示摘要（名字 / `role · 状态` / 生效模型 / Temperature / 覆盖项数），点击方块在网格下方展开 `AgentTuningPanel` 编辑，再点一次或「收起」关掉；`override_keys` 高亮「已覆盖」字段；「清除全部覆盖」发 6 个 `null`；`activeAgentId` 只做当前阶段高亮 |
+| 任务记录 | `records/RecordsPage.tsx`（容器与行渲染在 `records/Inspection.tsx`） | 四分区副路由：`runs` 运行记录、`calls` 工具调用（§5.5）、`metrics` 指标采样（§5.6）、`sessions` 历史会话（§5.13）。采样有 Workflow 时按 `workflow_id` 取并轮询（终态停），无 Workflow 时退回全局采样；历史会话调 `GET /api/v1/sessions` 分页列出，点选按 `latest_workflow_id` 恢复执行台并回工作台；`Records` 统一「加载中 / 失败 / 未接入 / 无记录 / 有数据」五态，分页仅在多页时出现 |
+
+「工具与配置」页的三个分区：
+
+| 分区 | 组件 | 验证要点 |
+| --- | --- | --- |
+| Provider | `ProviderPanel.tsx` + `ModelSection.tsx` | 预设目录预填 `preset_type`/`api_type`/`base_url`；`api_key` 输入框留空 = 不修改；删除仍有启用模型的 Provider 时先用 `409 PROVIDER_IN_USE` 拦一次，再让用户确认 `?force=true` |
+| 同上 · 批量引入 | `ModelSection.tsx::BatchImportModal` | 「从远端发现」**只在点击时**发起（不在挂载时调用）；已登记模型置灰计入 `existing`；重复提交返回 `skipped` 而不报错 |
+| 同上 · 特化调参 | `ModelSection.tsx::ModelTuningForm` | 只提交被改动字段；清空数字输入 = 显式 `null`（回到未设置）；`PATCH` 不发 `provider_id` |
+| 默认路由 | `DefaultRoutePanel.tsx` | `default_llm_model_id` 非空时展示解析出的注册表来源；悬空 id 给出提示而不是报错 |
+| MCP 工具 | `McpPanel.tsx` | 工具卡片只显示 `name` / 截断后的 `description` / 开关与可用性；完整 `input_schema` 收进**默认折叠**的 `<details>`，展开时才调 §5.3 |
+
+浏览器端的自动化用例（Playwright 之类）尚未引入，属后续增量。在此之前，配置页与工作台
+各有一层**无浏览器渲染冒烟**（不引入新依赖，只用项目已有的 react / esbuild）：
+
+```bash
+cd frontend
+node_modules/.bin/esbuild rendercheck/config-smoke.tsx --bundle --platform=node \
+  --format=cjs --jsx=automatic --loader:.css=empty --outfile="$TEMP/config-smoke.cjs" \
+  && node "$TEMP/config-smoke.cjs"        # 退出码 0 = 通过
+node_modules/.bin/esbuild rendercheck/workspace-smoke.tsx --bundle --platform=node \
+  --format=cjs --jsx=automatic --loader:.css=empty --outfile="$TEMP/workspace-smoke.cjs" \
+  && node "$TEMP/workspace-smoke.cjs"     # 退出码 0 = 通过
+```
+
+> `--outfile` 必须落在仓库外。写成 `--outfile="/c/..."` 会被当成相对路径，在
+> `frontend/` 下造出 `frontend/c/Users/...` 这种路径形状的垃圾目录（已踩过一次，见
+> 2026-09-15 日志）。用 `C:/...` 或 `$TEMP`。
+
+`config-smoke` 用 `react-dom/server` 渲染整棵配置页，断言配置页只剩 3 个分区入口、已迁走
+的分区不再出现在这里，另外**单独挂载**一次 `AgentPanel`（Agent 团队页）、
+`RuntimeSampling` 与 `RecordsPage`（任务记录页）——它们不在 `RuntimeConfig` 的树里，
+不单独挂就等于换页后无人验证。再加三层用显式 props 驱动、effects 够不到的区块：
+`AgentRoleCard`（角色方块：摘要 / 当前阶段 / 覆盖项数齐全，**整块是 `<button>` 且表单
+不在方块里**）、`AgentTuningPanel`（六个覆盖字段 + 层次来源 + 保存/清除入口 + 已绑定
+模型回显）与 `ModelSection`（两条模型、特化徽标、开关、批量引入入口）。
+
+`workspace-smoke`（ADR-018）覆盖工作台三块新视图，同样是「显式 props 驱动」那一类：
+`CollaborationGraph`（串行 / 并行波次两种排布、等待态文案、空态，以及**未传 `onSelect`
+时渲染为 `<div>` 而不是 `<button>`**）、`AgentStageModal`（身份与绑定、`pending` 说
+「等待前置阶段」而不是 workflow 词汇「排队中」、角色未就绪时的降级、明示推理过程尚未
+对外暴露）与 `TaskUsagePanel` + `groupUsage`（**同一指标多次采样并排列出、断言不求和**）。
+另有一组读源文件的静态断言，固定「假选择已删除」：`styles.css` 不含 `.decision-*`、
+`App.tsx` 不含「主决策 / 自动分配」、卡片点击走 `setDetailStage` 而非 `setInspectorOpen`、
+`WorkflowInspection` 已从 `Inspection.tsx` 删除。
+
+副路由（2026-09-15 增加，`components/PageTabs.tsx`）另有三类断言：
+`role="tablist"` / `role="tab"` 语义与 `aria-selected`、只有选中项 `tabindex="0"`、
+`variant="inline"` 落在 `ui-tabs-inline` 上。**版式回归**则读文件断言：
+`src/**/*.css` 里 `.config-page` 不得再有 `max-width` + `margin:0 auto`
+（用户明确报过的「配置页居中、与其它页不一致」），且 `.ui-tabs` 必须是
+`width: fit-content`（否则副路由会撑满一行，重新变成居中观感）；
+`.config-page > :not(.page-heading):not(.ui-tabs)` 必须带 `max-width:1180px` +
+`margin-inline:auto`（内容限宽居中——副路由左置但内容拉满整行同样是用户报过的问题）。
+因这两条断言按 `process.cwd()` 找样式表，**脚本必须在 `frontend/` 下运行**。
+
+**边界要说清**：它只跑不依赖 `useEffect` 的路径，跑不到「点击 → 请求 → 回填」的交互
+链路；那部分仍是人工浏览器验收（上面两张表就是人工清单），或退到 §3.4 的静态预览。
+为什么需要它：本机 `npm install agent-browser` 长时间无产物（要拉 ~500MB Chromium），
+起不了浏览器，只能退到这一层。
+
+为了让它够得着卡片内部，`AgentRoleCard` / `AgentTuningPanel` 与 `ModelSection` 都按
+「显式 props 驱动」的形状导出；新增复杂卡片时沿用这个约定，别把可测的部分藏在 effect 后面。
+
+### 3.4 UI 评审预览（不需要后端，2026-09-15 增加）
+
+§3.3 的冒烟只到「渲染不崩」，看不到版式，也点不动副路由。后端起真需要
+PostgreSQL + Dapr，评审一次「左对齐有没有改对」不该被环境卡住，所以另加一个
+**单文件、离线、可点击**的预览：
+
+```bash
+python frontend/rendercheck/build-preview.py      # 产出 rendercheck/ui-preview.html
+```
+
+三个文件，职责分开：
+
+| 文件 | 作用 |
+| --- | --- |
+| `rendercheck/preview_seed.py` | 评审用的种子数据。既能被 `build-preview.py` 摊平成静态路由表，也能直接跑起来当临时后端（监听 8000，配合 `npm run dev` 的 `/api` 代理联调） |
+| `rendercheck/preview.tsx` | 把**真实的 `App`** 挂进浏览器，并接管 `fetch`。路由表是 `"<METHOD> <path>"` 的扁平映射，动态段在 Python 侧已固定成常量，所以这里只做一次查表 |
+| `rendercheck/build-preview.py` | 摊平数据 → esbuild 打浏览器 IIFE（带真实 CSS）→ 把 JS/CSS/种子 JSON 内联成一个 HTML |
+
+要点与坑：
+
+- `preview.tsx` 必须**自己** `import "../src/styles.css"`。那一行只在 `src/main.tsx` 里，
+  而预览不经过 `main.tsx`；漏了会得到一个没有全局令牌与外壳版式的空壳页面。
+- 变更类请求（保存 / 删除）预览不模拟落库，统一回空成功体，免得评审版式时被红字带偏。
+- 产物 `ui-preview.html` 与中间产物 `.preview-bundle.*` 已进 `.gitignore`，不入库。
+
+预览产物本身可以离线自检（`jsdom` 挂载 + 点一遍侧栏与副路由，11 项断言）。这条链路
+**不进仓库**，因为项目刻意不引前端测试依赖；本机想跑就临时装：
+
+```bash
+npm i jsdom && node verify_preview.mjs frontend/rendercheck/ui-preview.html
+```
+
+> **纠正一条旧结论**：早前记录「`npm install jsdom` 长时间无产物」被当成网络问题。
+> 真实原因是 **npm 在缺少 `package.json` 的目录里会挂住**——补一个最小
+> `package.json` 后 `jsdom` / `linkedom` 都在 4 秒内装完。以后遇到 npm 无输出，
+> 先确认目标目录有没有 `package.json`，再怀疑镜像。
 
 ## 4. 里程碑验收清单
 
@@ -224,15 +364,16 @@ uv run python scripts/measure_recovery.py --hold-seconds 15 --restart-lead-secon
 **提供方前提**：下表除 E-01/E-02 另有注明外，数据都测于本轮 D9-10 落地时的
 Ollama `qwen2.5-coder:7b`（E-03 走 poc 的确定性假模型路径）；此后默认提供方改为
 OpenAI 兼容 API，表中「未达成」的结论已在 API 模型下复测通过（见上一条记录），
-但**并发与恢复两组性能数据尚未在 API 模型下重取**。
+2026-09-15 晚又用 `gpt-5.5` 把依赖模型的 4 条整体补跑通过（见 §4.3.1），
+但**并发与恢复两组性能数据仍未在 API 模型下重取**。
 
 | 用例 | 状态 | 证据 / 缺口 |
 | --- | --- | --- |
 | E-01 单 Agent 问答 | 通过（结论分提供方） | 真实环境跑通：会话→消息→轮询→`completed`，报告消息落库。答复内容在 Ollama `qwen2.5-coder:7b` 下**未达成**——报告正文是 `{"name": "web_search", ...}` 这样的工具调用 JSON 文本（缺口 F-02）；换 OpenAI 兼容 API（`deepseek-flash`）后达成：报告 1877 字并引用工具返回值 `42`（见 §4.1 与 `doc/roadmap.md` 验证记录） |
-| E-02 多 Agent 协作 | 通过（结论分提供方） | 真实环境三步依次完成（`checkpoint.completed_steps=[collect, analyze, report]`，2-4s/条）；同受 F-02 影响（Ollama 下 `tool_calls=0`，工具未真正执行），API 模型下 collector/analyst 各产生一次 `calculator` 调用 |
+| E-02 多 Agent 协作 | 通过（结论分提供方） | 真实环境三步依次完成（`checkpoint.completed_steps=[collect, analyze, report]`，2-4s/条）；同受 F-02 影响（Ollama 下 `tool_calls=0`，工具未真正执行），API 模型下 collector/analyst 各产生一次 `calculator` 调用。2026-09-15 晚以 `gpt-5.5`（API 提供方、`MACP_E2E_TIMEOUT=900`）复测：workflow `completed` 330.9s，报告 3983 字符结构化 Markdown（见 §4.3.1） |
 | E-03 故障恢复 | 通过（旧数据有缺口） | `scripts/measure_recovery.py`：不可用 2.62s、**恢复耗时 ≤0.2s（目标 <5s）**、业务状态保留 `completed`/三步齐全；该次演练的 Dapr 终态为 FAILED（缺口 F-05，**已由 B 修复**），修复后的演练需重跑以确认两个终态同时成功。数据取自 poc 的确定性（假模型）路径 |
-| E-04 Web 会话管理 | 部分 | API 侧通过：暂停 → 新消息被 409 `SESSION_PAUSED` 拒绝 → 恢复 → 原 Workflow 续跑 `completed`；**Web UI 侧未验**（需浏览器端到端） |
-| E-05 一键部署 | 部分 | compose 全服务健康、`/health` 200、`/api/v1/agents` 三角色、`/api/v1/providers` 非空；容器侧 `/metrics`、`/tools` 与 Prometheus/Jaeger 已由 B/D 验收（`doc/roadmap.md`「M4 代码落地情况」）；**`start.ps1` 全流程与 `stop.ps1` 未在本轮重跑** |
+| E-04 Web 会话管理 | 部分（Web 侧数据路径已验，渲染未验） | API 侧通过：暂停 → 新消息被 409 `SESSION_PAUSED` 拒绝 → 恢复 → 原 Workflow 续跑 `completed`（2026-09-15 晚 `gpt-5.5` 下复测 88.3s 到 `completed`，见 §4.3.1）。Web 侧由成员 D 补自动化（§4.3）：经 nginx 反代跑完「新建任务 → 暂停 → 暂停期提交被拒 → 恢复 → 回读」六步；浏览器**渲染效果**仍需人工按 `doc/deployment.md` 的核对清单确认 |
+| E-05 一键部署 | 通过（2026-09-15，成员 D 实跑） | `start.ps1` 退出码 `0` 且 Frontend / Backend / Dapr Sidecar 三段健康检查全部打印 `is healthy`，随后打印 7 行访问地址；`stop.ps1` 退出码 `0` 且 `docker ps -a` 中项目容器全部移除。过程中修复了两个脚本在 Windows PowerShell 5.1 下被 `docker compose` 的 stderr 中断的缺陷（见 §4.3）。容器侧 `/metrics`、`/tools` 与 Prometheus/Jaeger 已由 B/D 验收（`doc/roadmap.md`「M4 代码落地情况」） |
 | 并发会话（§3.2） | 通过 | 10 会话/并发度 10：成功率 1.0、HTTP 5xx 0、受理延迟 p50 0.46s、端到端 p50 16.54s / p95 18.61s、Token 合计 18650（621.7/次调用）、工具调用成功率**无样本**（0 次；Ollama 下模型未发起工具调用，F-02 之外的模型行为差异，API 模型下重测后应不再为 0） |
 
 合入 `master` 后（2026-09-15）：`uv run pytest -q` → **371 passed / 0 failed / 5 skipped**
@@ -252,6 +393,86 @@ F-05 poc/故障演练路径业务终态与 Dapr 终态不一致（B，**已修�
 CLI 对运行时终态非 `COMPLETED` 即非零码退出）；
 F-06 会话/长期记忆未接入编排（`app/memory/` 只有 Protocol，历史消息既不落记忆也不回注
 Prompt，仅 `GET /messages` 读取）——**本轮只记录，未处置**。
+
+### 4.3 Web UI 与部署编排（2026-09-15，成员 D D9-10）
+
+`分工.md` §3 里 D 的 D9-10 是「UI 收尾、录制演示、部署文档」，对应 §4.2 表里 E-04/E-05
+的 Web 侧与部署脚本两行。本轮落地情况：
+
+| 分工 | 状态 | 落地内容 |
+| --- | --- | --- |
+| Web 控制台 | 代码未改动，验收补齐 | master 的工作台已覆盖团队状态、任务记录、调用链路与 Token 采样、会话管理；本轮没有改前端代码，补的是验收（见下两行的自动化与核对清单） |
+| `start.ps1` / `stop.ps1` 全流程 | 已完成 | 修复两个脚本在 Windows PowerShell 5.1 下被 `docker compose` 的 stderr（构建/停止进度）中断的缺陷：`$ErrorActionPreference = "Stop"` 会把原生命令的 stderr 当成终止性错误，`start.ps1` 因此不做健康检查、不打印地址就退出（容器其实已经起来），`stop.ps1` 对已完成的停止报错并返回非零码。两处都改为在该调用期间临时切到 `Continue` 并以 `$LASTEXITCODE` 判定成败，与文件里 `docker info` / `compose version` / `compose config` 的既有写法一致 |
+| 部署文档 | 已完成 | `doc/deployment.md` 补「演示与验收」：E-05 的通过标准（退出码 + 三段健康检查 + stop 后容器为空）、E-04 的自动化命令与浏览器核对清单；并修正模型前置条件——默认提供方已是 OpenAI 兼容 API（ADR-014），原文「宿主机需要运行 Ollama」已过时 |
+
+验证（本机 compose，2026-09-15）：
+
+```bash
+uv run pytest -q -p no:cacheprovider
+# 359 passed / 0 failed，14.51s（前置：PostgreSQL 5433 + Redis 6380 可达）
+
+MACP_E2E_LIVE=1 uv run pytest tests/e2e/test_live_e2e.py -q -s \
+  -k "frontend or web_ui_session or health"
+# 3 passed（E-05 健康与目录、E-05 Web 侧、E-04 Web 侧）
+
+npm --prefix frontend run build
+# 通过：tsc --noEmit && vite build，3134 modules，产物 index-*.js 251.80 kB
+```
+
+`deploy/start.ps1` → `deploy/stop.ps1` 实跑：两次都得到 `SCRIPT_OK=True / LASTEXITCODE=0`，
+中间打印 `Frontend is healthy.` / `Backend is healthy.` / `Dapr Sidecar is healthy.` 与
+7 行访问地址；`stop.ps1` 打印 `Services stopped.` 后
+`docker ps -a --filter "name=multi-agent-collaboration-platform"` 为空。
+
+#### 4.3.1 模型侧补跑（2026-09-15 晚，真实 API 提供方）
+
+上表下面 item 1 里「依赖模型的 4 条未跑」已于同日补跑。环境：`deploy/start.ps1` 起的
+compose 全栈（9 个服务全部 Healthy），模型走宿主机的 OpenAI 兼容网关
+（`PUT /api/v1/config/provider` 写入 `provider=openai`、`model=gpt-5.5`、
+`base_url=http://host.docker.internal:3000/v1`）。
+
+```bash
+MACP_E2E_LIVE=1 MACP_E2E_TIMEOUT=900 uv run pytest tests/e2e/test_live_e2e.py -q -s
+# 7 passed, 1 warning in 714.75s（无 skip）
+```
+
+结果：E-01/E-02 三步流水线 `completed`（workflow `9b48b152`，330.9s，
+`completed_steps=['collect','analyze','report']`、`current_step=None`），报告消息 3983 字符、
+是结构化 Markdown 正文而非工具调用 JSON——ADR-016 F-02 在 API 提供方下确认关闭；
+I-06 `/workflows/{id}/tool-calls` 返回 `availability=available`；E-04 API 侧
+「暂停 → 恢复 → 续跑」88.3s 到达 `completed`。
+
+**两个必须记住的环境约束**：
+
+1. **`MACP_E2E_TIMEOUT` 默认 300s 偏紧。** 单次 LLM 调用实测 24–35s（prompt ≈5000 tokens），
+   三步流水线叠加工具轮次后可达 330s。用默认值跑会**偶发**判为超时失败——首轮实测一个
+   workflow 用了 318s，恰超 300s 上限。按 API 提供方验收时请显式放大该值。
+2. **本机整体没有公网出口，`web_search` 必然失败。** 实测容器内与宿主机访问
+   `https://api.duckduckgo.com` 都超时（宿主机 10s 返回 `000`），而 `host.docker.internal:3000`
+   的模型网关正常 200。模型若选中 `web_search`，该工具会以
+   `ToolExecutionError: 搜索服务不可达: timed out` 落库并重试，进一步拉长耗时。
+   要稳定复现，需把 `TOOL_SEARCH_ENDPOINT` 指向可达的搜索服务，或在该环境下不向 Agent
+   暴露 `web_search`——两者都属工具层配置（成员 C 范围），本轮**未改**。
+
+**另一个已发现的测试隔离缺口**（本轮未修，仅记录）：把 Provider 覆盖写进 PostgreSQL 之后，
+`uv run pytest` 会有 8 条转红——`tests/unit/test_agent_config.py` 3 条、
+`tests/integration/test_config_api.py` 2 条、`tests/integration/test_inspection_api.py` 3 条。
+原因是这些用例 monkeypatch 了 `AgentSettings` / `list_agent_configs`，却没有屏蔽数据库里
+*活的* Provider 覆盖（例如 `test_missing_model` 期望 `missing_model`，实际拿到 `configured`）。
+显式 `PUT` 全 `null` 清除覆盖后这 8 条立即恢复通过（38 passed），全量回到
+**371 passed / 7 skipped**。建议后续给这批用例加一个「清空 Provider 覆盖」的 fixture。
+
+**未完成 / 未验**（不隐瞒）：
+
+1. 依赖模型的 4 条**已补跑通过**（见 §4.3.1）。仍属未验的是环境性路径：本机无公网出口，
+   `web_search` 不可能成功，所以「模型选中 web_search 时流水线仍能产出报告」这条路径
+   在本机**无法**验收——E-01/E-02 目前的通过依赖模型当次未选该工具。
+2. 浏览器渲染，以及「发消息 → 观察 Agent 执行台推进 → 展开协作详情」仍是人工步骤：
+   本轮只给核对清单，没有引入浏览器自动化（前端门禁是类型检查 + 构建，见 §3.3）。
+3. 「任务记录」页只显示当前会话最近一次执行（`App.tsx::History`，页面已标注
+   「完整历史查询尚未接入」）。做完整历史需要新增 `GET /api/v1/workflows` 一类的列表
+   接口，属新增能力，本轮未做；因此**不据此宣称** `分工.md` §7 的「Web UI 可展示任务历史」
+   已闭环。
 
 ## 5. 失败处理约定
 

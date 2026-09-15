@@ -34,6 +34,12 @@
 | 500 | `INTERNAL_ERROR` | 已实现 | Workflow 调度失败等内部错误 |
 | 404 | `AGENT_NOT_FOUND` | 已实现 | 查询的 Agent 角色不存在 |
 | 503 | `DATA_SOURCE_UNAVAILABLE` | 已实现 | 审计或指标数据源读取失败 |
+| 404 | `PROVIDER_NOT_FOUND` | 已实现 | Provider 条目不存在（§5.9） |
+| 409 | `PROVIDER_IN_USE` | 已实现 | Provider 仍被启用中的模型引用，不能删除（§5.9） |
+| 404 | `MODEL_NOT_FOUND` | 已实现 | 模型条目不存在（§5.10） |
+| 404 | `MCP_SERVER_NOT_FOUND` | 已实现 | MCP Server 条目不存在（§5.11） |
+| 502 | `PROVIDER_DISCOVERY_FAILED` | 已实现 | 远端模型发现失败（网络/凭据/响应格式，§5.10） |
+| 502 | `MCP_DISCOVERY_FAILED` | 已实现 | MCP Server 发现失败（连接/握手/列工具，§5.11） |
 | 404 | `TOOL_NOT_FOUND` | 规划 | 工具不存在；当前没有工具路由 |
 
 ## 2. 核心对象与状态
@@ -122,7 +128,9 @@
 { "content": "分析一篇技术文章的核心要点" }
 ```
 
-当前不接受 `decision_agent_id`、Agent 列表、工具列表等字段；前端的主决策 Agent 选择仅为预览交互，不能改变后端编排。
+当前不接受 `decision_agent_id`、Agent 列表、工具列表等字段。前端**不再提供**主决策 Agent
+选择器：它只改前端 state、后端不接受该字段，属于「选了也不生效」的假选择，已于 ADR-018 移除。
+参与哪些 Agent 由编排层决定，不由用户指定。
 
 ## 4. 已实现接口
 
@@ -262,6 +270,8 @@ item 字段为 metric_name、value（有限数值）、labels（JSON 对象）�
 
 指标展示保留原始 metric_name、labels、采样时间，不累加分页中可能重复的采样值。Token 名称交接约定为 input_tokens/output_tokens/total_tokens，数值 0 显示为 0，缺少采样显示“暂无采样”；比率和耗时由采集方定义后写入，前端不估算。C 负责采集、去重和 labels.workflow_id（可选 agent_id/model）关联，B 负责建表与审计写入，D 只负责读取和呈现；此约定需 A/B/C 联调验收。
 
+前端入口：工作台「任务记录」页（`frontend/src/Inspection.tsx::RuntimeSampling`）。它是**观测**而不是配置，因此不放在「工具与配置」页。有 Workflow 时按 `workflow_id` 过滤并在未到终态时轮询，终态停止；没有 Workflow 时退回全局采样。`labels` 以一排 `键 = 值` 小标签渲染，不展开成 JSON 块。
+
 ### 5.6 Prometheus 文本指标
 
 `GET /metrics`
@@ -272,41 +282,123 @@ item 字段为 metric_name、value（有限数值）、labels（JSON 对象）�
 - 只读进程内注册表：不连接数据库、不写审计、不因 `metrics` 表缺失而失败。API 进程（`uvicorn` 托管 `app.api.main:app`）与 Workflow Worker 是同一进程时指标合并在一处；多副本部署按实例分别抓取。
 - 该端点只反映本进程观测到的调用；无任何调用时返回空的指标族（仅 HELP/TYPE 行）。
 
-### 5.7 修改 Agent 配置（热更新）
+### 5.7 Agent 角色目录与配置（热更新）
 
-`PATCH /api/v1/config/agents/{agent_id}`
+`GET /api/v1/config/agents`、`POST /api/v1/config/agents`、
+`PATCH /api/v1/config/agents/{agent_id}`、`DELETE /api/v1/config/agents/{agent_id}`
 
-修改某个角色的 `model` / `temperature` 覆盖值，**无需重启进程**：下一次阶段执行即按新配置建模（见 `doc/decisions/013-agent-config-hot-update.md`）。
+修改某个角色的模型绑定与调参覆盖值，**无需重启进程**：下一次阶段执行即按新配置建模
+（见 `doc/decisions/013-agent-config-hot-update.md`、`doc/decisions/017-multi-provider-model-registry.md`）。
 
-请求体（两个字段都可选，但至少要给一个）：
+角色目录来自 `agent_registry` 表（ADR-017 的 `chatModels` 同构扩展）：三个内置流水线角色
+（collector / analyst / reporter）作为 `builtin=true` 的种子数据，**不可删除**；自定义角色
+（`builtin=false`）可自由增删启停。自定义角色暂不接入固定三步流水线，仅作为可绑定模型的
+配置单元存在（意图路由属后续架构演进）。
+
+`GET /api/v1/config/agents` 返回全部角色的生效配置与可选模型清单，供「Agent 团队」页
+（`frontend/src/config/AgentPanel.tsx`）一次加载；`PATCH` 只提交被改动的字段：
 
 ```json
 {
-  "model": "qwen2.5-coder:7b",
-  "temperature": 0.3
+  "items": [
+    {
+      "id": "collector",
+      "name": "信息收集 Agent",
+      "role": "collector",
+      "model": "qwen2.5-coder:7b",
+      "provider": "ollama",
+      "provider_name": "Ollama（本地）",
+      "llm_model_id": null,
+      "temperature": 0.3,
+      "top_p": null,
+      "max_output_tokens": null,
+      "reasoning_type": "none",
+      "status": "idle",
+      "override_keys": ["temperature"],
+      "builtin": true,
+      "description": "收集、检索并整理任务主题相关的事实与要点。",
+      "enabled": true
+    }
+  ],
+  "available_models": [
+    { "id": "m-1", "provider_id": "gateway-main", "model": "gpt-4o-mini", "name": "GPT-4o mini", "enabled": true }
+  ]
 }
 ```
 
-- 字段省略 = 不改动该字段；显式传 `null` = 清除该字段的覆盖，回退环境配置。
+`override_keys` 列出该角色**当前被覆盖**的字段名（未列出的字段来自环境配置或默认路由），
+供前端区分「显式覆盖」与「回退值」。`available_models` 只含 `enabled=true` 的模型条目，
+按 `provider_id`、`model` 升序。`builtin` / `description` / `enabled` 来自角色目录。
+
+`POST /api/v1/config/agents` 登记自定义角色（请求体）：
+
+```json
+{
+  "id": "summarizer",
+  "name": "摘要 Agent",
+  "role": "summarizer",
+  "description": "收集、归纳并输出摘要。",
+  "enabled": true
+}
+```
+
+- `id`：1–50 字符，`^[A-Za-z0-9._-]+$`；不可与内置角色 id 冲突，重复登记返回 `409`。
+- `name`：1–100 字符；`role`：1–50 字符；`description` 可选（≤ 1000 字符）。
+- `system_prompt` 可选（≤ 8000 字符），本期前端暂不暴露编辑入口。
+
+`DELETE /api/v1/config/agents/{agent_id}` 删除自定义角色（连同其 `agent_configs` 覆盖行）：
+内置角色返回 `409 AGENT_BUILTIN`，不存在的角色返回 `404 AGENT_NOT_FOUND`。
+
+`PATCH` 请求体（所有字段都可选，但至少要给一个）：
+
+```json
+{
+  "llm_model_id": "m-1",
+  "model": "qwen2.5-coder:7b",
+  "temperature": 0.3,
+  "top_p": 0.9,
+  "max_output_tokens": 2048,
+  "reasoning_type": "openai"
+}
+```
+
+- 字段省略 = 不改动该字段；显式传 `null` = 清除该字段的覆盖，回退下一层配置。
+- `llm_model_id`：1–80 字符，必须指向存在的 `llm_models.id`，否则 `422`。
 - `model`：1–200 字符，去除首尾空白后不能为空。
 - `temperature`：`0.0`–`2.0`（闭区间）。
-- `provider` 不在本接口范围：它涉及 base_url 与凭据，由 §5.8 单独管理；未写入覆盖时回退 API 进程的 `AGENT_LLM_PROVIDER`。
+- `top_p`：`0.0`–`1.0`（闭区间）。
+- `max_output_tokens`：整数且 ≥ 1。
+- `reasoning_type`：`none` / `openai` / `gemini` / `anthropic`。
+- `provider` 不在本接口范围：它涉及 base_url 与凭据，由 §5.8 / §5.9 管理；
+  `llm_model_id` 已经间接决定 Provider。
 
 权限边界：**本接口不鉴权**（ADR-015，2026-09-15 起）：任何能访问该 API 的调用方都可以写入。部署时必须把 API 限制在本机或可信内网，不要直接暴露到公网（见 `doc/deployment.md`）。
 
-响应 `200` 返回与 §5.2 完全同构的 Agent 对象（生效配置）。
+响应 `200` 返回与 §5.2 同构的 Agent 对象（生效配置，额外含 `provider_name` / `llm_model_id` /
+`top_p` / `max_output_tokens` / `reasoning_type` / `override_keys`）。
 
 错误码：
 
 | HTTP | code | 含义 |
 | --- | --- | --- |
 | 404 | `AGENT_NOT_FOUND` | 角色不存在 |
-| 422 | 框架默认 | Pydantic 校验失败（空 body、非法 temperature、超长 model、空白 model） |
+| 409 | `VALIDATION_ERROR` | `POST` 时 id 与内置角色冲突或已存在 |
+| 409 | `AGENT_BUILTIN` | `DELETE` 目标是内置流水线角色 |
+| 422 | 框架默认或 `VALIDATION_ERROR` | Pydantic 校验失败（空 body、非法 temperature/top_p、超长 model、空白 model、未知 llm_model_id、未知 reasoning_type、非法 id 格式） |
 | 503 | `DATA_SOURCE_UNAVAILABLE` | 覆盖值写入失败（写操作必须显式失败，不回退、不静默成功） |
 
-持久化：覆盖值写入 `agent_configs` 表（`doc/data-model.md` §3），只存被覆盖的字段。审计：每次成功写入产生结构化日志 `event=config.agent.updated`（含 `agent_id`、`actor`、`before`/`after`、`request_id`），表内同时记录 `updated_by` / `updated_at`；`updated_by` 取请求头 `X-Request-ID`，缺省为空。
+持久化：覆盖值写入 `agent_configs` 表、角色目录写入 `agent_registry` 表
+（`doc/data-model.md` §3），覆盖表只存被覆盖的字段。
+审计：每次成功写入产生结构化日志 `event=config.agent.updated`（含 `agent_id`、`actor`、
+`before`/`after`、`request_id`），表内同时记录 `updated_by` / `updated_at`；
+`updated_by` 取请求头 `X-Request-ID`，缺省为空。
 
 并发与顺序：接口是「最后写入者生效」，不提供乐观锁或版本号；覆盖值按角色粒度，互不影响。
+
+解析优先级（低 → 高，逐字段回退，ADR-017 §2）：
+`AGENT_*` 环境配置 → `provider_configs.default_llm_model_id` 指向的模型条目 →
+`provider_configs` 的 legacy 五列 → 本表的角色覆盖。`llm_model_id` 悬空（指向已删除的条目）
+时按未绑定处理，不报错。
 
 ### 5.8 读取与修改模型 Provider 配置
 
@@ -322,6 +414,7 @@ item 字段为 metric_name、value（有限数值）、labels（JSON 对象）�
   "model": "gpt-4o-mini",
   "base_url": "https://api.example.com/v1",
   "temperature": 0.2,
+  "default_llm_model_id": "gateway-main:gpt-4o-mini",
   "api_key_configured": true,
   "updated_by": "req-7f3",
   "updated_at": "2026-09-15T08:00:00Z"
@@ -329,11 +422,14 @@ item 字段为 metric_name、value（有限数值）、labels（JSON 对象）�
 ```
 
 - 字段是「存储配置 → 环境配置」合并后的生效值；`base_url` 为空表示使用提供方官方端点。
+- `default_llm_model_id` 为默认模型路由（ADR-017）：非空时该 id 指向的 `llm_models` 条目及其
+  Provider 决定实际端点、凭据与特化参数，优先级高于本表 `provider` / `model` / `base_url` /
+  `api_key` / `temperature` 五个 legacy 列。指向的条目已被删除时按未设置处理并记一次警告。
 - `api_key_configured` 只表示是否已有可用凭据（存储值或环境变量），**不代表凭据有效**。
 - `updated_*` 反映最近一次通过本接口写入的时间与来源；从未写入过时为 `null`。
 - `base_url` 去掉用户信息、query、fragment 后再返回，不返回密钥。
 
-`PUT` 请求体（五个字段都可选，但至少要给一个）：
+`PUT` 请求体（六个字段都可选，但至少要给一个）：
 
 ```json
 {
@@ -341,7 +437,8 @@ item 字段为 metric_name、value（有限数值）、labels（JSON 对象）�
   "model": "gpt-4o-mini",
   "base_url": "https://api.example.com/v1",
   "api_key": "sk-...",
-  "temperature": 0.2
+  "temperature": 0.2,
+  "default_llm_model_id": "gateway-main:gpt-4o-mini"
 }
 ```
 
@@ -351,6 +448,7 @@ item 字段为 metric_name、value（有限数值）、labels（JSON 对象）�
 - `base_url`：不超过 500 字符；必须是 `http`/`https` URL；显式空串按 `null`（清除覆盖）处理。
 - `api_key`：1–500 字符；**只写入、不回读**，响应与日志都不含原值。
 - `temperature`：`0.0`–`2.0`（闭区间）。
+- `default_llm_model_id`：1–80 字符，必须指向存在的 `llm_models.id`，否则 `422`。
 
 权限边界：**本接口不鉴权**（ADR-015，规则与 §5.7 一致）：`GET` 与 `PUT` 都可匿名调用，部署边界要求见 §5.7。
 
@@ -369,7 +467,417 @@ item 字段为 metric_name、value（有限数值）、labels（JSON 对象）�
 
 模型构造语义：合并后的配置在阶段活动执行时解析，因此 `PUT` 后的下一次任务即生效；`provider=openai` 而缺少 `model` 或凭据时，模型构造抛出明确错误并让任务失败，**不静默回退到其他提供方**。
 
-前端入口：工作台「工具与配置」页（`frontend/src/Inspection.tsx::ProviderConfigPanel`）读写本接口。页面读取生效值并显示凭据是否配置；提交时只发送被改动的字段，清空某项并按保存 = 清除该覆盖（回退环境配置），凭据输入框留空表示不修改；「清除覆盖并回退环境配置」一次性清除 `model`/`base_url`/`api_key`/`temperature`。响应不含密钥，因此页面无法回显密钥原值。
+前端入口：工作台「工具与配置」页的「默认路由」分区（`frontend/src/config/DefaultRoutePanel.tsx`）读写本接口。页面读取生效值并显示凭据是否配置；提交时只发送被改动的字段，清空某项并按保存 = 清除该覆盖（回退环境配置），凭据输入框留空表示不修改；「清除覆盖并回退环境配置」一次性清除 `default_llm_model_id`/`model`/`base_url`/`api_key`/`temperature`。响应不含密钥，因此页面无法回显密钥原值。
+
+### 5.9 模型 Provider 注册表
+
+`GET /api/v1/config/providers`、`POST /api/v1/config/providers`、
+`GET|PATCH|DELETE /api/v1/config/providers/{provider_id}`
+
+多 Provider 注册表（ADR-017）：一次登记多个端点与凭据，供 §5.10 的模型条目引用。
+`api_key` 只写不回读。
+
+`GET /api/v1/config/providers` 响应：
+
+```json
+{
+  "items": [
+    {
+      "id": "gateway-main",
+      "name": "自建网关",
+      "preset_type": "openai-compatible",
+      "api_type": "openai-compatible",
+      "base_url": "http://localhost:3000/v1",
+      "api_key_configured": true,
+      "custom_headers": {},
+      "additional_settings": {},
+      "enabled": true,
+      "model_count": 42,
+      "created_at": "2026-09-15T08:00:00Z",
+      "updated_at": "2026-09-15T08:00:00Z",
+      "updated_by": null
+    }
+  ],
+  "total": 1
+}
+```
+
+`POST` 请求体：
+
+```json
+{
+  "id": "gateway-main",
+  "name": "自建网关",
+  "preset_type": "openai-compatible",
+  "api_type": "openai-compatible",
+  "base_url": "http://localhost:3000/v1",
+  "api_key": "qc-...",
+  "custom_headers": {},
+  "additional_settings": {},
+  "enabled": true
+}
+```
+
+- `id`：`POST` 必填，1–50 字符，只允许 `A-Za-z0-9._-`，且不能与已有条目重复（重复返回 `409` 沿用
+  `VALIDATION_ERROR`）。`PATCH` 不接受 `id`。
+- `name`：1–100 字符。
+- `preset_type`：必须是 §5.12 预设目录中的 key。
+- `api_type`：必须是 `openai-compatible` / `openai-responses` / `anthropic` / `gemini` /
+  `amazon-bedrock`；省略时按 `preset_type` 取默认值。
+- `base_url`：不超过 500 字符，`http`/`https`；可留空表示用预设默认端点。
+- `api_key`：不超过 500 字符。`PATCH` 时**空串视为不修改**，显式 `null` 清除凭据。
+- `custom_headers`：`{key: value}` 字符串映射，最多 20 项，值不超过 500 字符。
+- `additional_settings`：任意 JSON 对象，供协议族专属配置预留。
+
+`PATCH` 语义与 §5.7 一致：字段省略 = 不改动，显式 `null` = 清除（回退预设默认值）。
+
+`DELETE` 响应 `204`（无正文）。删除会**级联删除**该 Provider 下的全部模型条目；
+若有 `agent_configs.llm_model_id` 或 `provider_configs.default_llm_model_id` 仍指向被删条目，
+这些引用退化为未绑定（不报错，见 §5.7）。为降低误删风险，`DELETE` 默认拒绝仍存在
+`enabled=true` 模型条目的 Provider，返回 `409 PROVIDER_IN_USE`；
+带查询参数 `?force=true` 时强制级联删除。
+
+错误码：
+
+| HTTP | code | 含义 |
+| --- | --- | --- |
+| 404 | `PROVIDER_NOT_FOUND` | 条目不存在（`GET`/`PATCH`/`DELETE`） |
+| 409 | `PROVIDER_IN_USE` | 仍有启用的模型引用该 Provider 且未传 `force=true` |
+| 422 | 框架默认或 `VALIDATION_ERROR` | 校验失败（重复 id、非法 preset/api type、非法 base_url 等） |
+| 503 | `DATA_SOURCE_UNAVAILABLE` | 存储读写失败 |
+
+审计：创建/修改/删除各产生 `event=config.provider_registry.created|updated|deleted`，
+含 `id`、变更字段名与脱敏快照（`api_key` 只记 `set`/`unset`）。
+
+### 5.10 模型注册表与批量引入
+
+`GET /api/v1/config/models`、`POST /api/v1/config/models`、`POST /api/v1/config/models/batch`、
+`PATCH|DELETE /api/v1/config/models/{model_id}`、
+`GET /api/v1/config/providers/{provider_id}/models/discover`
+
+模型条目属于某个 Provider，承载**特化调参**（ADR-017）。
+
+`GET /api/v1/config/models?provider_id=&enabled=` 响应：
+
+```json
+{
+  "items": [
+    {
+      "id": "gateway-main:gpt-4o-mini",
+      "provider_id": "gateway-main",
+      "model": "gpt-4o-mini",
+      "name": "GPT-4o mini",
+      "enabled": true,
+      "reasoning_type": "none",
+      "temperature": 0.2,
+      "top_p": null,
+      "max_context_tokens": 128000,
+      "max_output_tokens": 4096,
+      "custom_parameters": [],
+      "modalities": ["text", "vision"],
+      "created_at": "2026-09-15T08:00:00Z",
+      "updated_at": "2026-09-15T08:00:00Z",
+      "updated_by": null
+    }
+  ],
+  "total": 1
+}
+```
+
+`POST /api/v1/config/models`（新增单条）请求体：
+
+```json
+{
+  "provider_id": "gateway-main",
+  "model": "gpt-4o-mini",
+  "name": "GPT-4o mini",
+  "enabled": true,
+  "reasoning_type": "none",
+  "temperature": 0.2,
+  "top_p": 0.9,
+  "max_context_tokens": 128000,
+  "max_output_tokens": 4096,
+  "custom_parameters": [{ "key": "thinking_budget", "value": "2048", "type": "number" }],
+  "modalities": ["text", "vision"]
+}
+```
+
+- `id` 可省略，缺省由 `provider_id` + `model` 派生为 `{provider_id}:{model}`；
+  显式提供时 1–80 字符且不能重复。
+- `provider_id` 必须指向存在的 Provider，否则 `404 PROVIDER_NOT_FOUND`。
+- `(provider_id, model)` 唯一；重复创建返回 `409`。
+- `reasoning_type`：`none` / `openai` / `gemini` / `anthropic`。
+- `temperature` `0.0`–`2.0`；`top_p` `0.0`–`1.0`；两个 token 上限为 ≥1 的整数。
+- `custom_parameters`：最多 32 项，每项 `{key, value, type}`，`type` ∈
+  `text` / `number` / `boolean` / `json`；`key` 1–100 字符且同条目内唯一。
+- `modalities`：`text` / `vision` / `pdf` 的子集，去重。
+
+`POST /api/v1/config/models/batch`（**批量引入**）请求体：
+
+```json
+{
+  "provider_id": "gateway-main",
+  "models": ["gpt-4o-mini", "gpt-4o", "deepseek-chat"],
+  "name_prefix": "",
+  "enabled": true,
+  "defaults": { "temperature": 0.2, "max_output_tokens": 4096, "modalities": ["text"] }
+}
+```
+
+响应 `200`：
+
+```json
+{
+  "created": ["gateway-main:gpt-4o-mini", "gateway-main:deepseek-chat"],
+  "skipped": [{ "model": "gpt-4o", "reason": "already_exists" }],
+  "total_requested": 3,
+  "provider_id": "gateway-main"
+}
+```
+
+- `models` 去空白、去重后逐条插入；`(provider_id, model)` 已存在时计入 `skipped`
+  而**不**报错，因此重复提交天然幂等。
+- 单次上限 200 条，超出返回 `422`。
+- `defaults` 只接受 `temperature` / `top_p` / `max_context_tokens` / `max_output_tokens` /
+  `reasoning_type` / `modalities`，用于给这一批新条目设共同默认值；单项仍可在导入后
+  `PATCH` 调整（与参考实现「批量添加使用默认参数，可在添加后单独调整」一致）。
+- `defaults` 里的字段**不会**覆盖已存在条目（已存在条目只计入 `skipped`）。
+
+`GET /api/v1/config/providers/{provider_id}/models/discover`（**远端发现**，批量引入的数据源）：
+
+```json
+{
+  "provider_id": "gateway-main",
+  "source": "remote",
+  "items": [{ "id": "gpt-4o-mini", "name": "gpt-4o-mini", "owned_by": "openai" }],
+  "existing": ["gpt-4o-mini"],
+  "total": 1
+}
+```
+
+- 由**服务端**发起请求，避免浏览器直连触发 CORS 与凭据外泄。
+- 按 `api_type` 选择探测路径：
+  `openai-compatible` / `openai-responses` → `{base_url}/models`（失败时回退
+  `{base_url}/v1/models`）；`anthropic` → `{base_url}/v1/models`；
+  `gemini` → `{base_url}/v1beta/models`；`ollama` 预设 → `{base_url}/api/tags`。
+- `amazon-bedrock` 不支持发现，返回 `502 PROVIDER_DISCOVERY_FAILED` 并在 `message` 说明原因。
+- `existing` 列出该 Provider 下**已经登记**的模型名，供前端在批量导入前提示去重。
+- 超时 10 秒、响应体积上限 2 MiB；失败统一返回 `502 PROVIDER_DISCOVERY_FAILED`，
+  `message` 不含凭据。该接口不写数据库。
+
+`PATCH /api/v1/config/models/{model_id}`：字段省略 = 不改动，显式 `null` = 清除该字段
+（回到「未设置」而非 Provider 默认值）。`provider_id` 不可通过 `PATCH` 修改。
+
+`model_id` 由 `{provider_id}:{model}` 派生，model 名常含 `/`（如 `BAAI/bge-m3`），
+路由按 `{model_id:path}` 匹配——客户端把 id 整体 `encodeURIComponent` 后拼进路径即可，
+`%2F` 会被服务端正确解析为 id 的一部分（普通单段路由会 404，此为 2026-09-16 修复）。
+
+`DELETE /api/v1/config/models/{model_id}` 响应 `204`。
+
+错误码：
+
+| HTTP | code | 含义 |
+| --- | --- | --- |
+| 404 | `PROVIDER_NOT_FOUND` | `provider_id` 不存在 |
+| 404 | `MODEL_NOT_FOUND` | 模型条目不存在 |
+| 409 | `VALIDATION_ERROR` | 同类条目已存在（`model` 或 `id` 重复） |
+| 422 | 框架默认或 `VALIDATION_ERROR` | 取值非法、批量超过 200 条 |
+| 502 | `PROVIDER_DISCOVERY_FAILED` | 远端发现失败 |
+| 503 | `DATA_SOURCE_UNAVAILABLE` | 存储读写失败 |
+
+审计：`event=config.model.created|updated|deleted|batch_imported`，
+批量导入额外记 `created` / `skipped` 数量。
+
+### 5.11 MCP Server 注册表与工具目录
+
+`GET|POST /api/v1/config/mcp/servers`、`GET|PATCH|DELETE /api/v1/config/mcp/servers/{server_id}`、
+`POST /api/v1/config/mcp/servers/{server_id}/discover`、`GET /api/v1/config/mcp/tools`
+
+多 Server 注册表（ADR-017）。三种以上传输方式由条目自身的 `transport` 决定，
+不再只依赖全局 `MCP_TRANSPORT`（后者仍是**编排层**默认传输，见 §5.3）。
+
+`GET /api/v1/config/mcp/servers` 响应：
+
+```json
+{
+  "items": [
+    {
+      "id": "filesystem",
+      "name": "本地文件系统",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/data"],
+      "env": {},
+      "cwd": null,
+      "url": null,
+      "headers": {},
+      "enabled": true,
+      "tool_options": { "read_file": { "disabled": false } },
+      "tool_count": 8,
+      "discovered_at": "2026-09-15T08:00:00Z",
+      "server_info": { "name": "filesystem", "version": "1.0.0" },
+      "created_at": "2026-09-15T08:00:00Z",
+      "updated_at": "2026-09-15T08:00:00Z",
+      "updated_by": null
+    }
+  ],
+  "total": 1
+}
+```
+
+- `transport`：`stdio` / `http` / `sse` / `ws`。
+- `transport=stdio` 时必填 `command`（1–500 字符），`args` 为字符串数组（≤64 项），
+  `env` 为 `{key: value}`，`cwd` 可选；此时 `url` 必须为空。
+- `transport` 为 `http`/`sse`/`ws` 时必填 `url`（`http(s)` / `ws(s)`），可选 `headers`；
+  此时 `command`/`args`/`env`/`cwd` 必须为空。
+- `tool_options`：`{toolName: {disabled?: bool, allowAutoExecution?: bool}}`，
+  用于按工具开关与自动执行策略。
+- `tool_count` / `discovered_at` / `server_info` 来自 `discovered` 缓存；
+  从未发现过时 `tool_count` 为 `0`、后两者为 `null`。
+
+`PATCH` 语义同 §5.7（省略 = 不改动，`null` = 清除）。
+
+`POST /api/v1/config/mcp/servers/{server_id}/discover`：按条目配置建立连接、执行握手并
+`list_tools()`，把结果写入 `discovered` 缓存后返回：
+
+```json
+{
+  "server_id": "filesystem",
+  "server_info": { "name": "filesystem", "version": "1.0.0" },
+  "tools": [{ "name": "read_file", "description": "读取文件内容" }],
+  "total": 1,
+  "discovered_at": "2026-09-15T08:00:00Z"
+}
+```
+
+失败（连接不上、握手失败、列工具报错、超时 15 秒）返回 `502 MCP_DISCOVERY_FAILED`，
+`message` 为归一化后的错误原因，不含凭据与命令全文中的敏感值。发现结果**只**写
+`discovered` 缓存，不改 `enabled`。
+
+`GET /api/v1/config/mcp/tools`：按 Server 分组的**紧凑**工具目录，供配置页渲染卡片。
+**不**内联 `input_schema`——Schema 体积大且多数时候不影响「这个工具要不要开」的判断：
+
+```json
+{
+  "items": [
+    {
+      "server_id": "filesystem",
+      "server_name": "本地文件系统",
+      "enabled": true,
+      "name": "read_file",
+      "description": "读取文件内容",
+      "tool_enabled": true,
+      "available": true
+    }
+  ],
+  "total": 1,
+  "servers": [{ "id": "filesystem", "name": "本地文件系统", "tool_count": 1, "enabled": true }]
+}
+```
+
+- `available` 表示该工具在最近一次发现结果里存在（配置的函数，不是实时连接状态）。
+- 需要完整 Schema 时走 §5.3 的 `GET /api/v1/tools`。
+
+错误码：
+
+| HTTP | code | 含义 |
+| --- | --- | --- |
+| 404 | `MCP_SERVER_NOT_FOUND` | 条目不存在 |
+| 422 | 框架默认或 `VALIDATION_ERROR` | 传输方式与参数字段不匹配、非法 URL、重复 id |
+| 502 | `MCP_DISCOVERY_FAILED` | 发现失败 |
+| 503 | `DATA_SOURCE_UNAVAILABLE` | 存储读写失败 |
+
+### 5.12 Provider 预设目录
+
+`GET /api/v1/config/provider-presets`
+
+返回 §5.12 预设族目录，供前端 Provider 选择器与表单预填。不读数据库、不需要凭据。
+
+```json
+{
+  "items": [
+    {
+      "preset_type": "deepseek",
+      "label": "DeepSeek",
+      "monogram": "深度",
+      "tint": "blue",
+      "category": "cn",
+      "default_api_type": "openai-compatible",
+      "supported_api_types": ["openai-compatible", "anthropic", "openai-responses"],
+      "default_base_url": "https://api.deepseek.com/v1",
+      "requires_api_key": true,
+      "api_key_url": "https://platform.deepseek.com/api_keys",
+      "supports_model_discovery": true
+    }
+  ],
+  "categories": [
+    { "id": "all", "label": "全部" },
+    { "id": "main", "label": "国际主流" },
+    { "id": "cn", "label": "国内" },
+    { "id": "gateway", "label": "聚合网关" },
+    { "id": "cloud", "label": "云托管" },
+    { "id": "local", "label": "本地" }
+  ]
+}
+```
+
+- `tint` 是前端配色 token 名（`blue` / `indigo` / `purple` / `rose` / `amber` / `orange` /
+  `teal` / `green` / `pink` / `slate` / `ink`），`monogram` 是无 logo 时的文字标记。
+- `supports_model_discovery` 为 `false` 的预设（如 `amazon-bedrock`）不支持 §5.10 的远端发现。
+
+### 5.13 历史会话列表
+
+`GET /api/v1/sessions?page=1&page_size=20`
+
+按 `updated_at` 倒序分页返回历史会话，供「任务记录 → 历史会话」分区展示。会话与消息
+持久化在 PostgreSQL（`doc/data-model.md` §3），重启不丢失；本接口是把它们重新「捞出来」
+的唯一入口——前端每次刷新都 `createSession` 开新会话，旧会话必须通过本接口才能再次看到。
+
+每个列表项在 §4.2 Session 字段之外，额外携带两个摘要字段，省去逐会话二次请求：
+
+```json
+{
+  "items": [
+    {
+      "id": "3f2b…",
+      "user_id": "demo-user",
+      "status": "active",
+      "title": "帮我分析这份数据",
+      "latest_workflow_status": "completed",
+      "latest_workflow_id": "9c7d…",
+      "created_at": "2026-09-16T02:00:00Z",
+      "updated_at": "2026-09-16T02:01:00Z"
+    }
+  ],
+  "page": 1,
+  "page_size": 20,
+  "total": 118
+}
+```
+
+- `title`：该会话**首条** `role=user` 消息的内容，截断到 60 字（超长加省略号）；无任何
+  消息时为 `「暂无消息」`。
+- `latest_workflow_status` / `latest_workflow_id`：该会话 `created_at` 最新的一条 Workflow
+  的终态与 ID；从未提交过任务时为 `null`。前端据此用 §4.8 的 `GET /workflows/{id}` 恢复执行台。
+
+分页约定与 §4.5 一致：`page_size` 上限 100。
+
+### 5.14 删除会话
+
+`DELETE /api/v1/sessions/{session_id}`
+
+删除会话及其关联数据（消息、运行记录、工具调用、观测采样），返回 `204`（无正文）。
+会话不存在返回 `404 SESSION_NOT_FOUND`（与 §4.2 `GET /sessions/{id}` 一致）。
+
+删除是**级联且不可恢复**的：
+
+- `messages` / `agent_runs` / `workflow_runs` 按 `session_id` 一并删除；
+- `tool_calls` 按该会话的 `run_id` / `workflow_run_id` 删除；
+- `metrics` 按 `labels.workflow_id` 删除（尽力而为，失败不阻断主流程）。
+
+前端在「侧栏当前任务下拉」与「任务记录 → 历史会话」两处提供删除入口，删除前必须
+二次确认；若删除的是当前会话，前端会回退到一个全新会话，避免工作台继续指向已删除
+的会话。
 
 ## 6. 规划接口（当前未实现）
 
@@ -396,13 +904,65 @@ POST /api/v1/agents/{agent_id}/run
 
 - 初始化顺序：并行调用 `GET /agents` 与 `POST /sessions`。
 - 发送消息后保存 `workflow_id`，每 2 秒轮询一次 Workflow；终态为 `completed`、`failed`、`cancelled` 时停止轮询。
-- Token 与调用明细由 §5 读取；区分加载、失败、未接入、无记录、有记录，运行时轮询，终态补刷。切换 Workflow 时丢弃旧请求结果；调用和指标独立失败，不能阻断会话功能。主决策 Agent 选择仍为预览，任务标题取用户消息摘要。
+- Token 与调用明细由 §5 读取；区分加载、失败、未接入、无记录、有记录，运行时轮询，终态补刷。切换 Workflow 时丢弃旧请求结果；调用和指标独立失败，不能阻断会话功能。任务标题取用户消息摘要。
 - Provider 配置（§5.8）已有前端入口：页面直接读写生效配置，**不需要令牌**（ADR-015）。页面只提交被改动的字段，凭据输入框留空表示不修改；由于响应不含密钥，页面不会回显凭据原值。其余只读展示继续走 §5.1 / §4.9 / §5.2 与 §5.8 的 `GET`。
-- Agent 覆盖（§5.7 的 `PATCH`）仍没有前端入口：它只调整角色模型与温度，本期经脚本或接口直接调用。
-- Agent 执行台根据 Workflow 的 `checkpoint.completed_steps` 与 `current_step` 展示阶段状态；不得在无 Workflow 时预填三张 Agent 卡片。
+- 配置页在 ADR-017 之后按「注册表优先、默认路由兜底」组织：
+  1. Provider 列表走 §5.9；新建时用 §5.12 预设目录预填 `preset_type` / `api_type` / `base_url`。
+  2. 模型列表走 §5.10；「批量引入」先调 `discover`（§5.10）拿到远端清单，
+     再用返回的 `existing` 标出已登记项，选中后提交 `POST /api/v1/config/models/batch`。
+  3. 默认模型用 §5.8 的 `PUT` 写 `default_llm_model_id`。
+  4. MCP 走 §5.11；工具卡片只展示 `name` / 截断后的 `description` / 开关与可用性，
+     完整 `input_schema` 收进折叠区，且默认折叠。
+- **页面归属**（按「写配置 / 角色路由 / 观测」三分，避免同一接口在多个页面各写一遍）：
+  1. 「工具与配置」`frontend/src/config/ConfigPage.tsx` —— 只放**写配置**的三个分区：
+     Provider、默认路由、MCP 工具（上一条 1–4）。
+     三个分区用页面级副路由切换（`components/PageTabs.tsx`）。版式约定：标题与副路由
+     左对齐全宽，其下内容限宽 1180px 居中（`styles.css` 的
+     `.config-page > :not(.page-heading):not(.ui-tabs)`）——内容拉满整行会让
+     registry 详情卡在宽屏下长得离谱。
+  2. 「Agent 团队」`frontend/src/App.tsx::AgentTeamPage` —— 角色 ↔ 模型绑定与参数覆盖（§5.7），
+     入参 `activeAgentId` 只用于高亮当前阶段角色，不参与读写。
+     页面形态：角色按**方块网格**（`config/AgentPanel.tsx`）一行多个排列，方块只承载摘要
+     （名字、`role · 状态`、生效模型、Temperature、覆盖项数，以及「当前阶段」标记）；
+     编辑表单在 `AgentTuningPanel` 里，点开方块后挂在网格下方，同一时刻只编辑一个角色。
+     网格里不放输入项——六个输入框会把同一行的其它方块顶变形。
+  3. 「任务记录」`frontend/src/records/RecordsPage.tsx` —— 执行结果的**观测**数据。
+     内部再分三个副路由，分区依据是「记录产生的位置」而不是数据类型：
+     `runs` 运行记录（当前会话最近一次执行的终态与检查点）、
+     `calls` 工具调用（§5.5 的 tool-calls 链路）、
+     `metrics` 指标采样（§5.6）。三者的体量与读取频率差很多，同页混排会互相淹没。
+     容器与行渲染器在 `frontend/src/records/Inspection.tsx`
+     （`Records` 统一「加载中 / 失败 / 未接入 / 无记录 / 有数据」五态，分页仅在多页时出现）。
+- 全站版式与控件复用：
+  - 页面级标题一律用 `.page-heading`（眉标 + `h1` + 一句话释义），左对齐、不居中。
+  - 页面级副路由一律用 `components/PageTabs.tsx`（`role="tablist"`、←/→ 键盘可达、
+    `width: fit-content`），卡片内的次级切换用同组件的 `variant="inline"`；
+    旧 `.cfg-tabs` / `.cfg-tab` 已废弃，不要再新增。
+  - 状态胶囊与状态文案唯一来源是 `components/Status.tsx`（`Status`、`statusText`、
+    `toolCallStatusText`），不要在页面里各写一份映射。
+  - 设计令牌 `--cfg-*` 只定义在 `styles.css` 的 `:root`（唯一的全局样式表），
+    另有 `config/config.css`（cfg 设计系统）与 `records/records.css`（观测卡片）。
+- 远端发现（§5.10 的 `discover`、§5.11 的 `discover`）只能由**用户显式操作**触发，
+  不得在页面加载时自动调用：它会向用户填写的地址发起出站请求。
+- Agent 覆盖（§5.7）的前端入口：`GET /api/v1/config/agents` 一次取回全部角色与
+  可选模型清单，`PATCH` 保存；表单默认不展开，点开角色方块后才渲染输入项。
+- 工作台内的三块视图职责互斥，不重复渲染同一份数据（ADR-018）：
+  1. **Agent 执行台**（`App.tsx` 内联，卡片类名 `dock-node cli-node`）——按 Workflow 的
+     `checkpoint.completed_steps` 与 `current_step` 展示阶段状态；不得在无 Workflow 时预填
+     三张 Agent 卡片。卡片点击打开**单个 Agent 的阶段详情弹窗**
+     （`frontend/src/workspace/AgentStageModal.tsx`），不改变右侧侧栏内容——侧栏是任务级
+     视图，不跟随单卡点击而变。
+  2. **任务协作侧栏**（`App.tsx::Inspector`）——只放任务级信息：整体状态、运行时长、
+     协作链路（`frontend/src/workspace/CollaborationGraph.tsx`）与用量统计
+     （`frontend/src/workspace/TaskUsage.tsx`）。协作链路按**波次**表达：波内并行、波间串行；
+     当前后端是固定串行流水线，每波一个节点，编排层支持 fan-out 后只需把同波阶段放进
+     同一个数组。用量按采样原值展示、不累加，口径同 §5.5。
+  3. **任务记录页**——逐条工具调用与采样明细的唯一入口；侧栏与弹窗只给跳转入口。
+     原先工作台侧栏内嵌的 `WorkflowInspection`（调用链路 + 任务采样合体）已随 ADR-018 删除，
+     记录页继续分别复用 `ToolCallRecords` / `RuntimeSampling`。
 
 ## 8. 版本与变更规则
 
-- 文档版本：`v0.6`，更新时间：2026-09-15。
+- 文档版本：`v0.7`，更新时间：2026-09-15。
 - 任何新增或修改路由，先更新本文件的“已实现接口/规划接口”和对象 Schema，再修改代码。
 - 若 OpenAPI 与本文档冲突，以实际路由和响应模型为准，并在同一变更中修正文档。

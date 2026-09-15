@@ -85,7 +85,7 @@ Token 采样按阶段记录（total 1020 / 1344 / 3051）。踩坑与决策见�
   容器未配置 `ADMIN_TOKEN` 时同一请求返回 `403 CONFIG_WRITE_FORBIDDEN`。
   **2026-09-15 更新**：该令牌边界已按 ADR-015 取消，上面的令牌步骤不再适用。
 
-### D9-10（M5 端到端与性能）：进行中
+### D9-10（M5 端到端与性能）：已完成（2026-09-16）
 
 按 `分工.md` §3 记录本轮（角色 C：端到端测试补缺、性能数据）的落地情况。
 
@@ -93,12 +93,16 @@ Token 采样按阶段记录（total 1020 / 1344 / 3051）。踩坑与决策见�
 | --- | --- | --- | --- |
 | 端到端测试补缺 | C | 已完成 | `tests/e2e/`：无容器回归网（真实 API/Workflow/流水线/工具/可观测，仅替换 Dapr 运行时与 PostgreSQL 落库）与真实 compose 验收入口（默认 skip，`MACP_E2E_LIVE=1` 启用，覆盖 E-01/E-02/E-04/I-06/E-05 健康）；E-03 由 `scripts/measure_recovery.py` 脚本化测量；并发会话由 `scripts/perf_concurrency.py` 测量（ADR-016） |
 | 性能数据 | C | 已完成 | 10 并发会话：成功率 1.0、受理延迟 p50 0.46s、端到端 p50 16.54s / p95 18.61s、Token 18650（621.7/次）；E-03 恢复耗时 ≤0.2s（目标 <5s）、不可用 2.62s；数据采集通道与口径见 ADR-016 |
-| Web UI 与部署编排 | D | 未完成 | Web 控制台、`start.ps1`/`stop.ps1` 全流程尚未在 M5 口径下验收（本轮只做了 compose 已起后的健康检查） |
+| Web UI 与部署编排 | D | 已完成（浏览器渲染除外） | `deploy/start.ps1` / `stop.ps1` 全流程实跑通过，并修复两处 Windows PowerShell 5.1 下被 `docker compose` stderr 中断的缺陷；E-04 的 Web 侧数据路径（经 nginx 反代）补了自动化用例；`doc/deployment.md` 补「演示与验收」与浏览器核对清单。2026-09-15 晚又用 `gpt-5.5` 把依赖模型的 4 条 live 用例补跑通过（7 passed）。详见 `doc/testing.md` §4.3 与 §4.3.1 |
 
-- **M5 未完成**：E-01/E-02 的「结构化报告」曾因缺口 F-02 不达成，该缺口已在
-  API 模型下复测通过（见「验证记录」中 2026-09-15 的 M4 真实验收）后关闭；
-  M5 剩余未验的是
-  E-05 的 `start.ps1 → 健康检查 → stop.ps1` 全流程与 E-04 的 Web UI 侧。
+- **M5 状态**：E-01/E-02 的「结构化报告」曾因缺口 F-02 不达成，该缺口已在
+  API 模型下复测通过（见「验证记录」中 2026-09-15 的 M4 真实验收）后关闭。
+  D 侧的 E-05（`start.ps1 → 健康检查 → stop.ps1` 全流程）与 E-04 的 Web 侧数据路径
+  已于 2026-09-15 实跑通过。
+  **M5 已闭环（2026-09-16 回填）**：「任务历史」的完整列表缺口已由新增
+  `GET /api/v1/sessions` 枚举接口 + 任务记录页「历史会话」分区补上（`doc/api.md`
+  §5.13），任务记录页因此从三分区扩为四分区；浏览器渲染仍以人工核对 + 渲染冒烟
+  （`frontend/rendercheck/`，jsdom 端到端断言）为准，前端未引入浏览器自动化属既定边界。
   本轮的并发与恢复性能数据仍测于 Ollama 提供方 + poc 假模型路径，
   默认提供方改 API 后建议带凭据重取一轮。
 - **本轮新发现的跨模块缺口（均未改他人代码，见 ADR-016）**：
@@ -190,10 +194,71 @@ Token 采样按阶段记录（total 1020 / 1344 / 3051）。踩坑与决策见�
   **016**（013 与 015 已分别被 master 的配置热更新、取消写入令牌占用）、
   F-02 按 master 的真实 API 验收标为**已关闭**、F-04 三项前置标为已落地、
   F-05 标为已修复。
+- 2026-09-15（D 侧 D9-10：Web UI 与部署编排）：在本分支补 D 负责的两行。
+  - **修复**：`deploy/start.ps1` 与 `deploy/stop.ps1` 在 Windows PowerShell 5.1 下被
+    `docker compose` 写到 stderr 的构建/停止进度中断——脚本顶部
+    `$ErrorActionPreference = "Stop"` 会把原生命令的 stderr 当成终止性错误，
+    于是 `start.ps1` 在镜像构建成功、容器已起来之后直接退出，**既不执行三段健康检查
+    也不打印访问地址**；`stop.ps1` 对已经完成的停止报错并返回非零码。两处都改为在该
+    调用期间临时切到 `Continue` 并以 `$LASTEXITCODE` 判定成败（与文件里 `docker info` /
+    `compose version` / `compose config` 的既有写法一致）。
+  - **新增验收用例**（`tests/e2e/test_live_e2e.py`，仍由 `MACP_E2E_LIVE=1` 开关控制，
+    默认 skip，因此无容器环境下 `uv run pytest` 依旧全绿）：E-05 Web 侧
+    （`frontend` 容器可访问、SPA 入口引用的构建产物可取到、nginx 把 `/api` 反代到
+    backend、`/providers` 与 `/config/provider`/`/tools`/`/metrics` 经反代可用且
+    `availability=available`、Provider 配置响应不含密钥）与 E-04 Web 侧
+    （经反代跑完「新建任务 → 暂停 → 暂停期提交被拒 409 → 恢复 → 回读」六步）。
+  - **文档**：`doc/deployment.md` 新增「演示与验收（D9-10，成员 D）」——E-05 的通过标准
+    （退出码 + 三段健康检查 + `stop` 后容器为空）、E-04 的自动化命令与浏览器核对清单；
+    同时修正过时的模型前置条件（默认提供方已是 OpenAI 兼容 API，ADR-014，
+    原文「宿主机需要运行 Ollama」不再成立）；`doc/testing.md` 补 §4.3 与
+    「`uv run pytest` 需 PostgreSQL/Redis 可达」的前置说明。
+  - 验证（本机 compose）：`uv run pytest -q -p no:cacheprovider` → **359 passed / 0 failed**，
+    14.51s（未起 PostgreSQL/Redis 时同一命令 30 分钟无结果，说明该前置条件此前没有写明）；
+    `MACP_E2E_LIVE=1 uv run pytest tests/e2e/test_live_e2e.py -q -s -k "frontend or
+    web_ui_session or health"` → **3 passed**；`npm --prefix frontend run build` 通过
+    （3134 modules，产物 `index-*.js` 251.80 kB）；
+    `deploy/start.ps1` → `deploy/stop.ps1` 实跑各一次，均为
+    `SCRIPT_OK=True / LASTEXITCODE=0`，中间打印三段 `is healthy` 与 7 行访问地址，
+    停止后项目容器全部移除。
+  - **未完成**（2026-09-15 当轮）：依赖模型的 4 条 live 用例（E-01/E-02 两条、I-06、
+    E-04 API 侧续跑）未跑，本机无可用模型凭据；浏览器渲染仍为人工核对；「任务历史」的
+    完整列表需要新增接口，未做。
+- 2026-09-15（D 侧 D9-10 补跑：模型侧 live 验收）：拿到可用 API 提供方后，起全栈并用
+  `gpt-5.5` 把上一条「未完成」里依赖模型的 4 条补齐。
+  - 环境：`deploy/start.ps1` 起 compose（9 个服务全部 Healthy）；
+    `PUT /api/v1/config/provider` 写入 `provider=openai` / `model=gpt-5.5` /
+    `base_url=http://host.docker.internal:3000/v1`（容器内访问宿主机网关必须走
+    `host.docker.internal`，`compose.yaml` 已配 `extra_hosts`）。
+  - 结果：`MACP_E2E_LIVE=1 MACP_E2E_TIMEOUT=900 uv run pytest
+    tests/e2e/test_live_e2e.py -q -s` → **7 passed**（714.75s，无 skip）。
+    E-01/E-02 三步流水线 `completed`（workflow `9b48b152`，330.9s，
+    `completed_steps=[collect, analyze, report]`、`current_step=None`），报告 3983 字符
+    结构化 Markdown 而非工具调用 JSON，ADR-016 F-02 在 API 提供方下确认关闭；
+    I-06 `/workflows/{id}/tool-calls` 返回 `availability=available`；
+    E-04 API 侧续跑 88.3s 到 `completed`（并发与恢复两组性能数据仍未在 API 模型下重取）。
+  - 两个环境约束（已写入 `doc/testing.md` §4.3.1）：
+    (1) `MACP_E2E_TIMEOUT` 默认 300s 偏紧——单次 LLM 调用实测 24–35s，
+    三步流水线叠加工具轮次可达 330s，用默认值会**偶发**判超时（首轮实测一个 workflow
+    318s，恰超 300s 上限）；
+    (2) **本机整体无公网出口**——容器与宿主机访问 `api.duckduckgo.com` 均超时
+    （宿主机 10s 返回 `000`），`web_search` 必然以
+    `ToolExecutionError: 搜索服务不可达: timed out` 落库并重试，进一步拉长耗时。
+    要稳定复现需把 `TOOL_SEARCH_ENDPOINT` 指向可达搜索服务，或在无网环境不向 Agent
+    暴露该工具——属工具层配置（成员 C 范围），本轮未改。
+  - **顺带发现的测试隔离缺口**（未修，仅记录）：Provider 覆盖一旦写进 PostgreSQL，
+    `uv run pytest` 会有 8 条转红（`tests/unit/test_agent_config.py` 3、
+    `tests/integration/test_config_api.py` 2、`tests/integration/test_inspection_api.py` 3）
+    ——这批用例 monkeypatch 了 `AgentSettings` / `list_agent_configs`，却没有屏蔽库里的
+    *活的* Provider 覆盖。显式 `PUT` 全 `null` 清除覆盖后 8 条立即恢复通过（38 passed），
+    全量回到 **371 passed / 7 skipped**。
 - 注意事项：数据库读取用例使用 SQLite 内存表与注入目录数据，MCP 用例走内存协议往返而非
   跨进程 stdio，因此不代表真实 PostgreSQL、真实 MCP Server 或浏览器端到端验收。
-  本轮已补上真实 compose 上的 REST 链路验收，但 Web UI 侧（E-04）与
-  `start.ps1`/`stop.ps1` 全流程（E-05）仍未验。
+  E-04/E-05 的 Web 侧与部署脚本已在本轮补上实跑证据（见上两条），
+  **依赖模型的链路已于 2026-09-15 用 `gpt-5.5` 补跑通过**（同见上两条），
+  **浏览器端渲染仍是人工核对项**（前端门禁为类型检查 + 构建，未引入浏览器自动化）；
+  全量 `uv run pytest` 隐含需要一个可达的 PostgreSQL 与 Redis，且**在 Provider 覆盖
+  写库后会因测试隔离缺口转红**（见上一条）。
 
 ### 范围说明
 

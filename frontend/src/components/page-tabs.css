@@ -1,0 +1,84 @@
+/* page-tabs.css — 全站副路由（PageTabs）
+ *
+ * 两条硬约束：
+ * 1. 只占内容宽度（width: fit-content），靠左起排；页面级版式一律左对齐。
+ * 2. 视觉沿用 cfg 设计令牌，使配置页与任务记录页的副路由完全一致。
+ */
+
+.ui-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 0 16px;
+  padding: 5px;
+  border: 1px solid var(--cfg-line, #dce7ea);
+  border-radius: var(--cfg-radius, 10px);
+  background: var(--cfg-surface, #fff);
+}
+
+.ui-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 13px;
+  border: 0;
+  border-radius: var(--cfg-radius-sm, 8px);
+  background: transparent;
+  color: var(--cfg-ink-2, #456572);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  transition: background-color var(--cfg-ease, .16s cubic-bezier(.4, 0, .2, 1)),
+    color var(--cfg-ease, .16s cubic-bezier(.4, 0, .2, 1));
+}
+
+.ui-tab:hover {
+  background: var(--cfg-surface-hover, #f4f9fb);
+  color: var(--cfg-ink, #33505d);
+}
+
+.ui-tab.active {
+  background: #eaf2f5;
+  color: #2f6076;
+  /* 不设 font-weight：加粗会让文字变宽、按钮尺寸变化，导致后续按钮位置跳动 */
+}
+
+.ui-tab:focus-visible {
+  outline: 2px solid var(--cfg-accent, #3f7f93);
+  outline-offset: 1px;
+}
+
+.ui-tab svg {
+  flex: none;
+  opacity: .85;
+}
+
+.ui-tab.active svg {
+  opacity: 1;
+}
+
+/* 卡片内次级切换：去外框、去底色，嵌进工具栏里 */
+.ui-tabs-inline {
+  margin: 0;
+  padding: 3px;
+  gap: 4px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.ui-tabs-inline .ui-tab {
+  padding: 6px 11px;
+}
+
+@media (max-width: 680px) {
+  .ui-tabs {
+    width: 100%;
+    overflow-x: auto;
+    flex-wrap: nowrap;
+  }
+}

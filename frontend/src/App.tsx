@@ -13,12 +13,11 @@ import {
   ChevronDown,
   ChevronRight,
   CircleAlert,
-  CirclePause,
   Clock3,
   Database,
   FileText,
   Gauge,
-  Hammer,
+  History,
   LoaderCircle,
   Maximize2,
   MessageSquareText,
@@ -26,12 +25,13 @@ import {
   PanelBottom,
   PanelLeft,
   PanelRight,
+  Plus,
   RefreshCw,
   RotateCcw,
   Send,
   Settings2,
   ShieldCheck,
-  SquareTerminal,
+  Trash2,
   UsersRound,
   X,
   Zap,
@@ -48,8 +48,14 @@ import {
   X as XData,
 } from "lucide";
 import { api } from "./api/client";
-import { RuntimeConfig, WorkflowInspection } from "./Inspection";
-import type { Agent, Message, Session, Workflow } from "./types/api";
+import { Status, statusText } from "./components/Status";
+import { ConfigPage } from "./config/ConfigPage";
+import { AgentPanel } from "./config/AgentPanel";
+import { RecordsPage, type RecordTabId } from "./records/RecordsPage";
+import { AgentStageModal, type AgentStageDetail } from "./workspace/AgentStageModal";
+import { CollaborationGraph, type CollaboratorNode } from "./workspace/CollaborationGraph";
+import { TaskUsage } from "./workspace/TaskUsage";
+import type { Agent, Message, Session, SessionSummary, Workflow } from "./types/api";
 
 const stages = [
   {
@@ -74,14 +80,6 @@ const stages = [
     tone: "green",
   },
 ] as const;
-const statusText: Record<string, string> = {
-  pending: "排队中",
-  running: "执行中",
-  paused: "已暂停",
-  completed: "已完成",
-  failed: "执行失败",
-  cancelled: "已取消",
-};
 const time = (v?: string) =>
   v
     ? new Date(v).toLocaleTimeString("zh-CN", {
@@ -89,7 +87,7 @@ const time = (v?: string) =>
         minute: "2-digit",
       })
     : "—";
-type View = "workspace" | "history" | "team" | "tools";
+type View = "workspace" | "records" | "team" | "tools";
 
 function MorphStateIcon({ state, size = 16 }: { state: "menu" | "close" | "play" | "pause" | "up" | "down" | "panel" | "panel-open"; size?: number }) {
   const icons = { menu: MenuData, close: XData, play: PlayData, pause: PauseData, up: ArrowUpData, down: ArrowDownData, panel: PanelRightData, "panel-open": PanelBottomData };
@@ -98,6 +96,8 @@ function MorphStateIcon({ state, size = 16 }: { state: "menu" | "close" | "play"
 
 export function App() {
   const [view, setView] = useState<View>("workspace");
+  // 任务记录页的副路由：runs / calls / metrics，切页时保留用户上次的选择。
+  const [recordTab, setRecordTab] = useState<RecordTabId>("runs");
   const [session, setSession] = useState<Session | null>(null);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -110,6 +110,7 @@ export function App() {
   const [mobileNav, setMobileNav] = useState(false);
   const [dockOpen, setDockOpen] = useState(true);
   const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
   const finalRefreshDone = useRef<string | null>(null);
   const refresh = useCallback(async () => {
     if (!session) return;
@@ -169,6 +170,9 @@ export function App() {
   const activeAgent = agents.find(
     (a) => a.id === stages.find((s) => s.id === activeStage)?.agent,
   );
+  // 当前任务标题：取首条用户消息，无则视为「新建任务」。侧栏用户区与记录页页头共用。
+  const currentTaskTitle =
+    messages.find((message) => message.role === "user")?.content ?? "";
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     if (
@@ -219,6 +223,40 @@ export function App() {
       setError(cause instanceof Error ? cause.message : "状态切换失败");
     }
   };
+  const openSession = async (target: SessionSummary) => {
+    setError("");
+    try {
+      const [nextSession, nextMessages] = await Promise.all([
+        api.getSession(target.id),
+        api.getMessages(target.id),
+      ]);
+      setSession(nextSession);
+      setMessages(nextMessages);
+      // 历史会话可能没有 workflow（尚未提交任务）；有则按摘要里的 id 取最近一条。
+      setWorkflow(
+        target.latest_workflow_id
+          ? await api.getWorkflow(target.latest_workflow_id)
+          : null,
+      );
+      setContent("");
+      finalRefreshDone.current = null;
+      setView("workspace");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "无法恢复历史会话");
+    }
+  };
+  const deleteSession = async (target: SessionSummary) => {
+    setError("");
+    try {
+      await api.deleteSession(target.id);
+      // 删的是当前会话 → 回到一个全新会话，避免工作台还指向已删除的会话。
+      if (session?.id === target.id) {
+        await createNewTask();
+      }
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "无法删除会话");
+    }
+  };
   if (loading)
     return (
       <div className="loading-screen">
@@ -245,10 +283,24 @@ export function App() {
             <MorphStateIcon state="close" size={17} />
           </button>
         </div>
-        <div className="sidebar-user">
-          <span className="sidebar-user-avatar">D</span>
-          <span><b>演示用户</b><small>当前账户</small></span>
-        </div>
+        <SidebarUser
+          session={session}
+          currentTaskTitle={currentTaskTitle}
+          workflow={workflow}
+          open={userMenuOpen}
+          onToggle={() => setUserMenuOpen((v) => !v)}
+          onOpenSession={(target) => {
+            setUserMenuOpen(false);
+            void openSession(target);
+          }}
+          onDeleteSession={(target) => {
+            void deleteSession(target);
+          }}
+          onNewTask={() => {
+            setUserMenuOpen(false);
+            void createNewTask();
+          }}
+        />
         <nav className="main-nav">
           <NavButton
             icon={PanelLeft}
@@ -262,9 +314,9 @@ export function App() {
           <NavButton
             icon={Clock3}
             label="任务记录"
-            active={view === "history"}
+            active={view === "records"}
             onClick={() => {
-              setView("history");
+              setView("records");
               setMobileNav(false);
             }}
           />
@@ -323,7 +375,7 @@ export function App() {
             {view === "workspace" ? (
               <button className="new-task-button" type="button" onClick={() => void createNewTask()}><span>＋</span>新建任务</button>
             ) : (
-              <div className="crumb"><b>{view === "history" ? "任务记录" : view === "team" ? "Agent 团队" : "工具与配置"}</b></div>
+              <div className="crumb"><b>{view === "records" ? "任务记录" : view === "team" ? "Agent 团队" : "工具与配置"}</b></div>
             )}
           </div>
           {view === "workspace" && <div className="topbar-title">{messages.find((message) => message.role === "user")?.content.slice(0, 42) || "新建协作任务"}</div>}
@@ -372,19 +424,27 @@ export function App() {
               setInspectorOpen={setInspectorOpen}
               submit={submit}
               toggleSession={toggleSession}
+              onOpenRecords={() => {
+                setRecordTab("calls");
+                setView("records");
+              }}
             />
           )}
-          {view === "history" && (
-            <History
+          {view === "records" && (
+            <RecordsPage
+              tab={recordTab}
+              onTabChange={setRecordTab}
               workflow={workflow}
-              messages={messages}
-              onOpen={() => setView("workspace")}
+              messageCount={messages.length}
+              currentTaskTitle={currentTaskTitle}
+              sessionId={session?.id ?? null}
+              onOpenRun={() => setView("workspace")}
+              onOpenSession={openSession}
+              onDeleteSession={deleteSession}
             />
           )}
-          {view === "team" && (
-            <Team agents={agents} activeAgent={activeAgent} />
-          )}
-          {view === "tools" && <RuntimeConfig />}
+          {view === "team" && <AgentTeamPage activeAgentId={activeAgent?.id} />}
+          {view === "tools" && <ConfigPage />}
         </main>
       </div>
     </div>
@@ -412,6 +472,150 @@ function NavButton({
     </button>
   );
 }
+
+/**
+ * 侧栏「当前任务」区（原「演示用户」）。
+ *
+ * 展示当前打开会话的任务标题与状态，点击展开历史会话下拉，可切换/恢复任一历史
+ * 会话，或新建任务。历史列表复用 `GET /api/v1/sessions`（`doc/api.md` §5.13）。
+ */
+function SidebarUser({
+  session,
+  currentTaskTitle,
+  workflow,
+  open,
+  onToggle,
+  onOpenSession,
+  onDeleteSession,
+  onNewTask,
+}: {
+  session: Session | null;
+  currentTaskTitle: string;
+  workflow: Workflow | null;
+  open: boolean;
+  onToggle: () => void;
+  onOpenSession: (target: SessionSummary) => void;
+  onDeleteSession: (target: SessionSummary) => void;
+  onNewTask: () => void;
+}) {
+  const [items, setItems] = useState<SessionSummary[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const load = useCallback(() => {
+    setLoading(true);
+    setError("");
+    api
+      .listSessions(1, 20)
+      .then((result) => setItems(result.items))
+      .catch((cause) =>
+        setError(cause instanceof Error ? cause.message : "无法加载历史会话"),
+      )
+      .finally(() => setLoading(false));
+  }, []);
+
+  // 下拉展开时才拉取历史列表，避免每次进侧栏都发请求。
+  useEffect(() => {
+    if (!open) return;
+    load();
+  }, [open, load]);
+
+  const title = currentTaskTitle.slice(0, 42) || "新建协作任务";
+  const sub = session
+    ? session.status === "paused"
+      ? "已暂停"
+      : workflow
+        ? `任务${statusText[workflow.status] ?? ""}`
+        : "会话进行中"
+    : "未连接";
+
+  return (
+    <div className={`sidebar-user ${open ? "is-open" : ""}`}>
+      <button
+        type="button"
+        className="sidebar-user-main"
+        onClick={onToggle}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        aria-label={`当前任务：${title}，点击查看历史会话`}
+      >
+        <span className="sidebar-user-avatar">
+          {currentTaskTitle ? "D" : <Plus size={14} />}
+        </span>
+        <span className="sidebar-user-meta">
+          <b>{title}</b>
+          <small>{sub}</small>
+        </span>
+        <ChevronDown size={14} className={open ? "flip" : ""} />
+      </button>
+
+      {open && (
+        <>
+          <div className="sidebar-user-backdrop" onClick={onToggle} />
+          <div className="sidebar-user-menu" role="listbox" aria-label="历史会话">
+            <div className="sidebar-user-menu-head">
+              <span>历史会话</span>
+              <button type="button" className="cfg-quiet" onClick={onNewTask}>
+                <Plus size={13} />
+                新建任务
+              </button>
+            </div>
+            {loading ? (
+              <p className="sidebar-user-empty">加载中…</p>
+            ) : error ? (
+              <p className="sidebar-user-empty bad">{error}</p>
+            ) : items.length === 0 ? (
+              <p className="sidebar-user-empty">暂无历史会话</p>
+            ) : (
+              <ul className="sidebar-user-list">
+                {items.map((item) => (
+                  <li key={item.id} className={item.id === session?.id ? "current" : ""}>
+                    <button
+                      type="button"
+                      className="sidebar-user-item"
+                      onClick={() => onOpenSession(item)}
+                    >
+                      <span className="sidebar-user-item-title">
+                        {item.title || "（暂无消息）"}
+                      </span>
+                      <span className="sidebar-user-item-sub">
+                        {item.id === session?.id
+                          ? "当前会话"
+                          : item.latest_workflow_status
+                            ? statusText[item.latest_workflow_status] ?? item.latest_workflow_status
+                            : "尚无任务"}
+                        {" · "}
+                        {time(item.updated_at)}
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      className="sidebar-user-item-delete"
+                      aria-label={`删除会话：${item.title || item.id.slice(0, 8)}`}
+                      title="删除此会话"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (
+                          window.confirm(
+                            `确定删除会话「${item.title || "（暂无消息）"}」？\n该会话的消息与运行记录将一并删除，且不可恢复。`,
+                          )
+                        ) {
+                          onDeleteSession(item);
+                        }
+                      }}
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
 type WorkspaceProps = {
   session: Session | null;
   agents: Agent[];
@@ -429,6 +633,8 @@ type WorkspaceProps = {
   setInspectorOpen: (value: boolean) => void;
   submit: (e: FormEvent) => void;
   toggleSession: () => void;
+  /** 跳到「任务记录」页看逐条采样与工具调用（侧栏与弹窗都只给入口，不重复渲染）。 */
+  onOpenRecords: () => void;
 };
 
 type StageId = (typeof stages)[number]["id"];
@@ -453,6 +659,69 @@ function stageStatus(
   return "pending";
 }
 
+/** Agent 目录里不存在的角色不进执行台，也不进协作链路（doc/api.md §7）。 */
+function participatingStages(agents: Agent[]): (typeof stages)[number][] {
+  return stages.filter((stage) =>
+    agents.some((agent) => agent.id === stage.agent),
+  );
+}
+
+/**
+ * 协作链路的波次。
+ *
+ * 后端当前是固定串行流水线，所以每波只有一个节点；编排层支持并行波次后，
+ * 只需在这里把同波阶段放进同一个数组，`CollaborationGraph` 无需改动。
+ */
+function collaborationWaves(
+  list: (typeof stages)[number][],
+  workflow: Workflow | null,
+  agents: Agent[],
+  completed: Set<string>,
+): CollaboratorNode[][] {
+  if (!workflow) return [];
+  return list.map((stage) => [
+    {
+      id: stage.id,
+      stageLabel: stage.label,
+      agentName:
+        agents.find((agent) => agent.id === stage.agent)?.name ??
+        `${stage.agent} Agent`,
+      status: stageStatus(stage.id, workflow, completed),
+    },
+  ]);
+}
+
+/** 运行时长：进行中按「到现在」算，终态用 `completed_at`。 */
+function formatDuration(ms: number) {
+  if (!Number.isFinite(ms) || ms < 0) return "—";
+  const total = Math.floor(ms / 1000);
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const seconds = total % 60;
+  if (hours) return `${hours} 小时 ${minutes} 分`;
+  if (minutes) return `${minutes} 分 ${seconds} 秒`;
+  return `${seconds} 秒`;
+}
+
+/** 组装执行台卡片弹窗的入参，保证弹窗本体保持无副作用、只吃 props。 */
+function stageDetail(
+  stage: StageId,
+  workflow: Workflow | null,
+  agents: Agent[],
+  completed: Set<string>,
+): AgentStageDetail {
+  const meta = stages.find((item) => item.id === stage);
+  return {
+    stageId: stage,
+    stageLabel: meta?.label ?? stage,
+    responsibility: responsibilities[stage],
+    status: stageStatus(stage, workflow, completed),
+    agent: agents.find((agent) => agent.id === meta?.agent) ?? null,
+    checkpointSaved: completed.has(stage),
+    updatedAt: workflow?.updated_at,
+  };
+}
+
 // Keep the conversation, composer and execution dock mounted across run transitions.
 // See design module 6: session history and workflow visibility.
 function Workspace({
@@ -471,29 +740,30 @@ function Workspace({
   setInspectorOpen,
   submit,
   toggleSession,
+  onOpenRecords,
 }: WorkspaceProps) {
   const stream = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
   const followLatest = useRef(true);
   const [currentMessage, setCurrentMessage] = useState("");
-  const [selectedStage, setSelectedStage] = useState<StageId>("collect");
-  const [decisionAgentId, setDecisionAgentId] = useState<string | "auto">("auto");
-  const [decisionMenuOpen, setDecisionMenuOpen] = useState(false);
+  // 执行台卡片点开的是「单个 Agent 的阶段详情」，与右侧任务级侧栏解耦。
+  const [detailStage, setDetailStage] = useState<StageId | null>(null);
   const [composerExpanded, setComposerExpanded] = useState(false);
   const [atBottom, setAtBottom] = useState(true);
-  const selectedStatus = stageStatus(selectedStage, workflow, completed);
   const busy =
     sending || workflow?.status === "running" || workflow?.status === "pending";
+  const participating = participatingStages(agents);
+  const waves = collaborationWaves(participating, workflow, agents, completed);
+  // 执行台把当前阶段置顶，便于执行中一眼看到谁在跑；协作链路视图仍按真实顺序渲染。
   const runtimeStages = workflow
-    ? stages
-        .filter((stage) => agents.some((agent) => agent.id === stage.agent))
-        .sort((left, right) => (left.id === activeStage ? -1 : right.id === activeStage ? 1 : 0))
+    ? [...participating].sort((left, right) =>
+        left.id === activeStage ? -1 : right.id === activeStage ? 1 : 0,
+      )
     : [];
+  const detail = detailStage
+    ? stageDetail(detailStage, workflow, agents, completed)
+    : null;
 
-  useEffect(() => {
-    if (activeStage && stages.some((s) => s.id === activeStage))
-      setSelectedStage(activeStage as StageId);
-  }, [activeStage]);
   useEffect(() => {
     if (followLatest.current && stream.current)
       stream.current.scrollTop = stream.current.scrollHeight;
@@ -630,62 +900,13 @@ function Workspace({
             }}
           />
           <div className="composer-toolbar">
-            <div className="decision-control">
-              <button
-                type="button"
-                className="decision-agent-selector"
-                aria-label="选择主决策 Agent"
-                aria-expanded={decisionMenuOpen}
-                onClick={() => setDecisionMenuOpen((open) => !open)}
-              >
-                <Bot size={14} />
-                <span>
-                  {decisionAgentId === "auto"
-                    ? "自动选择主决策 Agent"
-                    : agents.find((agent) => agent.id === decisionAgentId)?.name ??
-                      "选择主决策 Agent"}
-                </span>
-                <ChevronDown
-                  size={13}
-                  className={decisionMenuOpen ? "flip" : ""}
-                />
-              </button>
-              {decisionMenuOpen && (
-                <div className="decision-menu" role="menu">
-                  <button
-                    type="button"
-                    role="menuitem"
-                    className={decisionAgentId === "auto" ? "selected" : ""}
-                    onClick={() => {
-                      setDecisionAgentId("auto");
-                      setDecisionMenuOpen(false);
-                    }}
-                  >
-                    <Bot size={14} /> 自动分配
-                  </button>
-                  {agents.map((agent) => (
-                    <button
-                      type="button"
-                      role="menuitem"
-                      className={decisionAgentId === agent.id ? "selected" : ""}
-                      key={agent.id}
-                      onClick={() => {
-                        setDecisionAgentId(agent.id);
-                        setDecisionMenuOpen(false);
-                      }}
-                    >
-                      <Bot size={14} /> {agent.name}
-                    </button>
-                  ))}
-                  <small>仅用于界面选择，主决策 Agent 接口尚未接入。</small>
-                </div>
-              )}
+            <div className="composer-hint">
               <small>
                 {session?.status === "paused"
                   ? "会话已暂停"
                   : busy
                     ? "等待本次执行完成"
-                    : "Enter 发送 · Shift + Enter 换行"}
+                    : "由编排层自动决策参与 Agent · Enter 发送 · Shift + Enter 换行"}
               </small>
             </div>
             <button
@@ -710,12 +931,23 @@ function Workspace({
         open={inspectorOpen}
         onClose={() => setInspectorOpen(false)}
         workflow={workflow}
-        agents={agents}
-        selectedStage={selectedStage}
-        selectedStatus={selectedStatus}
-        onSelect={setSelectedStage}
+        completed={completed}
+        activeStage={activeStage}
+        waves={waves}
+        onSelectStage={setDetailStage}
+        onOpenRecords={onOpenRecords}
       />
       </section>
+      {detail && (
+        <AgentStageModal
+          detail={detail}
+          onClose={() => setDetailStage(null)}
+          onOpenRecords={() => {
+            setDetailStage(null);
+            onOpenRecords();
+          }}
+        />
+      )}
       <section
         className={`agent-dock ${dockOpen ? "" : "collapsed"}`}
         aria-label="多 Agent 执行台"
@@ -752,10 +984,10 @@ function Workspace({
               return (
                 <button
                   key={s.id}
-                  className={`dock-node cli-node ${s.tone} ${state} ${selectedStage === s.id ? "selected" : ""}`}
-                  aria-label={`查看${s.label} Agent`}
-                  aria-pressed={selectedStage === s.id}
-                  onClick={() => { setSelectedStage(s.id); setInspectorOpen(true); }}
+                  className={`dock-node cli-node ${s.tone} ${state} ${detailStage === s.id ? "selected" : ""}`}
+                  aria-label={`查看${agent?.name ?? `${s.label} Agent`}的阶段详情`}
+                  aria-pressed={detailStage === s.id}
+                  onClick={() => setDetailStage(s.id)}
                 >
                   <span className="cli-node-head">
                     <span className="dock-icon">{state === "completed" ? <Check size={17} /> : state === "running" ? <LoaderCircle size={17} className="spin" /> : <Icon size={17} />}</span>
@@ -874,193 +1106,146 @@ function MessageBubble({ message }: { message: Message }) {
     </article>
   );
 }
+/** 协作链路节点回传的是字符串 id，回到阶段类型前先收窄。 */
+function isStageId(value: string): value is StageId {
+  return stages.some((stage) => stage.id === value);
+}
+
+/**
+ * 「任务协作」侧栏。
+ *
+ * 职责边界（ADR-018）：
+ * - 只放**任务级**信息：整体状态、运行时长、协作链路、用量采样。
+ * - 单个 Agent 的阶段详情在 `AgentStageModal`，由执行台卡片点开；侧栏不再跟随卡片
+ *   点击而改变内容，避免把「谁在干」和「整体怎么样」两件事混成一个状态。
+ * - 逐条工具调用与采样明细留在「任务记录」页，侧栏只给入口，不重复渲染同一份数据。
+ */
 function Inspector({
   open,
   onClose,
   workflow,
-  agents,
-  selectedStage,
-  selectedStatus,
-  onSelect,
+  completed,
+  activeStage,
+  waves,
+  onSelectStage,
+  onOpenRecords,
 }: {
   open: boolean;
   onClose: () => void;
   workflow: Workflow | null;
-  agents: Agent[];
-  selectedStage: StageId;
-  selectedStatus: string;
-  onSelect: (stage: StageId) => void;
+  completed: Set<string>;
+  activeStage: string | null;
+  waves: CollaboratorNode[][];
+  onSelectStage: (stage: StageId) => void;
+  onOpenRecords: () => void;
 }) {
-  const selected = stages.find((item) => item.id === selectedStage) ?? stages[0];
-  const selectedAgent = agents.find((item) => item.id === selected.agent);
+  const [now, setNow] = useState(() => Date.now());
+  const running = workflow?.status === "running";
+  // 执行中的「运行时长」需要自己走秒：轮询只在 workflow 有变化时回来。
+  useEffect(() => {
+    if (!running) return;
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [running]);
+
+  const total = waves.length;
+  const elapsed = workflow
+    ? (workflow.completed_at ? new Date(workflow.completed_at).getTime() : now) -
+      new Date(workflow.created_at).getTime()
+    : 0;
+
   return (
-    <aside
-      className={`inspector ${open ? "open" : ""}`}
-      aria-label="Agent 详情"
-    >
+    <aside className={`inspector ${open ? "open" : ""}`} aria-label="任务协作概览">
       <header className="inspector-title">
         <span>
-          <Bot size={16} />
-          Agent 详情
+          <Network size={16} />
+          任务协作概览
         </span>
         <button
           className="icon-button inspector-close"
-          aria-label="关闭 Agent 详情"
+          aria-label="关闭任务协作概览"
           onClick={onClose}
         >
           <X size={16} />
         </button>
       </header>
-      <section className="inspector-panel collaboration-panel">
+      <section className="inspector-panel">
         <div className="inspector-head">
-          <span className="eyebrow">本次协作</span>
+          <span className="eyebrow">本次任务</span>
           <Status status={workflow?.status ?? "idle"} />
         </div>
-        <h3>{workflow ? "协作成员与工具" : "等待任务"}</h3>
-        <p className="inspector-copy">{workflow ? "按执行顺序记录本次任务涉及的 Agent。" : "任务开始后，这里会显示实际参与的 Agent 和工具。"}</p>
-        {workflow && <div className="collaboration-list">{stages.map((item) => {
-          const agent = agents.find((entry) => entry.id === item.agent);
-          const state = stageStatus(item.id, workflow, new Set(workflow.checkpoint?.completed_steps ?? []));
-          const expanded = selectedStage === item.id;
-          return <div className={`collaboration-agent ${expanded ? "expanded" : ""}`} key={item.id}>
-            <button onClick={() => onSelect(item.id)} aria-expanded={expanded}>
-              <span className={`agent-mini-icon ${item.tone}`}><item.icon size={14} /></span>
-              <span><b>{agent?.name ?? `${item.agent} Agent`}</b><small>{item.label}</small></span>
-              <Status status={state} />
-              <ChevronDown size={14} className={expanded ? "flip" : ""} />
-            </button>
-            {expanded && <dl className="agent-facts compact-facts"><div><dt>模型</dt><dd>{agent?.model ?? "未提供"}</dd></div><div><dt>阶段状态</dt><dd>{statusText[state] ?? state}</dd></div><div><dt>时间记录</dt><dd>{time(workflow.updated_at)}</dd></div><div><dt>Token 消耗</dt><dd>见下方本次任务采样</dd></div></dl>}
-          </div>;
-        })}</div>}
+        <h3>{workflow ? `${completed.size} / ${total} 阶段完成` : "等待任务"}</h3>
+        {workflow ? (
+          <dl className="agent-facts task-stats">
+            <div>
+              <dt>运行时长</dt>
+              <dd>{formatDuration(elapsed)}</dd>
+            </div>
+            <div>
+              <dt>参与 Agent</dt>
+              <dd>{total} 个</dd>
+            </div>
+            <div>
+              <dt>开始时间</dt>
+              <dd>{time(workflow.created_at)}</dd>
+            </div>
+            <div>
+              <dt>{workflow.completed_at ? "结束时间" : "最近更新"}</dt>
+              <dd>{time(workflow.completed_at ?? workflow.updated_at)}</dd>
+            </div>
+          </dl>
+        ) : (
+          <p className="inspector-copy">任务开始后，这里会显示协作过程与用量统计。</p>
+        )}
       </section>
       <section className="inspector-panel">
         <div className="inspector-head">
           <span className="eyebrow">
-            <Activity size={13} />
-            阶段执行
+            <Network size={13} />
+            协作链路
           </span>
         </div>
-        <dl className="agent-facts">
-          <div>
-            <dt>阶段状态</dt>
-            <dd>{workflow ? (statusText[selectedStatus] ?? selectedStatus) : "尚未开始"}</dd>
-          </div>
-          <div>
-            <dt>检查点</dt>
-            <dd>
-              {workflow?.checkpoint?.completed_steps?.includes(selectedStage)
-                ? "已保存"
-                : "暂无已完成记录"}
-            </dd>
-          </div>
-          <div>
-            <dt>最近更新</dt>
-            <dd>{time(workflow?.updated_at)}</dd>
-          </div>
-        </dl>
-        <p className="inspector-copy">
-          下方展示本次 Workflow 的工具调用与指标采样。
-        </p>
+        <p className="inspector-copy">波次之间串行、波次内部并行。点节点看该 Agent 的阶段详情。</p>
+        <CollaborationGraph
+          waves={waves}
+          activeId={activeStage}
+          onSelect={(id) => {
+            if (isStageId(id)) onSelectStage(id);
+          }}
+        />
       </section>
-      {workflow && <WorkflowInspection key={workflow.id} workflow={workflow} />}
+      {workflow && (
+        <section className="inspector-panel">
+          <div className="inspector-head">
+            <span className="eyebrow">
+              <Gauge size={13} />
+              任务用量
+            </span>
+          </div>
+          <TaskUsage workflow={workflow} onOpenRecords={onOpenRecords} />
+        </section>
+      )}
     </aside>
   );
 }
-function Status({ status }: { status: string }) {
+/**
+ * Agent 团队页。
+ *
+ * 这里只写「角色 → 模型」的路由：哪张卡绑定哪个注册表模型、覆盖了哪些参数。
+ * 端点与凭据属于「工具与配置」，本页只读不写，避免同一份数据在两处被改。
+ */
+function AgentTeamPage({ activeAgentId }: { activeAgentId?: string }) {
   return (
-    <span className={`status-pill ${status}`}>
-      <i />
-      {status === "idle"
-        ? "待命"
-        : status === "pending"
-          ? "等待"
-          : (statusText[status] ?? status)}
-    </span>
-  );
-}
-function History({
-  workflow,
-  messages,
-  onOpen,
-}: {
-  workflow: Workflow | null;
-  messages: Message[];
-  onOpen: () => void;
-}) {
-  return (
-    <>
-      <section className="page-heading">
-        <span className="eyebrow">
-          <Clock3 size={13} />
-          RUN HISTORY
-        </span>
-        <h1>任务记录</h1>
-        <p>当前会话最近一次执行。完整历史查询尚未接入。</p>
-      </section>
-      <section className="history-panel">
-        {workflow ? (
-          <button className="history-row" onClick={onOpen}>
-            <div>
-              <b>协作任务 {workflow.id.slice(0, 8)}</b>
-              <small>Agent 团队三节点协作</small>
-            </div>
-            <Status status={workflow.status} />
-            <span>{messages.length} 条消息</span>
-            <ChevronRight size={16} />
-          </button>
-        ) : (
-          <div className="empty-panel">
-            <Clock3 size={20} />
-            <b>还没有任务记录</b>
-            <span>提交第一个任务后，它会显示在这里。</span>
-          </div>
-        )}
-      </section>
-    </>
-  );
-}
-function Team({
-  agents,
-  activeAgent,
-}: {
-  agents: Agent[];
-  activeAgent?: Agent;
-}) {
-  return (
-    <>
+    <div className="config-page">
       <section className="page-heading">
         <span className="eyebrow">
           <UsersRound size={13} />
-          AGENT DIRECTORY
+          AGENT TEAM
         </span>
         <h1>Agent 团队</h1>
-        <p>默认演示团队；展示 API 进程当前 Provider 与模型配置。</p>
+        <p>为每个角色绑定注册表模型与参数覆盖。未绑定的角色走默认路由。</p>
       </section>
-      <div className="team-grid">
-        {agents.map((a, i) => (
-          <article
-            className={`team-card ${activeAgent?.id === a.id ? "active" : ""}`}
-            key={a.id}
-          >
-            <div className="team-top">
-              <span>0{i + 1}</span>
-              <em>
-                <i />
-                {activeAgent?.id === a.id ? "当前阶段" : "待命"}
-              </em>
-            </div>
-            <div className="team-avatar">
-              <Bot size={22} />
-            </div>
-            <h2>{a.name}</h2>
-            <p>{a.role}</p>
-            <div className="team-model">
-              <SquareTerminal size={14} />
-              {a.provider} · {a.model} · Temperature {a.temperature}
-            </div>
-          </article>
-        ))}
-      </div>
-    </>
+      <AgentPanel activeAgentId={activeAgentId} />
+    </div>
   );
 }
