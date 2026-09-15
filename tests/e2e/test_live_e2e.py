@@ -9,6 +9,15 @@ PostgreSQL + Redis + Ollama），本文件是该环境的验收入口，覆盖�
 - I-06（真实库落库部分）：`tool_calls` 表存在时 `/workflows/{id}/tool-calls` 可读；
 - E-04（API 侧）：暂停会话后新消息被 409 拒绝，恢复后可继续。
 
+成员 D 的 D9-10 在此基础上补 Web 侧两条（同一文件、同一环境变量开关）：
+
+- E-05（Web 侧）：`frontend` 容器可访问、SPA 入口引用的构建产物可获取、
+  nginx 把 `/api` 反代到 `backend`，且工作台首屏调用的只读目录接口经反代可用；
+- E-04（Web 侧）：复刻 `App.tsx` 的会话管理调用序列（`POST /sessions` 新建任务 →
+  `POST /pause` → `POST /resume`，以及暂停期间提交被 409 拒绝），全部经 nginx 反代。
+  **不覆盖**发消息后的三步流水线：那需要可用的模型提供方与凭据，
+  浏览器里的渲染效果也仍需人工按 `doc/deployment.md` 的核对清单确认。
+
 运行前提（`deploy/start.ps1` 或 `docker compose up -d --wait` 已起全栈）：
 
 ```bash
@@ -22,13 +31,15 @@ MACP_E2E_LIVE=1 uv run pytest tests/e2e/test_live_e2e.py -q -s
 之后单条三步流水线 2-4s），该提供方下报告会退化成工具调用 JSON 文本（ADR-016 F-02），
 因此 E-01/E-02 的验收口径以 API 提供方为准。
 超时可用 `MACP_E2E_TIMEOUT`（秒，默认 300）覆盖，环境地址用
-`MACP_E2E_BASE_URL`（默认 `http://localhost:8000`）。
+`MACP_E2E_BASE_URL`（默认 `http://localhost:8000`）；
+Web 侧用例走 nginx 反代，地址用 `MACP_E2E_FRONTEND_URL`（默认 `http://localhost:5173`）。
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from typing import Any
 
@@ -36,10 +47,12 @@ import httpx
 import pytest
 
 BASE_URL = os.getenv("MACP_E2E_BASE_URL", "http://localhost:8000")
+FRONTEND_URL = os.getenv("MACP_E2E_FRONTEND_URL", "http://localhost:5173")
 POLL_TIMEOUT_SECONDS = float(os.getenv("MACP_E2E_TIMEOUT", "300"))
 POLL_INTERVAL_SECONDS = float(os.getenv("MACP_E2E_POLL_INTERVAL", "2"))
 TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
 STAGES = ("collect", "analyze", "report")
+ROLES = ["collector", "analyst", "reporter"]
 
 pytestmark = pytest.mark.skipif(
     os.getenv("MACP_E2E_LIVE", "").strip().lower() not in {"1", "true", "yes"},
@@ -53,6 +66,19 @@ def live_client() -> httpx.Client:
 
     timeout = httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=10.0)
     with httpx.Client(base_url=BASE_URL, timeout=timeout) as client:
+        yield client
+
+
+@pytest.fixture(scope="module")
+def web_client() -> httpx.Client:
+    """浏览器实际访问的入口：nginx 托管的 Web UI 与 `/api` 反向代理。
+
+    与 `live_client` 的区别只在端口：Web UI 与 API 同源（`deploy/docker/nginx.conf`），
+    因此这两条用例同时也是「前端容器 + 反代」这一段的可用性证据。
+    """
+
+    timeout = httpx.Timeout(connect=10.0, read=60.0, write=30.0, pool=10.0)
+    with httpx.Client(base_url=FRONTEND_URL, timeout=timeout) as client:
         yield client
 
 
@@ -239,3 +265,89 @@ def test_live_pause_blocks_messages_and_resume_recovers(
     workflow, elapsed = _wait_for_terminal(live_client, workflow_id)
     print(f"\n[E-04] 恢复后 workflow={workflow_id} status={workflow['status']} 耗时={elapsed}s")
     assert workflow["status"] == "completed"
+
+
+def test_live_frontend_serves_ui_and_proxies_api(web_client: httpx.Client) -> None:
+    """E-05（Web 侧）：`frontend` 容器可访问，且 nginx 把 `/api` 反代到 backend。
+
+    `start.ps1` 的 `Wait-HttpHealth "Frontend"` 只证明容器起来了；页面能否真正加载
+    还取决于构建产物是否随镜像同步、反代是否通。工作台首屏就要调 `/agents` 与
+    `/providers`，因此这两条一起验。
+    """
+
+    index = web_client.get("/")
+    assert index.status_code == 200, index.text
+    assert '<div id="root"></div>' in index.text
+    assert "<title>Agent 协作工作台</title>" in index.text
+
+    # SPA 入口引用的构建产物必须真的取得到：dist 没随镜像更新时页面白屏，
+    # 而 index.html 本身仍然返回 200，只看首页会漏掉这种情况。
+    entry = re.search(r'src="(/assets/[^"]+\.js)"', index.text)
+    assert entry, f"index.html 未引用构建产物：{index.text}"
+    bundle = web_client.get(entry.group(1))
+    assert bundle.status_code == 200, bundle.text
+    assert len(bundle.content) > 0
+
+    agents = web_client.get("/api/v1/agents")
+    assert agents.status_code == 200, agents.text
+    assert [item["role"] for item in agents.json()["items"]] == ROLES
+
+    providers = web_client.get("/api/v1/providers")
+    assert providers.status_code == 200, providers.text
+    assert providers.json()["items"], "真实环境应至少暴露一个已配置 Provider"
+
+    # 「工具与配置」页的三块数据（Provider 表单 / 工具目录 / 全局指标采样）都要经反代可用；
+    # availability 必须由 backend 自己报，不能靠前端把「未接入」当「零条记录」显示。
+    provider_config = web_client.get("/api/v1/config/provider")
+    assert provider_config.status_code == 200, provider_config.text
+    assert "api_key" not in provider_config.json(), "Provider 配置响应不得回传密钥"
+
+    tools = web_client.get("/api/v1/tools")
+    assert tools.status_code == 200, tools.text
+    assert tools.json()["availability"] == "available", tools.json()
+    assert len(tools.json()["items"]) == 4, tools.json()
+
+    metrics = web_client.get("/api/v1/metrics")
+    assert metrics.status_code == 200, metrics.text
+    assert metrics.json()["availability"] == "available", metrics.json()
+
+
+def test_live_web_ui_session_lifecycle_through_proxy(web_client: httpx.Client) -> None:
+    """E-04（Web 侧，不依赖模型）：复刻 `App.tsx` 的会话管理调用序列。
+
+    对应界面上的「新建任务」按钮与顶栏「暂停 / 恢复」按钮，全部经 nginx 反代；
+    覆盖创建会话、空消息列表、暂停、暂停期提交被拒、恢复、回读六步。
+    **不含**发送任务后的三步流水线与渲染结果——前者需要可用的模型提供方与凭据，
+    后者需要人工按 `doc/deployment.md` 的核对清单在浏览器里确认。
+    """
+
+    created = web_client.post("/api/v1/sessions", json={"user_id": "d-e2e-web"})
+    assert created.status_code == 201, created.text
+    session_id = created.json()["id"]
+    assert created.json()["status"] == "active"
+
+    empty = web_client.get(f"/api/v1/sessions/{session_id}/messages")
+    assert empty.status_code == 200, empty.text
+    assert empty.json()["items"] == []
+    assert empty.json()["total"] == 0
+
+    paused = web_client.post(f"/api/v1/sessions/{session_id}/pause")
+    assert paused.status_code == 200, paused.text
+    assert paused.json()["session"]["status"] == "paused"
+    # 没有运行中的 Workflow 时只改会话状态，不回带 Workflow（app/api/main.py:412）。
+    assert paused.json()["workflow"] is None
+
+    # 输入框在会话暂停时被 disable；用户绕过界面直接提交时后端仍必须拒绝。
+    blocked = web_client.post(
+        f"/api/v1/sessions/{session_id}/messages", json={"content": "暂停期间的消息"}
+    )
+    assert blocked.status_code == 409, blocked.text
+    assert blocked.json()["code"] == "SESSION_PAUSED"
+
+    resumed = web_client.post(f"/api/v1/sessions/{session_id}/resume")
+    assert resumed.status_code == 200, resumed.text
+    assert resumed.json()["session"]["status"] == "active"
+
+    reread = web_client.get(f"/api/v1/sessions/{session_id}")
+    assert reread.status_code == 200, reread.text
+    assert reread.json()["status"] == "active"
