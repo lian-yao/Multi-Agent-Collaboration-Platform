@@ -113,3 +113,56 @@ def test_source_failure_is_not_empty(inspection):
     assert response.status_code == 503
     assert response.json()["code"] == "DATA_SOURCE_UNAVAILABLE"
     assert "secret" not in response.text
+
+
+def test_tools_endpoint_uses_default_registry_catalog():
+    """API 进程默认注入 C 的注册表目录（doc/api.md §5.3），不需要数据库。"""
+
+    client = TestClient(api_main.app)
+    body = client.get("/api/v1/tools").json()
+    assert body["availability"] == "available"
+    assert body["total"] == 4
+    assert [item["name"] for item in body["items"]] == [
+        "calculator",
+        "code_execution",
+        "sql_query",
+        "web_search",
+    ]
+    assert {item["status"] for item in body["items"]} == {"available"}
+    assert body["items"][0]["input_schema"]["type"] == "object"
+
+
+def test_tools_catalog_failure_is_503(monkeypatch):
+    """注册表/传输不可用时返回 503，不伪装成空目录或 500（doc/api.md §5.3）。"""
+
+    def broken() -> list[dict]:
+        raise RuntimeError("mcp transport url=redis://user:secret@host")
+
+    monkeypatch.setattr(api_main, "tool_catalog", broken)
+    response = TestClient(api_main.app).get("/api/v1/tools")
+    assert response.status_code == 503
+    assert response.json()["code"] == "DATA_SOURCE_UNAVAILABLE"
+    assert "secret" not in response.text
+
+
+def test_prometheus_text_endpoint(monkeypatch):
+    """`GET /metrics` 输出进程内指标文本，不经过巡检读取器或数据库（doc/api.md §5.6）。"""
+
+    from app.observability.metrics import MetricsCollector, NullMetricSink, record_tool_call
+
+    def broken_engine():
+        raise OSError("Prometheus 文本端点不应读取数据库")
+
+    monkeypatch.setattr(api_main, "inspection_store", InspectionStore(broken_engine))
+    record_tool_call(
+        "calculator",
+        "succeeded",
+        12.5,
+        call_id="text-endpoint",
+        collector=MetricsCollector(sink=NullMetricSink()),
+    )
+    response = TestClient(api_main.app).get("/metrics")
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/plain")
+    assert "macp_tool_calls_total" in response.text
+    assert 'tool_name="calculator"' in response.text

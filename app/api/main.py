@@ -1,20 +1,27 @@
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime
 from typing import Any, Literal
 from urllib.parse import urlsplit, urlunsplit
 
-from fastapi import FastAPI, Query, Request, status
+from fastapi import FastAPI, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, FiniteFloat
+from prometheus_client import CONTENT_TYPE_LATEST
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.store import SqlApiStore
 from app.api.inspection import InspectionStore
 from app.config import get_settings
+from app.mcp.registry import tool_catalog
+from app.observability.logging import get_logger, log_event
+from app.observability.metrics import render_prometheus_metrics
 from app.workflows.pipeline import WorkflowTask
 from app.workflows.service import get_workflow_service
+
+logger = get_logger("api.inspection")
 
 
 class ApiError(Exception):
@@ -168,7 +175,29 @@ app = FastAPI(
 # The worker process uses the SQL adapter. Tests can replace this value with
 # InMemoryApiStore without changing route behavior or requiring PostgreSQL.
 api_store: Any = SqlApiStore()
-inspection_store = InspectionStore()
+
+
+def _tool_catalog() -> list[dict[str, Any]]:
+    """注册表目录读取失败统一归一化为 503（doc/api.md §5.3）。
+
+    MCP 传输（stdio/http）与注册表构建会抛出各不相同的异常类型，这里统一转成
+    契约里的 `DATA_SOURCE_UNAVAILABLE`，避免把「工具源不可用」表现为 500。
+    """
+
+    try:
+        return tool_catalog()
+    except Exception as exc:
+        log_event(
+            logger,
+            "tools.catalog_failed",
+            level=logging.ERROR,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        raise ApiError("DATA_SOURCE_UNAVAILABLE", "工具注册表读取失败，请稍后重试", 503) from exc
+
+
+# 工具目录接线（doc/api.md §5.3）：注册表由成员 C 提供，API 只读取，不建表、不调用工具。
+inspection_store = InspectionStore(tool_catalog=_tool_catalog)
 
 
 def _inspection_read(read, **kwargs):
@@ -214,6 +243,18 @@ def _workflow_response(row: dict[str, Any]) -> WorkflowResponse:
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get(
+    "/metrics",
+    summary="Prometheus 文本指标（doc/api.md §5.6）",
+    response_class=Response,
+    responses={200: {"content": {"text/plain": {}}}},
+)
+def prometheus_metrics() -> Response:
+    """输出进程内 Prometheus 注册表文本；不读数据库，表缺失也不影响。"""
+
+    return Response(content=render_prometheus_metrics(), media_type=CONTENT_TYPE_LATEST)
 
 
 @app.post("/api/v1/sessions", response_model=SessionResponse, status_code=201)
