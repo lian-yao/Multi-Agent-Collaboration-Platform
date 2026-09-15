@@ -1,2 +1,7 @@
 node_modules/
 dist/
+
+# 评审预览的构建产物（由 rendercheck/build-preview.py 生成，不入库）
+rendercheck/ui-preview.html
+rendercheck/.preview-bundle.js
+rendercheck/.preview-bundle.css

@@ -1,0 +1,346 @@
+/* workspace.css — 工作台协作视图与任务用量统计
+ *
+ * 只服务「任务协作」侧栏与 Agent 阶段详情弹窗两处新视图，沿用 config.css 的三级层次：
+ *   L1 区块卡（静态微阴影、悬停不抬升）
+ *   L2 条目卡（悬停抬升一档：协作节点、用量分组）
+ *   L3 行（不画自己的边框，只用分隔线 + 悬停底色）
+ * 设计令牌统一取 styles.css 的 :root --cfg-*，不在这里另起一套。
+ */
+
+/* -------------------------------------------------------------------------- */
+/* 协作链路：波内并行、波间串行                                                 */
+/* -------------------------------------------------------------------------- */
+
+.collab-graph {
+  display: grid;
+  min-width: 0;
+}
+
+.collab-wave {
+  display: grid;
+  min-width: 0;
+}
+
+.collab-row {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.collab-row.parallel {
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+}
+
+/* 波与波之间的串行连接：一条竖线 + 口径标注。 */
+.collab-link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-left: 15px;
+}
+
+.collab-link span {
+  width: 1px;
+  height: 16px;
+  background: #cfdde1;
+}
+
+.collab-link small {
+  color: var(--cfg-ink-4);
+  font-size: 9.5px;
+}
+
+.collab-node {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--cfg-line);
+  border-radius: var(--cfg-radius-sm);
+  background: var(--cfg-surface);
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  transition: border-color var(--cfg-ease), background var(--cfg-ease);
+}
+
+button.collab-node {
+  cursor: pointer;
+}
+
+button.collab-node:hover {
+  border-color: var(--cfg-accent-soft);
+  background: var(--cfg-surface-hover);
+}
+
+.collab-node.active {
+  border-color: var(--cfg-accent-soft);
+}
+
+.collab-node.pending {
+  opacity: .68;
+}
+
+.collab-node.running {
+  border-color: #e6d3ac;
+  background: #fffdf8;
+}
+
+.collab-node.completed {
+  border-color: #cfe4d5;
+  background: #fbfefc;
+}
+
+.collab-node.failed {
+  border-color: #e8c7c0;
+  background: #fffbfa;
+}
+
+.collab-node-mark {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: #eef4f5;
+  color: #6f8790;
+}
+
+.collab-node-mark.completed {
+  background: #e8f4ec;
+  color: #478166;
+}
+
+.collab-node-mark.running {
+  background: #fdf3e2;
+  color: #c99542;
+}
+
+.collab-node-mark.failed {
+  background: #fbecea;
+  color: #b4635a;
+}
+
+.collab-node-body {
+  display: grid;
+  flex: 1;
+  gap: 2px;
+  min-width: 0;
+}
+
+.collab-node-body b {
+  overflow: hidden;
+  color: #4d6975;
+  font-size: 11px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.collab-node-body small {
+  overflow: hidden;
+  color: var(--cfg-ink-4);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.collab-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin: 12px 0 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--cfg-line-faint);
+  color: #8c9ca2;
+  font-size: 9.5px;
+}
+
+.collab-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.collab-legend i {
+  display: block;
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+}
+
+.collab-legend i.done {
+  background: #7fb894;
+}
+
+.collab-legend i.doing {
+  background: #e0b56d;
+}
+
+.collab-legend i.wait {
+  background: #cfd8db;
+}
+
+.collab-legend .collab-mode {
+  margin-left: auto;
+  padding: 2px 6px;
+  border: 1px solid var(--cfg-line);
+  border-radius: 5px;
+  color: #6b838f;
+}
+
+.collab-empty {
+  margin: 0;
+  color: var(--cfg-ink-4);
+  font-size: 10.5px;
+  line-height: 1.6;
+}
+
+/* -------------------------------------------------------------------------- */
+/* 任务用量：按采样原值展示，不累加                                              */
+/* -------------------------------------------------------------------------- */
+
+.usage-panel {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.usage-group {
+  display: grid;
+  gap: 7px;
+  padding: 9px 10px;
+  border: 1px solid var(--cfg-line);
+  border-radius: var(--cfg-radius-sm);
+  background: var(--cfg-surface);
+}
+
+.usage-scope {
+  color: var(--cfg-ink-3);
+  font-size: 9.5px;
+}
+
+.usage-group ul {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.usage-group li {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  color: #607b86;
+  font-size: 10.5px;
+}
+
+.usage-group li>span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.usage-group li em {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: #f4ead6;
+  color: #8a6a2c;
+  font-size: 8.5px;
+  font-style: normal;
+}
+
+.usage-group li strong {
+  color: var(--cfg-ink);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-more {
+  justify-self: start;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Agent 阶段详情弹窗                                                          */
+/* -------------------------------------------------------------------------- */
+
+.ws-detail {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.ws-detail-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.ws-detail-avatar {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--cfg-radius-sm);
+  background: #eef4f5;
+  color: var(--cfg-accent);
+}
+
+.ws-detail-role {
+  display: grid;
+  flex: 1;
+  gap: 2px;
+  min-width: 0;
+}
+
+.ws-detail-role b {
+  color: #4d6975;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.ws-detail-role small {
+  color: var(--cfg-ink-4);
+  font-size: 9.5px;
+}
+
+.ws-detail-section {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.ws-detail-section h4 {
+  margin: 0;
+  color: var(--cfg-ink-3);
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.ws-detail-note {
+  margin: 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--cfg-line-faint);
+  color: var(--cfg-ink-4);
+  font-size: 10px;
+  line-height: 1.7;
+}
+
+/* -------------------------------------------------------------------------- */
+/* 侧栏任务统计                                                                */
+/* -------------------------------------------------------------------------- */
+
+/* 侧栏任务统计：`.agent-facts` 本身是一列 flex 行，这里改成两列网格。 */
+.task-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0 14px;
+}

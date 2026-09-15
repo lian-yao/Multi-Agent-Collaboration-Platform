@@ -1,0 +1,329 @@
+/* records.css — 任务记录页与观测卡片
+ *
+ * 复用 config 的 cfg-* 三级层次：外层容器用 `.cfg-block`（L1），
+ * 记录行用 `.record-row`（L3：不画自己的边框，靠分隔线 + hover 底色区分）。
+ */
+
+.record-stack {
+  display: grid;
+  gap: 14px;
+  align-content: start;
+  min-width: 0;
+}
+
+/* 卡片头：标题 + 条数 + 口径说明 + 刷新 */
+.record-head {
+  align-items: flex-start;
+}
+
+.record-head h3 {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.record-head .cfg-quiet {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+}
+
+/* ------------------------------------------------------------------ L3 行 */
+
+.record-list {
+  display: grid;
+}
+
+.record-row {
+  display: grid;
+  gap: 8px;
+  padding: 12px 0;
+  border-top: 1px solid var(--cfg-line-faint, #eef3f5);
+  min-width: 0;
+}
+
+.record-row:first-child {
+  border-top: 0;
+  padding-top: 4px;
+}
+
+.record-row:hover {
+  background: var(--cfg-surface-hover, #f4f9fb);
+}
+
+.record-row-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.record-row-main b {
+  font-size: 13px;
+  color: var(--cfg-ink, #33505d);
+}
+
+.record-row-main > svg {
+  color: var(--cfg-ink-3, #8499a2);
+  flex: none;
+}
+
+.record-row-time {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--cfg-ink-3, #8499a2);
+  font-variant-numeric: tabular-nums;
+}
+
+.record-row .cfg-tool-schema {
+  margin-top: 2px;
+}
+
+/* --------------------------------------------------------- 指标采样行 */
+
+.record-metric-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.record-metric-head b {
+  font-size: 13px;
+  color: var(--cfg-ink, #33505d);
+}
+
+.record-metric-head strong {
+  font-size: 18px;
+  font-weight: 650;
+  color: var(--cfg-accent, #3f7f93);
+  font-variant-numeric: tabular-nums;
+}
+
+.record-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.record-label {
+  padding: 2px 7px;
+  border: 1px solid var(--cfg-line-soft, #e8f0f3);
+  border-radius: 6px;
+  background: var(--cfg-surface-soft, #f8fbfc);
+  color: var(--cfg-ink-3, #8499a2);
+  font-size: 10.5px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------------ 分页 */
+
+.record-pager {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--cfg-line-faint, #eef3f5);
+  font-size: 11px;
+  color: var(--cfg-ink-3, #8499a2);
+}
+
+.record-pager .cfg-quiet {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* ------------------------------------------------- 运行记录（L2 可点卡片） */
+
+.record-run {
+  display: grid;
+  gap: 10px;
+  width: 100%;
+  padding: 15px 16px;
+  border: 1px solid var(--cfg-line, #dce7ea);
+  border-radius: var(--cfg-radius, 10px);
+  background: var(--cfg-surface, #fff);
+  text-align: left;
+  transition: border-color var(--cfg-ease, .16s cubic-bezier(.4, 0, .2, 1)),
+    box-shadow var(--cfg-ease, .16s cubic-bezier(.4, 0, .2, 1));
+}
+
+.record-run:hover,
+.record-run:focus-visible {
+  border-color: var(--cfg-accent-soft, #c6dbe2);
+  box-shadow: var(--cfg-shadow, 0 6px 16px rgba(20, 35, 45, .07));
+}
+
+/* 历史会话卡片：容器是 div（含删除按钮），内容区是 .record-run-main。 */
+.record-run.record-run-session {
+  position: relative;
+  display: block;
+  padding: 0;
+}
+
+.record-run-main {
+  display: grid;
+  gap: 10px;
+  width: 100%;
+  padding: 15px 16px;
+  border: 0;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.record-run-delete {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--cfg-ink-3, #8499a2);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--cfg-ease, .16s cubic-bezier(.4, 0, .2, 1)),
+    background var(--cfg-ease, .16s cubic-bezier(.4, 0, .2, 1));
+}
+
+.record-run-session:hover .record-run-delete,
+.record-run-delete:focus-visible {
+  opacity: 1;
+}
+
+.record-run-delete:hover {
+  background: var(--cfg-surface-hover, #f4f9fb);
+  color: #c05b5b;
+}
+
+.record-run-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.record-run-head b {
+  font-size: 13.5px;
+  color: var(--cfg-ink, #33505d);
+}
+
+.record-run-head .record-run-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  color: var(--cfg-ink-3, #8499a2);
+}
+
+.record-run-head time {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--cfg-ink-3, #8499a2);
+  font-variant-numeric: tabular-nums;
+}
+
+.record-run-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.record-run-facts > div {
+  min-width: 0;
+}
+
+.record-run-facts dt {
+  font-size: 10.5px;
+  color: var(--cfg-ink-3, #8499a2);
+}
+
+.record-run-facts dd {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--cfg-ink-2, #456572);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------ 当前任务徽标条 */
+/* 明确「本页聚焦当前任务」，历史任务走独立「历史会话」入口。 */
+
+.record-current-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 12px 16px;
+  border: 1px solid var(--cfg-line, #dce7ea);
+  border-radius: var(--cfg-radius, 10px);
+  background: var(--cfg-surface-soft, #f8fbfc);
+  min-width: 0;
+}
+
+.record-current-mark {
+  display: grid;
+  flex: none;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--cfg-accent-soft, #dcecef);
+  color: var(--cfg-accent, #3f7f93);
+}
+
+.record-current-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.record-current-label {
+  display: block;
+  font-size: 10.5px;
+  color: var(--cfg-ink-3, #8499a2);
+}
+
+.record-current-title {
+  display: block;
+  margin-top: 2px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--cfg-ink, #33505d);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.record-current-history {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+/* 历史会话列表里的「当前」标记 */
+.record-run-current {
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--cfg-accent-soft, #dcecef);
+  color: var(--cfg-accent, #3f7f93);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.record-run.current {
+  border-color: var(--cfg-accent-soft, #c6dbe2);
+}
