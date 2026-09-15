@@ -381,7 +381,7 @@ def _chat_result(total: int = 7, llm_output: dict | None = None) -> ChatResult:
 def test_callback_handler_uses_real_model_name_not_integration_class(
     memory_metrics, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """F-03 回归：Token 要按真实模型归因，而不是记成集成类名 `ChatOllama`（ADR-013）。
+    """F-03 回归：Token 要按真实模型归因，而不是记成集成类名 `ChatOllama`（ADR-015）。
 
     模型名只在开始回调拿得到（结果里没有），所以开始时按 `run_id` 记下、结束时用。
     只有连 `metadata` 都没有时才退化为集成类名——那是能力下限，不是模型名。

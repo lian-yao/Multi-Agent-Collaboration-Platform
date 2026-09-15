@@ -153,19 +153,21 @@ def _looks_like_bare_tool_call(content: str) -> bool:
 
 @pytest.mark.xfail(
     strict=True,
-    reason="已知缺口 F-02（ADR-013）：真实模型不产出结构化 tool_calls，"
-    "阶段结论退化成工具调用 JSON 文本；修复后本用例会 XPASS，需改为正式断言",
+    reason="已知缺口 F-02（ADR-015）：真实模型不产出结构化 tool_calls，"
+    "阶段结论退化成工具调用 JSON 文本（实测于 Ollama qwen2.5-coder:7b；"
+    "默认提供方已按 ADR-014 改为 OpenAI 兼容 API，需带凭据复测才能定论）；"
+    "修复后本用例会 XPASS，需改为正式断言",
 )
 def test_live_report_is_a_report_not_a_tool_call_payload(
     live_client: httpx.Client,
 ) -> None:
     """E-01/E-02 的通过标准「生成结构化报告」在真实模型下**尚未达成**。
 
-    实测（2026-09-15，qwen2.5-coder:7b）：报告消息内容为
+    实测（2026-09-15，Ollama qwen2.5-coder:7b）：报告消息内容为
     `{"name": "web_search", "arguments": {"query": "…", "max_results": 5}}`——
     模型把工具调用写进了 `content` 而不是 `tool_calls`，因此
     `event=stage.finish ... tool_calls=0`，工具从未真正执行，最终报告是这串 JSON。
-    证据与处置（不改代码、不换模型，仅上报）见 ADR-013 F-02。
+    证据与处置（不改代码、不换模型，仅上报）见 ADR-015 F-02。
     """
 
     session_id = _create_session(live_client)
@@ -187,7 +189,7 @@ def test_live_tool_calls_are_readable_from_postgresql(
 ) -> None:
     """I-06（真实库部分）：`tool_calls` 表可读且按 Workflow 过滤。
 
-    真实模型是否真的发起工具调用由模型能力决定（见 ADR-013 记录的缺口），
+    真实模型是否真的发起工具调用由模型能力决定（见 ADR-015 记录的缺口），
     因此这里断言的是**落库链路可用**：表存在时 available、分页自洽、
     返回行都属于本次 Workflow；确有行时状态必须是终态。
     """

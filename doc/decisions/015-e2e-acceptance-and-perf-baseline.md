@@ -1,4 +1,4 @@
-# ADR-013: 端到端验收与性能基线（D9-10）
+# ADR-015: 端到端验收与性能基线（D9-10）
 
 状态：已接受
 
@@ -31,17 +31,24 @@
 2. **不新增 pytest marker 或配置**：真实环境用例用环境变量 skip，
    保证 `uv run pytest` 在无容器环境下仍是全绿的可回归用例集
    （`-m "not integration"` 这类约定在 `pyproject.toml` 里并无对应注册，不引入）。
-3. **数据采集通道要如实标注**：事实源要求指标从 Prometheus 导出，但 backend 未暴露
-   Prometheus 文本端点（D 侧）、`metrics` 表未建（B 侧），因此性能脚本改用**行为日志**
-   采样（`event=llm.finish` 的 Token/耗时、`event=tool.call` 的成败），
+3. **数据采集通道要如实标注**：事实源要求指标从 Prometheus 导出，但测量时 backend 未暴露
+   Prometheus 文本端点、`metrics` 表也未建（两项随后由成员 D 与 B 落地，见 F-04），因此
+   性能脚本改用**行为日志**采样（`event=llm.finish` 的 Token/耗时、`event=tool.call` 的成败），
    数值同样是真实测量值，只是通道不同；指标口径沿用 `doc/api.md` §5.5 的名称。
    工具调用为 0 次时输出 `null` 而不是 0%（不把「没有样本」谎报成「成功率 0%」）。
+   事实源通道现已可用（`/metrics` 文本端点、`metrics` 表采样），后续可把同一批测量改从
+   该通道取数并对比，作为通道一致性的验收项。
 4. **业务终态与运行时终态都要校验**：恢复脚本除业务库终态外，还从 backend 日志取
    Dapr orchestration 终态，避免「业务行 completed」掩盖运行时 FAILED（见 F-05）。
-5. **不改动其他成员代码**：本轮发现的跨模块问题一律证据化上报（F-01～F-05），
+5. **不改动其他成员代码**：本轮发现的跨模块问题一律证据化上报（F-01～F-06），
    修复归属与时机由对应成员决定。
 
 ## 实测数据（2026-09-15，本机 compose，Ollama `qwen2.5-coder:7b`）
+
+> **提供方前提**：本轮测量时默认提供方是 Ollama（`qwen2.5-coder:7b`），E-03 的恢复演练
+> 走 `app.workflows.poc` 的确定性（假模型）路径。此后默认提供方改为 OpenAI 兼容 API
+> （ADR-014，缺凭据 fail-fast，Ollama 降为备用），因此真实环境验收与并发测量都要配好
+> 凭据才能重跑，F-02 的结论也需在 API 模型下复测。
 
 命令与结果：
 
@@ -51,7 +58,16 @@
 | 真实环境验收 | `MACP_E2E_LIVE=1 uv run pytest tests/e2e/test_live_e2e.py -q -s` | 4 passed + 1 xfail（F-02 未达成） |
 | 并发性能 | `uv run python scripts/perf_concurrency.py --sessions 10 --concurrency 10` | 见下 |
 | 故障恢复 | `uv run python scripts/measure_recovery.py --hold-seconds 15 --restart-lead-seconds 1` | 见下 |
-| 全量回归 | `uv run pytest -q` | 300 passed / 1 failed（A 侧既有失败）/ 5 skipped |
+| 全量回归（本分支，合入 master 前） | `uv run pytest -q` | 300 passed / 1 failed / 5 skipped（1 failed 为当时 A 侧过期的前置条件用例，已在 master 修复） |
+| 全量回归（合入 master 后） | `uv run pytest -q` | **378 passed / 0 failed / 5 skipped** |
+
+合入 master 后（2026-09-15）：`origin/master` 的提交已并入本分支（含 ADR-013 配置热更新、
+ADR-014 API 优先接入、`metrics` 建表、工具目录与 Prometheus 文本端点接线、I-08、前端配置面板）。
+本 ADR 因此改号为 **015**（原 013 与 master 的 `013-agent-config-hot-update` 重号）。
+378 = master 的 366 例 + 本分支新增 12 例（E 系列 6、性能口径 4、F-03 回归 2）；
+5 skipped 仍是需要 compose 的 `tests/e2e/test_live_e2e.py`。
+
+以下数据均为**合入 master 前**在本机 compose 上测得：
 
 - **E-01/E-02**：单条流水线 2-4s（模型预热后），首次调用含加载 8-12s；
   终态 `completed`，`workflow_runs.checkpoint.completed_steps=[collect, analyze, report]`，
@@ -70,7 +86,8 @@
   服务恢复可用时实例已完成续跑），重启→业务终态 2.63s；业务状态保留
   `completed` / 三步齐全。目标 <5s 达成。
   但同一演练的 **Dapr orchestration 终态是 FAILED**（F-05），
-  因此在 F-05 修复前，「恢复成功」只对业务状态成立。
+  因此这条数据下的「恢复成功」只对业务状态成立；F-05 已由 B 修复
+  （见「发现」），修复后的恢复演练需重跑一遍才能宣称两个终态同时为成功。
 
 ## 发现（只上报，未改动其他成员代码）
 
@@ -94,6 +111,10 @@
   处置：不改代码、不加提示词 hack、不换模型；以
   `test_live_e2e.py::test_live_report_is_a_report_not_a_tool_call_payload`
   的 strict xfail 固定为「已知未达成」，一旦修复该用例会 XPASS 逼人更新。
+  **提供方前提（复测须知）**：本节结论测于 Ollama `qwen2.5-coder:7b`；
+  此后默认提供方改为 OpenAI 兼容 API（ADR-014，缺凭据 fail-fast），
+  该模型下工具调用是否成立需配好凭据后重跑真实 Workflow 才能定论，
+  xfail 的 reason 已注明这一点。
 - **F-03 性能数据的按模型归因不可用**（C 侧，**已修复**）。
   `app/observability/callbacks.py::_model_name()` 对 ChatOllama 取到的是类名
   （日志实测 `event=llm.start model=ChatOllama`），`event=llm.finish` 则完全没有
@@ -120,23 +141,40 @@
   ——本 ADR 初稿提的「一行级修法（`_model_name` 优先取 `kwargs["model"]`）」经实测不成立，
   已按上述做法更正；`observed_stage(model=...)` 这条编排层透传路径也始终是空的
   （`pipeline_graph.py:229` 不传 `model`），本次修复不依赖它。
-- **F-04 其他成员仍缺的前置**：
-  B——`metrics` 表 DDL 未建（`/api/v1/metrics` 恒 `not_integrated`）；
+- **F-04 其他成员仍缺的前置（三项均已落地，2026-09-15）**：
+  B——`metrics` 表 DDL 未建（`/api/v1/metrics` 恒 `not_integrated`）→ 已建
+  （`app/core/checkpoint.py::MetricRecord` + `init_checkpoint_schema()`，
+  `GET /api/v1/metrics` 返回 `available`）；
   D——`app/api/main.py:171` 未把 `tool_catalog()` 注入 `InspectionStore`
   （`/api/v1/tools` 恒 `not_integrated`）、Prometheus 文本端点未暴露
-  （`deploy/prometheus.yml` 只抓 dapr-sidecar）；
+  （`deploy/prometheus.yml` 只抓 dapr-sidecar）→ 已注入且 `backend:8000/metrics`
+  可抓（`doc/api.md` §5.3、§5.6，`doc/roadmap.md`「M4 代码落地情况」）；
   A——`tests/unit/test_pipeline_tools.py::test_role_stage_without_registry_does_not_bind_tools`
-  仍失败、`PATCH /api/v1/config/agents/{agent_id}`（I-08）未实现。
-- **F-05 poc / 故障演练路径业务终态与 Dapr 终态不一致**（B 侧）。
-  `app/workflows/poc.py` 把 `session_id="demo-session"` 放进 `WorkflowTask`，
+  仍失败、`PATCH /api/v1/config/agents/{agent_id}`（I-08）未实现 → 用例已改用
+  `set_tool_registry_factory(lambda: None)` 显式构造前置条件，I-08 已实现（ADR-013）。
+  本轮性能数据仍是**行为日志**通道采样（测量时上述通道尚不可用），
+  数值有效；事实源通道现已可用，可另取一轮做通道一致性对比。
+- **F-05 poc / 故障演练路径业务终态与 Dapr 终态不一致**（B 侧，**已修复**）。
+  症状：`app/workflows/poc.py` 把 `session_id="demo-session"` 放进 `WorkflowTask`，
   而 `app/core/checkpoint.py::_as_uuid()` 会 `uuid.UUID(str(value))`，
   于是 `finalize_activity` 写报告消息时抛 `ValueError: badly formed hexadecimal UUID string`
   （已在容器内直接复现），业务行已写成 `completed`，Dapr 侧
   `Orchestration completed with status: FAILED`。实测：4 次演练 4 次 FAILED；
   而 API 调度路径（`session_id` 是真 UUID）无一失败（并发跑批 10/10 `COMPLETED`，
   E-02/E-04 亦为 `COMPLETED`），因此影响面是 `scripts/fault_recovery.ps1` 与
-  `python -m app.workflows.poc` 这条演示/演练路径——它目前不能作为干净的 E-03 验收。
-  `scripts/measure_recovery.py` 已内置该日志侧校验并因此以非零码退出。
+  `python -m app.workflows.poc` 这条演示/演练路径——它当时不能作为干净的 E-03 验收。
+  **修复（B 侧，合入 master 后并入本分支）**：`session_id` 不再硬编码为
+  `demo-session`，并在 CLI 侧对运行时终态 fail-fast（非 `COMPLETED` 或
+  无 `serialized_output` 即 `SystemExit` 非零码），使这条路径不再能「业务 completed
+  而运行时 FAILED」地静默通过。
+  `scripts/measure_recovery.py` 的日志侧终态校验**保留**为守卫（不因对方修好就撤掉），
+  本 ADR 的 E-03 实测数据仍取自修复前的测量，且走 poc 的确定性（假模型）路径。
+- **F-06 会话/长期记忆未接入编排**（跨模块，**仅记录，未在本轮处置**）。
+  `app/memory/` 只有 Protocol 与 schema（实际存储在 `app/core`，属 B 的 ADR-005 范围），
+  `WorkflowTask` 只带 `task=payload.content`，`list_messages` 的唯一调用方是
+  `GET /messages`，即历史消息既不落记忆也不回注 Prompt。
+  系统当前仍可跑通是因为 PostgreSQL 是事实源；但事实源模块 2「会话记忆持久化」的
+  内容在真实链路里尚未生效。是否补、由谁补留给后续决策。
 
 ## 影响
 
@@ -148,8 +186,9 @@
   因此 `pyproject.toml`、`uv.lock`、`doc/requirements.txt` 无需同步。
 - **E 系列有了可重复的验收入口**，`doc/testing.md` §3.1/§3.2 从「手工/无数据」
   变为「脚本 + 实测数据」，并在 §4.2 记录本轮状态。
-- **F-01/F-05 会让「端到端跑通」的结论失真**，因此两者在文档里都标为未清缺口：
-  F-01 影响工具链路的正确性，F-05 影响恢复演练的可信度。
+- **F-01 仍未清**，会让工具链路的正确性结论失真，因此在文档里标为未清缺口；
+  F-05 已由 B 修复（本 ADR 的 E-03 数据取自修复前，恢复演练的终态一致性
+  需在修复后重跑一遍确认），F-04 三项前置已全部落地。
 - **F-02 不修则真实模型下的工具演示无法成立**（当前报告是工具调用 JSON 文本），
   演示口径要么换模型/提示词，要么在文档中明确降级说明。
 - **F-03 已修复**（C 侧自有的 `app/observability/callbacks.py`，未触碰他人代码）：

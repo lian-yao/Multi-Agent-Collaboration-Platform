@@ -9,7 +9,7 @@
 
 模型标识来源见 `_model_name()`：LangChain 1.x 的回调 `serialized` 不再带 `kwargs`，
 只能拿到集成类名（`ChatOllama`），会让 Token 指标失去按模型的归因能力
-（缺口 F-03，见 ADR-013），因此改从回调的 `metadata["ls_model_name"]` 取真实模型名。
+（缺口 F-03，见 ADR-015），因此改从回调的 `metadata["ls_model_name"]` 取真实模型名。
 """
 
 from __future__ import annotations

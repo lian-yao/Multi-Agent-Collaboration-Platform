@@ -89,10 +89,13 @@ Dapr orchestration 终态）。实测数据见 §4.2；`tests/unit/test_workflow
 仍覆盖活动重放、子 Workflow 实例 ID 稳定、终态回写等**单元级**恢复语义，
 被杀的进程改由 pytest 用例控制（需容器控制权）仍未落地。
 
-注意：该演练路径当前有未清缺口——`app/workflows/poc.py` 用
-`session_id="demo-session"` 触发 `finalize_activity` 的报告消息写入抛
-`badly formed hexadecimal UUID string`，业务行是 `completed` 而 Dapr orchestration 是
-`FAILED`（缺口 F-05，见 ADR-013）。因此脚本额外校验运行时终态并据此以非零码退出。
+注意：该演练路径曾有缺口——`app/workflows/poc.py` 用 `session_id="demo-session"`
+触发 `finalize_activity` 的报告消息写入抛 `badly formed hexadecimal UUID string`，
+业务行是 `completed` 而 Dapr orchestration 是 `FAILED`（缺口 F-05，见 ADR-015）。
+**F-05 已由成员 B 修复**（`session_id` 不再硬编码，且 CLI 对运行时终态非 `COMPLETED`
+即非零码退出）；`scripts/measure_recovery.py` 的日志侧终态校验**保留为守卫**
+（不因对方修好而撤掉）。§4.2 的 E-03 数据取自修复前，且走 poc 的确定性（假模型）路径，
+修复后的演练需重跑一遍确认两个终态同时为成功。
 
 ### 3.2 并发会话测试（E 系列性能）
 
@@ -109,15 +112,18 @@ uv run python scripts/perf_concurrency.py --sessions 10 --concurrency 10 --json 
 
 - 每个虚拟会话：创建会话 → 发消息（记录 202 受理延迟）→ 轮询 Workflow 到终态
   （记录端到端延迟），汇总成功率、终态分布、HTTP 错误数、延迟 p50/p95/max；
-- Token 消耗与工具调用成功率：事实源要求从 Prometheus 导出，但 backend 未暴露
-  Prometheus 文本端点（D 侧）且 `metrics` 表未建（B 侧），因此改从**行为日志**采样
+- Token 消耗与工具调用成功率：事实源要求从 Prometheus 导出，但**测量当时** backend 未
+  暴露 Prometheus 文本端点（D 侧）且 `metrics` 表未建（B 侧），因此改从**行为日志**采样
   （`event=llm.finish` 的 `input_tokens`/`output_tokens`/`total_tokens`/`duration_ms`、
   `event=tool.call` 的 `status`）——数值是真实测量值，通道与事实源的差异在本文件与
-  ADR-013 中显式标注；工具调用 0 次时成功率输出 `null`（不谎报 0%）。
+  ADR-015 中显式标注；工具调用 0 次时成功率输出 `null`（不谎报 0%）。
+  这两条通道随后都已由 B/D 落地（F-04），**事实源通道现已可用**，
+  可另取一轮从 `/metrics` 或 `metrics` 表取数并与此处数据对比。
 - 模型名：`event=llm.finish` 的 `model` 字段在 F-03 修复后为真实模型名
   （修复前是集成类名或缺失），因此按模型归因 Token 效率具备前提。
 - 失败率超过 `--max-failure-rate`（默认 0）时脚本以非零码退出。
 - 脚本纯逻辑（百分位口径、日志解析、报告汇总）由 `tests/unit/test_perf_tooling.py` 固定。
+
 ### 3.3 前端验证现状（成员 D）
 
 前端当前**没有测试框架**，自动化门禁是类型检查 + 构建：`npm --prefix frontend run build`
@@ -188,7 +194,8 @@ API 模型下跑通工具调用**，因此 M4 仍是「代码完成、验收未�
 
 ### 4.2 E 系列当前状态（2026-09-15，成员 C D9-10）
 
-三层证据与完整数据见 ADR-013；命令：
+三层证据与完整数据见 ADR-015；命令（真实环境验收与并发测量需先配好提供方凭据，
+默认提供方已是 OpenAI 兼容 API，缺凭据 fail-fast，见 ADR-014）：
 
 ```bash
 uv run pytest tests/e2e -q                          # 无容器回归网（6 passed）
@@ -199,20 +206,29 @@ uv run python scripts/measure_recovery.py --hold-seconds 15 --restart-lead-secon
 
 | 用例 | 状态 | 证据 / 缺口 |
 | --- | --- | --- |
-| E-01 单 Agent 问答 | 部分 | 真实环境跑通：会话→消息→轮询→`completed`，报告消息落库；但**答复内容未达成**——真实模型把工具调用写成纯文本，报告正文是 `{"name": "web_search", ...}`（缺口 F-02） |
-| E-02 多 Agent 协作 | 部分 | 真实环境三步依次完成（`checkpoint.completed_steps=[collect, analyze, report]`，2-4s/条）；同受 F-02 影响（`tool_calls=0`，工具未真正执行） |
-| E-03 故障恢复 | 通过（有缺口） | `scripts/measure_recovery.py`：不可用 2.62s、**恢复耗时 ≤0.2s（目标 <5s）**、业务状态保留 `completed`/三步齐全；但该演练路径 Dapr orchestration 终态为 FAILED（缺口 F-05：poc 的 `session_id="demo-session"` 让 `finalize_activity` 写报告消息时抛 UUID 解析错误） |
+| E-01 单 Agent 问答 | 部分 | 真实环境跑通：会话→消息→轮询→`completed`，报告消息落库；但**答复内容未达成**——真实模型把工具调用写成纯文本，报告正文是 `{"name": "web_search", ...}`（缺口 F-02，实测于 Ollama `qwen2.5-coder:7b`） |
+| E-02 多 Agent 协作 | 部分 | 真实环境三步依次完成（`checkpoint.completed_steps=[collect, analyze, report]`，2-4s/条）；同受 F-02 影响（`tool_calls=0`，工具未真正执行）；F-02 的结论同属 Ollama 下的测量，默认提供方改 API 后需带凭据复测 |
+| E-03 故障恢复 | 通过（旧数据有缺口） | `scripts/measure_recovery.py`：不可用 2.62s、**恢复耗时 ≤0.2s（目标 <5s）**、业务状态保留 `completed`/三步齐全；该次演练的 Dapr 终态为 FAILED（缺口 F-05，**已由 B 修复**），修复后的演练需重跑以确认两个终态同时成功。数据取自 poc 的确定性（假模型）路径 |
 | E-04 Web 会话管理 | 部分 | API 侧通过：暂停 → 新消息被 409 `SESSION_PAUSED` 拒绝 → 恢复 → 原 Workflow 续跑 `completed`；**Web UI 侧未验**（需浏览器端到端） |
-| E-05 一键部署 | 部分 | compose 全服务健康、`/health` 200、`/api/v1/agents` 三角色、`/api/v1/providers` 非空；**`start.ps1` 全流程与 `stop.ps1` 未在本轮重跑** |
+| E-05 一键部署 | 部分 | compose 全服务健康、`/health` 200、`/api/v1/agents` 三角色、`/api/v1/providers` 非空；容器侧 `/metrics`、`/tools` 与 Prometheus/Jaeger 已由 B/D 验收（`doc/roadmap.md`「M4 代码落地情况」）；**`start.ps1` 全流程与 `stop.ps1` 未在本轮重跑** |
 | 并发会话（§3.2） | 通过 | 10 会话/并发度 10：成功率 1.0、HTTP 5xx 0、受理延迟 p50 0.46s、端到端 p50 16.54s / p95 18.61s、Token 合计 18650（621.7/次调用）、工具调用成功率**无样本**（0 次，F-02） |
 
-未清缺口（均不在 C 侧，详见 ADR-013 F-01～F-05）：
-F-01 跨阶段同工具调用被审计主键合并且返回首个结果（A+B，影响工具链路正确性）；
-F-02 真实模型不产出结构化 `tool_calls`（需 A/B 决策）；
-F-03 Token 采样缺 `model` 标签（C 侧，已修复：改为从回调 `metadata["ls_model_name"]`
+合入 `master` 后（2026-09-15）：`uv run pytest -q` → **378 passed / 0 failed / 5 skipped**
+（378 = master 的 366 例 + 本分支新增 12 例：E 系列 6、性能口径 4、F-03 回归 2；
+5 skipped 为需要 compose 的 `test_live_e2e.py`）。
+
+缺口状态（详见 ADR-015 F-01～F-06）：
+F-01 跨阶段同工具调用被审计主键合并且返回首个结果（A+B，**仍未清**，影响工具链路正确性）；
+F-02 真实模型不产出结构化 `tool_calls`（需 A/B 决策；实测于 Ollama `qwen2.5-coder:7b`，
+默认提供方改 OpenAI 兼容 API 后需带凭据复测才能定论）；
+F-03 Token 采样缺 `model` 标签（C 侧，**已修复**：改为从回调 `metadata["ls_model_name"]`
 取真实模型名并在 `run_id` 上传递，回归用例见 `test_observability_metrics.py`）；
-F-04 `metrics` 表（B）、`/tools` 接线与 Prometheus 文本端点（D）、A 的失败用例与 I-08；
-F-05 poc/故障演练路径业务终态与 Dapr 终态不一致（B）。
+F-04 `metrics` 表（B）、`/tools` 接线与 Prometheus 文本端点（D）、A 的失败用例与 I-08
+——**三项均已落地**（测试全绿、真实库与容器侧均已验收）；
+F-05 poc/故障演练路径业务终态与 Dapr 终态不一致（B，**已修复**：`session_id` 不再硬编码，
+CLI 对运行时终态非 `COMPLETED` 即非零码退出）；
+F-06 会话/长期记忆未接入编排（`app/memory/` 只有 Protocol，历史消息既不落记忆也不回注
+Prompt，仅 `GET /messages` 读取）——**本轮只记录，未处置**。
 
 ## 5. 失败处理约定
 

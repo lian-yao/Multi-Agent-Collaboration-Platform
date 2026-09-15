@@ -87,19 +87,26 @@
 
 | 分工 | 负责 | 状态 | 落地内容 |
 | --- | --- | --- | --- |
-| 端到端测试补缺 | C | 已完成 | `tests/e2e/`：无容器回归网（真实 API/Workflow/流水线/工具/可观测，仅替换 Dapr 运行时与 PostgreSQL 落库）与真实 compose 验收入口（默认 skip，`MACP_E2E_LIVE=1` 启用，覆盖 E-01/E-02/E-04/I-06/E-05 健康）；E-03 由 `scripts/measure_recovery.py` 脚本化测量；并发会话由 `scripts/perf_concurrency.py` 测量（ADR-013） |
-| 性能数据 | C | 已完成 | 10 并发会话：成功率 1.0、受理延迟 p50 0.46s、端到端 p50 16.54s / p95 18.61s、Token 18650（621.7/次）；E-03 恢复耗时 ≤0.2s（目标 <5s）、不可用 2.62s；数据采集通道与口径见 ADR-013 |
+| 端到端测试补缺 | C | 已完成 | `tests/e2e/`：无容器回归网（真实 API/Workflow/流水线/工具/可观测，仅替换 Dapr 运行时与 PostgreSQL 落库）与真实 compose 验收入口（默认 skip，`MACP_E2E_LIVE=1` 启用，覆盖 E-01/E-02/E-04/I-06/E-05 健康）；E-03 由 `scripts/measure_recovery.py` 脚本化测量；并发会话由 `scripts/perf_concurrency.py` 测量（ADR-015） |
+| 性能数据 | C | 已完成 | 10 并发会话：成功率 1.0、受理延迟 p50 0.46s、端到端 p50 16.54s / p95 18.61s、Token 18650（621.7/次）；E-03 恢复耗时 ≤0.2s（目标 <5s）、不可用 2.62s；数据采集通道与口径见 ADR-015 |
 | Web UI 与部署编排 | D | 未完成 | Web 控制台、`start.ps1`/`stop.ps1` 全流程尚未在 M5 口径下验收（本轮只做了 compose 已起后的健康检查） |
 
 - **M5 未完成**：E-01/E-02 的「结构化报告」在真实模型下不达成（缺口 F-02：
-  模型把工具调用写成纯文本 `content`，`tool_calls=0`，工具未真正执行）；
+  模型把工具调用写成纯文本 `content`，`tool_calls=0`，工具未真正执行；
+  该结论实测于 Ollama `qwen2.5-coder:7b`，默认提供方已按 ADR-014 改为
+  OpenAI 兼容 API，**拿到凭据后需在 API 模型下重跑真实 Workflow 才能定论**）；
   E-05 的 `start.ps1 → 健康检查 → stop.ps1` 全流程、E-04 的 Web UI 侧均未验。
-- **本轮新发现的跨模块缺口（均未改他人代码，见 ADR-013）**：
-  F-01 跨阶段同工具调用被审计主键合并、返回首个结果（A+B）；
+- **本轮新发现的跨模块缺口（均未改他人代码，见 ADR-015）**：
+  F-01 跨阶段同工具调用被审计主键合并、返回首个结果（A+B，**仍未清**）；
   F-02 真实模型不产出结构化 `tool_calls`（需 A/B 决策）；
   F-03 Token 采样缺 `model` 标签（C 侧，**已修复**：取回调 `metadata["ls_model_name"]`）；
-  F-04（B：`metrics` 表；D：`/tools` 接线与 Prometheus 文本端点；A：失败用例与 I-08）；
-  F-05 poc/故障演练路径业务终态 `completed` 与 Dapr 终态 `FAILED` 不一致（B）。
+  F-04（B：`metrics` 表；D：`/tools` 接线与 Prometheus 文本端点；A：失败用例与 I-08）
+  ——**三项均已落地**（`metrics` 建表与真实库采样、容器 `/metrics` 抓取、I-08 配置热更新）；
+  F-05 poc/故障演练路径业务终态 `completed` 与 Dapr 终态 `FAILED` 不一致（B，
+  **已修复**：`session_id` 不再硬编码为 `demo-session`，CLI 对运行时终态非 `COMPLETED`
+  即非零码退出）——修复后的恢复演练需重跑一遍；
+  F-06 会话/长期记忆未接入编排（`app/memory/` 只有 Protocol，历史消息既不落记忆
+  也不回注 Prompt）——**本轮只记录，未处置**。
 
 ### 验证记录
 
@@ -144,7 +151,14 @@
   **300 passed / 1 failed / 5 skipped**（1 failed 为当时 A 的过期前置条件用例，
   已在 master 上修复；5 skipped 为需要 compose 的 `tests/e2e/test_live_e2e.py`）。
   真实 compose 环境：`MACP_E2E_LIVE=1 uv run pytest tests/e2e/test_live_e2e.py -q -s` →
-  4 passed + 1 xfail（F-02 记为未达成）；并发与恢复实测数据见 ADR-013。
+  4 passed + 1 xfail（F-02 记为未达成）；并发与恢复实测数据见 ADR-015。
+- 2026-09-15（C 的分支合入 master 后）：`uv run pytest -q` → **378 passed / 0 failed /
+  5 skipped**（378 = master 的 366 例 + 本分支新增 12 例，5 skipped 为需要 compose 的
+  `test_live_e2e.py`）。合并时 `doc/roadmap.md`、`doc/testing.md` 各有同点追加型冲突，
+  已按「master 记录在前、本分支记录在后」解决；并做了语义对齐：本分支 ADR 改号为
+  **015**（原 013 与 master 的 `013-agent-config-hot-update` 重号）、F-04 三项前置
+  标为已落地、F-05 标为已修复、F-02 补上「实测于 Ollama `qwen2.5-coder:7b`、
+  默认提供方改 API 后需凭据复测」的前提。
 - 注意事项：数据库读取用例使用 SQLite 内存表与注入目录数据，MCP 用例走内存协议往返而非
   跨进程 stdio，因此不代表真实 PostgreSQL、真实 MCP Server 或浏览器端到端验收。
   本轮已补上真实 compose 上的 REST 链路验收，但 Web UI 侧（E-04）与
