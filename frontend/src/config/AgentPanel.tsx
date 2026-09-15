@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Cpu, SlidersHorizontal, Thermometer, X } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Cpu, Plus, SlidersHorizontal, Thermometer, Trash2 } from "lucide-react";
 import { api } from "../api/client";
 import { REASONING_TYPES, type Agent, type AgentConfigList, type AvailableModel, type ReasoningType } from "../types/api";
 import {
   Chip,
   EmptyState,
   Field,
+  Modal,
   NoticeBar,
   assignIfChanged,
   describeError,
@@ -91,74 +92,86 @@ function buildAgentPatch(agent: Agent, form: AgentForm): Record<string, unknown>
 const monogramOf = (agent: Agent): string => agent.name.slice(0, 1);
 
 /**
- * 单个角色方块（一行多个）。
+ * 单个角色卡片（网格里一行多个）。
  *
- * 卡片本身只做「摘要 + 打开配置」，表单在 `AgentTuningPanel` 里——网格里塞不下六个
- * 输入框，行内展开也会把同一行的其它方块顶变形。
+ * 卡片主体点击打开配置弹窗；自定义角色（`builtin=false`）右上角提供删除按钮，
+ * 内置流水线角色不显示删除入口（删除会破坏固定三步流水线）。
  *
- * 整张卡片是一个 `<button>`：没有需要与打开配置竞争点击的内部元素，键盘可达性也最省事。
- *
- * 导出是为了让 `frontend/rendercheck/config-smoke.tsx` 能用显式 props 驱动它——
- * `AgentPanel` 的数据靠 effect 拉取，静态渲染时拿不到，卡片内部就没人验证。
+ * 导出是为了让 `frontend/rendercheck/config-smoke.tsx` 能用显式 props 驱动它。
  */
 export function AgentRoleCard({
   agent,
   active,
-  selected,
   onOpen,
+  onDelete,
 }: {
   agent: Agent;
   active: boolean;
-  selected: boolean;
   onOpen: () => void;
+  onDelete?: () => void;
 }) {
   const overrides = agent.override_keys.length;
 
   return (
-    <button
-      type="button"
-      className={`cfg-agent-card${active ? " active" : ""}${selected ? " selected" : ""}`}
-      onClick={onOpen}
-      aria-pressed={selected}
-      title={`配置「${agent.name}」的模型绑定与参数`}
-    >
-      <span className="cfg-agent-top">
-        <span className={`cfg-monogram cfg-agent-avatar tint-${active ? "green" : "blue"}`} aria-hidden="true">
-          {monogramOf(agent)}
-        </span>
-        <span className="cfg-agent-title">
-          <span className="cfg-agent-name">
-            <b>{agent.name}</b>
-            {active && <em className="cfg-agent-live">当前阶段</em>}
+    <div className={`cfg-agent-card${active ? " active" : ""}${!agent.enabled ? " disabled" : ""}`}>
+      <button
+        type="button"
+        className="cfg-agent-open"
+        onClick={onOpen}
+        title={`配置「${agent.name}」的模型绑定与参数`}
+      >
+        <span className="cfg-agent-top">
+          <span className={`cfg-monogram cfg-agent-avatar tint-${active ? "green" : "blue"}`} aria-hidden="true">
+            {monogramOf(agent)}
           </span>
-          <small>
-            {agent.role} · {STATUS_LABELS[agent.status] ?? agent.status}
-          </small>
+          <span className="cfg-agent-title">
+            <span className="cfg-agent-name">
+              <b>{agent.name}</b>
+              {active && <em className="cfg-agent-live">当前阶段</em>}
+              {!agent.enabled && <em className="cfg-agent-off">已停用</em>}
+            </span>
+            <small>
+              {agent.role} · {STATUS_LABELS[agent.status] ?? agent.status}
+            </small>
+          </span>
+          <SlidersHorizontal size={14} className="cfg-agent-more" aria-hidden="true" />
         </span>
-        <SlidersHorizontal size={14} className="cfg-agent-more" aria-hidden="true" />
-      </span>
 
-      <span className="cfg-agent-meta">
-        <span className="cfg-agent-meta-item">
-          <Cpu size={12} aria-hidden="true" />
-          {agent.model}
-          {agent.provider_name ? ` · ${agent.provider_name}` : ` · ${agent.provider}`}
+        <span className="cfg-agent-meta">
+          <span className="cfg-agent-meta-item">
+            <Cpu size={12} aria-hidden="true" />
+            {agent.model}
+            {agent.provider_name ? ` · ${agent.provider_name}` : ` · ${agent.provider}`}
+          </span>
+          <span className="cfg-agent-meta-item">
+            <Thermometer size={12} aria-hidden="true" />T {agent.temperature}
+          </span>
+          {overrides > 0 ? (
+            <Chip tone="amber">覆盖 {overrides} 项</Chip>
+          ) : (
+            <Chip tone="slate">无覆盖</Chip>
+          )}
+          {agent.builtin && <Chip tone="blue">内置</Chip>}
         </span>
-        <span className="cfg-agent-meta-item">
-          <Thermometer size={12} aria-hidden="true" />T {agent.temperature}
-        </span>
-        {overrides > 0 ? (
-          <Chip tone="amber">覆盖 {overrides} 项</Chip>
-        ) : (
-          <Chip tone="slate">无覆盖</Chip>
-        )}
-      </span>
-    </button>
+      </button>
+
+      {onDelete && (
+        <button
+          type="button"
+          className="cfg-agent-delete"
+          onClick={onDelete}
+          aria-label={`删除角色 ${agent.name}`}
+          title="删除该自定义角色"
+        >
+          <Trash2 size={14} aria-hidden="true" />
+        </button>
+      )}
+    </div>
   );
 }
 
 /**
- * 角色配置面板（网格下方的 `cfg-agent-detail`）。
+ * 角色配置弹窗（点卡片打开）。
  *
  * 六个覆盖字段 + 「层次来源」标记：高亮 = 本层覆盖，未高亮 = 回退到
  * 「环境配置 → 默认路由模型 → legacy 五列」。清空某个数字/文本输入并保存 = 显式 `null`
@@ -214,6 +227,7 @@ export function AgentTuningPanel({
     try {
       await api.patchAgentConfig(agent.id, patch);
       await onSaved(`已保存角色「${agent.name}」的覆盖值，下一次阶段执行即生效。`);
+      onClose();
     } catch (cause) {
       setNotice({ tone: "bad", text: describeError(cause, "保存失败，请稍后重试。") });
     } finally {
@@ -255,35 +269,61 @@ export function AgentTuningPanel({
   );
 
   return (
-    <section className="cfg-block cfg-agent-detail" aria-label={`${agent.name} 的配置`}>
-      <div className="cfg-block-head">
-        <div className="cfg-block-title">
-          <span className={`cfg-monogram cfg-agent-avatar tint-${active ? "green" : "blue"}`} aria-hidden="true">
-            {monogramOf(agent)}
-          </span>
-          <div>
-            <h3>
-              {agent.name}
-              <Chip tone="blue">{agent.role}</Chip>
-              <Chip tone={agent.status === "running" ? "green" : "slate"}>
-                {STATUS_LABELS[agent.status] ?? agent.status}
-              </Chip>
-              {active && <Chip tone="green">当前阶段</Chip>}
-            </h3>
-            <p>
-              生效 <code>{agent.model}</code>
-              {agent.provider_name ? ` · ${agent.provider_name}` : ` · ${agent.provider}`}
-              {agent.llm_model_id ? ` · 绑定 ${agent.llm_model_id}` : ""}
-            </p>
-          </div>
+    <Modal
+      title={agent.name}
+      subtitle={
+        <>
+          生效 <code>{agent.model}</code>
+          {agent.provider_name ? ` · ${agent.provider_name}` : ` · ${agent.provider}`}
+          {agent.llm_model_id ? ` · 绑定 ${agent.llm_model_id}` : ""}
+          {agent.builtin ? " · 内置角色" : " · 自定义角色"}
+        </>
+      }
+      wide
+      onClose={onClose}
+      footer={
+        <>
+          <button type="submit" form="agent-tuning-form" className="cfg-primary" disabled={saving || Boolean(problem)}>
+            {saving ? "保存中…" : "保存覆盖"}
+          </button>
+          <button type="button" className="cfg-quiet" onClick={() => void clearAll()} disabled={saving}>
+            清除全部覆盖
+          </button>
+          <button
+            type="button"
+            className="cfg-quiet"
+            onClick={() => {
+              setForm(formFromAgent(agent));
+              setNotice(null);
+            }}
+            disabled={saving}
+          >
+            还原表单
+          </button>
+          <button type="button" className="cfg-quiet" onClick={onClose} disabled={saving}>
+            取消
+          </button>
+          <NoticeBar notice={notice} />
+        </>
+      }
+    >
+      <div className="cfg-agent-modal-head">
+        <span className={`cfg-monogram cfg-agent-avatar tint-${active ? "green" : "blue"}`} aria-hidden="true">
+          {monogramOf(agent)}
+        </span>
+        <div>
+          <Chip tone="blue">{agent.role}</Chip>
+          <Chip tone={agent.status === "running" ? "green" : "slate"}>
+            {STATUS_LABELS[agent.status] ?? agent.status}
+          </Chip>
+          {active && <Chip tone="green">当前阶段</Chip>}
+          {agent.builtin ? <Chip tone="blue">内置</Chip> : <Chip tone="slate">自定义</Chip>}
+          {!agent.enabled && <Chip tone="amber">已停用</Chip>}
         </div>
-        <button type="button" className="cfg-quiet" onClick={onClose} aria-label="收起配置面板">
-          <X size={12} aria-hidden="true" />
-          收起
-        </button>
       </div>
 
       <form
+        id="agent-tuning-form"
         className="cfg-form-grid"
         onSubmit={(event) => {
           event.preventDefault();
@@ -416,29 +456,8 @@ export function AgentTuningPanel({
           </div>
           <small>高亮 = 本层覆盖；未高亮 = 回退到「环境配置 → 默认路由模型 → legacy 五列」。</small>
         </div>
-
-        <div className="cfg-row-actions cfg-field-wide">
-          <button type="submit" className="cfg-primary" disabled={saving || Boolean(problem)}>
-            {saving ? "保存中…" : "保存覆盖"}
-          </button>
-          <button type="button" className="cfg-quiet" onClick={() => void clearAll()} disabled={saving}>
-            清除全部覆盖
-          </button>
-          <button
-            type="button"
-            className="cfg-quiet"
-            onClick={() => {
-              setForm(formFromAgent(agent));
-              setNotice(null);
-            }}
-            disabled={saving}
-          >
-            还原表单
-          </button>
-          <NoticeBar notice={notice} />
-        </div>
       </form>
-    </section>
+    </Modal>
   );
 }
 
@@ -448,13 +467,113 @@ export function AgentTuningPanel({
  * 一次 `GET /api/v1/config/agents` 取回全部角色与可选模型；点开方块后在网格下方编辑，
  * 同一时刻只编辑一个角色（`selectedId`），保存后重新拉取，让「生效值」与覆盖标记同步。
  */
+/**
+ * 新建角色弹窗。
+ *
+ * 只登记角色目录条目（id/name/role/description/system_prompt），模型绑定与参数
+ * 在创建后再点开卡片单独调。内置角色 id（collector/analyst/reporter）不可复用。
+ */
+function AgentCreateModal({
+  onClose,
+  onCreated,
+}: {
+  onClose: () => void;
+  onCreated: (message: string) => Promise<void>;
+}) {
+  const [form, setForm] = useState({ id: "", name: "", role: "", description: "" });
+  const [saving, setSaving] = useState(false);
+  const [notice, setNotice] = useState<NoticeState>(null);
+
+  const problem =
+    (!form.id.trim() ? "ID 不能为空。" : "") ||
+    (form.id.length > 50 ? "ID 不能超过 50 个字符。" : "") ||
+    (!/^[A-Za-z0-9._-]+$/.test(form.id) ? "ID 只允许字母、数字与 . _ - 。" : "") ||
+    (!form.name.trim() ? "名称不能为空。" : "") ||
+    (!form.role.trim() ? "角色键不能为空。" : "");
+
+  const edit = (key: keyof typeof form, value: string) => {
+    setForm((current) => ({ ...current, [key]: value }));
+    setNotice(null);
+  };
+
+  const submit = async () => {
+    if (problem) {
+      setNotice({ tone: "bad", text: problem });
+      return;
+    }
+    setSaving(true);
+    try {
+      await api.createAgentRegistry({
+        id: form.id.trim(),
+        name: form.name.trim(),
+        role: form.role.trim(),
+        description: form.description.trim() || null,
+      });
+      await onCreated(`已新建角色「${form.name.trim()}」，点开卡片即可绑定模型与调参。`);
+      onClose();
+    } catch (cause) {
+      setNotice({ tone: "bad", text: describeError(cause, "新建失败，请稍后重试。") });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Modal
+      title="新建角色"
+      subtitle="登记一个自定义角色条目；创建后再点开卡片绑定模型与参数。"
+      onClose={onClose}
+      footer={
+        <>
+          <button type="button" className="cfg-primary" onClick={() => void submit()} disabled={saving || Boolean(problem)}>
+            {saving ? "登记中…" : "登记角色"}
+          </button>
+          <button type="button" className="cfg-quiet" onClick={onClose} disabled={saving}>
+            取消
+          </button>
+          <NoticeBar notice={notice} />
+        </>
+      }
+    >
+      <div className="cfg-form-grid">
+        <Field label="ID" htmlFor="ag-id" hint="1–50 字符，仅 A-Za-z0-9._-；内置角色 id 不可复用。" tone={form.id.trim() && problem ? "bad" : undefined}>
+          <input
+            id="ag-id"
+            value={form.id}
+            onChange={(event) => edit("id", event.target.value)}
+            placeholder="summarizer"
+            autoComplete="off"
+            spellCheck={false}
+          />
+        </Field>
+        <Field label="名称" htmlFor="ag-name" hint="界面展示名，如「摘要 Agent」。">
+          <input id="ag-name" value={form.name} onChange={(event) => edit("name", event.target.value)} autoComplete="off" />
+        </Field>
+        <Field label="角色键" htmlFor="ag-role" hint="角色语义标识（自由文本），如 summarizer。">
+          <input id="ag-role" value={form.role} onChange={(event) => edit("role", event.target.value)} autoComplete="off" spellCheck={false} />
+        </Field>
+        <Field label="职责说明" htmlFor="ag-desc" hint="可选；卡片与详情里的说明文字。" wide>
+          <textarea
+            id="ag-desc"
+            rows={3}
+            value={form.description}
+            onChange={(event) => edit("description", event.target.value)}
+            placeholder="收集、归纳并输出摘要。"
+          />
+        </Field>
+      </div>
+    </Modal>
+  );
+}
+
 export function AgentPanel({ activeAgentId }: { activeAgentId?: string }) {
   const [data, setData] = useState<AgentConfigList | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState<NoticeState>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const detailRef = useRef<HTMLDivElement>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -473,36 +592,52 @@ export function AgentPanel({ activeAgentId }: { activeAgentId?: string }) {
     void load();
   }, [load]);
 
-  useEffect(() => {
-    if (selectedId) detailRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
-  }, [selectedId]);
-
   const afterSave = async (message: string) => {
     await load();
     setNotice({ tone: "ok", text: message });
   };
 
-  const selected = data?.items.find((agent) => agent.id === selectedId) ?? null;
+  const remove = async (agent: Agent) => {
+    if (!window.confirm(`删除自定义角色「${agent.name}」？其模型覆盖配置会一并清除。`)) return;
+    setBusy(true);
+    try {
+      await api.deleteAgentRegistry(agent.id);
+      await load();
+      setNotice({ tone: "ok", text: `已删除角色 ${agent.id}。` });
+    } catch (cause) {
+      setNotice({ tone: "bad", text: describeError(cause, "删除失败，请稍后重试。") });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const editing = data?.items.find((agent) => agent.id === editingId) ?? null;
 
   return (
     <div className="cfg-stack">
       <section className="cfg-block">
         <div className="cfg-block-head">
           <div>
-            <h3>角色路由</h3>
+            <h3>角色目录</h3>
             <p>
               {data
                 ? `${data.items.length} 个角色 · 可绑定 ${data.available_models.length} 个注册表模型`
                 : "正在读取角色目录"}
             </p>
           </div>
-          <button type="button" className="cfg-quiet" onClick={() => void load()} disabled={loading}>
-            重新读取
-          </button>
+          <div className="cfg-row-actions">
+            <button type="button" className="cfg-primary" onClick={() => setCreateOpen(true)} disabled={busy}>
+              <Plus size={13} aria-hidden="true" />
+              新建角色
+            </button>
+            <button type="button" className="cfg-quiet" onClick={() => void load()} disabled={loading}>
+              重新读取
+            </button>
+          </div>
         </div>
         <p className="cfg-hint">
-          点开一张角色卡片配置它的模型绑定与参数：只需绑定一个注册表模型，端点、凭据与特化参数都会跟着该条目走；
-          覆盖值按角色粒度保存，下次阶段执行即生效，无需重启进程。
+          点开一张角色卡片在弹窗里配置它的模型绑定与参数；内置三角色（信息收集 / 数据分析 / 报告生成）
+          不可删除，自定义角色可自由增删。覆盖值按角色粒度保存，下次阶段执行即生效。
         </p>
         {error && (
           <p role="alert" className="cfg-alert">
@@ -511,7 +646,7 @@ export function AgentPanel({ activeAgentId }: { activeAgentId?: string }) {
         )}
         {loading && !data && <p className="cfg-hint">加载中…</p>}
         {data && !data.items.length && (
-          <EmptyState title="没有可配置的角色" hint="请确认 Agent 角色目录已加载。" />
+          <EmptyState title="没有可配置的角色" hint="点击「新建角色」登记一个，或确认角色目录已加载。" />
         )}
         {data && !data.available_models.length && data.items.length > 0 && (
           <p className="cfg-hint">
@@ -527,29 +662,31 @@ export function AgentPanel({ activeAgentId }: { activeAgentId?: string }) {
               key={agent.id}
               agent={agent}
               active={agent.id === activeAgentId}
-              selected={agent.id === selectedId}
               onOpen={() => {
-                setSelectedId((current) => (current === agent.id ? null : agent.id));
+                setEditingId(agent.id);
                 setNotice(null);
               }}
+              onDelete={agent.builtin ? undefined : () => void remove(agent)}
             />
           ))}
         </div>
       )}
 
-      {selected && (
-        <div ref={detailRef}>
-          <AgentTuningPanel
-            agent={selected}
-            availableModels={data?.available_models ?? []}
-            active={selected.id === activeAgentId}
-            onSaved={afterSave}
-            onClose={() => setSelectedId(null)}
-          />
-        </div>
+      <NoticeBar notice={notice} />
+
+      {editing && (
+        <AgentTuningPanel
+          agent={editing}
+          availableModels={data?.available_models ?? []}
+          active={editing.id === activeAgentId}
+          onSaved={afterSave}
+          onClose={() => setEditingId(null)}
+        />
       )}
 
-      <NoticeBar notice={notice} />
+      {createOpen && (
+        <AgentCreateModal onClose={() => setCreateOpen(false)} onCreated={afterSave} />
+      )}
     </div>
   );
 }

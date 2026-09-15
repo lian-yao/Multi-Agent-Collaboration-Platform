@@ -14,7 +14,6 @@ import {
   EmptyState,
   Field,
   Modal,
-  Monogram,
   NoticeBar,
   Switch,
   describeError,
@@ -23,6 +22,7 @@ import {
   parsePairs,
   type NoticeState,
 } from "./shared";
+import { ProviderMark } from "./providerIcons";
 import { ModelSection } from "./ModelSection";
 
 /* -------------------------------------------------------------------------- */
@@ -84,8 +84,9 @@ function PresetPicker({
             className={`cfg-preset${value === preset.preset_type ? " selected" : ""}`}
             onClick={() => onChange(preset)}
           >
-            <Monogram
-              text={preset.monogram ?? preset.preset_type.slice(0, 2)}
+            <ProviderMark
+              presetType={preset.preset_type}
+              label={preset.monogram ?? preset.preset_type.slice(0, 2)}
               tint={preset.tint}
               size={30}
             />
@@ -289,8 +290,9 @@ function ProviderFormModal({
       {!editing && <PresetPicker catalog={catalog} value={form.preset_type} onChange={choosePreset} />}
 
       <div className="cfg-provider-preview">
-        <Monogram
-          text={preset.monogram ?? preset.preset_type.slice(0, 2)}
+        <ProviderMark
+          presetType={preset.preset_type}
+          label={preset.monogram ?? preset.preset_type.slice(0, 2)}
           tint={preset.tint}
           size={38}
         />
@@ -564,8 +566,9 @@ export function ProviderPanel({ catalog }: { catalog: ProviderPresetCatalog | nu
                   onClick={() => void select(provider.id)}
                   aria-current={selectedId === provider.id}
                 >
-                  <Monogram
-                    text={preset?.monogram ?? provider.preset_type.slice(0, 2)}
+                  <ProviderMark
+                    presetType={provider.preset_type}
+                    label={preset?.monogram ?? provider.preset_type.slice(0, 2)}
                     tint={preset?.tint}
                     size={30}
                   />
@@ -607,8 +610,9 @@ export function ProviderPanel({ catalog }: { catalog: ProviderPresetCatalog | nu
             <section className="cfg-block">
               <div className="cfg-block-head">
                 <div className="cfg-block-title">
-                  <Monogram
-                    text={presetOf(detail.preset_type)?.monogram ?? detail.preset_type.slice(0, 2)}
+                  <ProviderMark
+                    presetType={detail.preset_type}
+                    label={presetOf(detail.preset_type)?.monogram ?? detail.preset_type.slice(0, 2)}
                     tint={presetOf(detail.preset_type)?.tint}
                     size={38}
                   />

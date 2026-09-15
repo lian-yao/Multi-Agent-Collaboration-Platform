@@ -1,8 +1,8 @@
 import { useCallback, useMemo, useState, type ChangeEvent, type FormEvent } from "react";
+import { ChevronDown } from "lucide-react";
 import { api } from "../api/client";
 import {
   CUSTOM_PARAMETER_TYPES,
-  MODALITIES,
   REASONING_TYPES,
   type CustomParameter,
   type CustomParameterType,
@@ -30,7 +30,6 @@ import {
   parseInteger,
   parseLines,
   sameParameters,
-  sameStrings,
   type NoticeState,
 } from "./shared";
 
@@ -39,12 +38,6 @@ const REASONING_LABELS: Record<string, string> = {
   openai: "OpenAI 推理",
   gemini: "Gemini 推理",
   anthropic: "Anthropic 推理",
-};
-
-const MODALITY_LABELS: Record<string, string> = {
-  text: "文本",
-  vision: "图像",
-  pdf: "PDF",
 };
 
 const REASONING_TINT: Record<string, string> = {
@@ -67,7 +60,6 @@ type ModelForm = {
   top_p: string;
   max_context_tokens: string;
   max_output_tokens: string;
-  modalities: string[];
   custom_parameters: CustomParameter[];
 };
 
@@ -93,7 +85,6 @@ function formFromModel(model: ModelRegistry): ModelForm {
     top_p: AS_TEXT(model.top_p),
     max_context_tokens: AS_TEXT(model.max_context_tokens),
     max_output_tokens: AS_TEXT(model.max_output_tokens),
-    modalities: model.modalities,
     custom_parameters: model.custom_parameters.map((item) => ({ ...item })),
   };
 }
@@ -156,9 +147,6 @@ function buildModelPatch(model: ModelRegistry, form: ModelForm): ModelRegistryUp
     form.max_output_tokens.trim() ? Number(form.max_output_tokens.trim()) : null,
     model.max_output_tokens,
   );
-  if (!sameStrings(form.modalities, model.modalities)) {
-    patch.modalities = form.modalities;
-  }
   if (!sameParameters(form.custom_parameters, model.custom_parameters)) {
     patch.custom_parameters = form.custom_parameters.map((item) => ({ ...item, key: item.key.trim() }));
   }
@@ -261,20 +249,10 @@ function ModelTuningForm({
   const [notice, setNotice] = useState<NoticeState>(null);
   const problem = formProblem(form);
 
-  /** 文本/数字类字段的统一 setter；`enabled`、`modalities`、`custom_parameters` 另走各自入口。 */
+  /** 文本/数字类字段的统一 setter；`enabled` 与 `custom_parameters` 另走各自入口。 */
   const edit = (key: TextField) => (event: ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
     const value = event.target.value;
     setForm((current) => ({ ...current, [key]: value }) as ModelForm);
-    setNotice(null);
-  };
-
-  const toggleModality = (modality: string) => {
-    setForm((current) => ({
-      ...current,
-      modalities: current.modalities.includes(modality)
-        ? current.modalities.filter((item) => item !== modality)
-        : [...current.modalities, modality],
-    }));
     setNotice(null);
   };
 
@@ -409,22 +387,6 @@ function ModelTuningForm({
             onChange={edit("max_output_tokens")}
           />
         </Field>
-        <div className="cfg-field">
-          <span className="cfg-label">能力</span>
-          <div className="cfg-checks">
-            {MODALITIES.map((modality) => (
-              <label className="cfg-check" key={modality}>
-                <input
-                  type="checkbox"
-                  checked={form.modalities.includes(modality)}
-                  onChange={() => toggleModality(modality)}
-                />
-                {MODALITY_LABELS[modality]}
-              </label>
-            ))}
-          </div>
-          <small>用于能力筛选与前端提示，不参与模型构造。</small>
-        </div>
       </div>
 
       <CustomParameterEditor
@@ -470,7 +432,6 @@ function ModelCreateModal({
     top_p: "",
     max_context_tokens: "",
     max_output_tokens: "",
-    modalities: ["text"],
     custom_parameters: [],
   }));
   const [saving, setSaving] = useState(false);
@@ -498,7 +459,6 @@ function ModelCreateModal({
         max_context_tokens: form.max_context_tokens.trim() ? Number(form.max_context_tokens.trim()) : null,
         max_output_tokens: form.max_output_tokens.trim() ? Number(form.max_output_tokens.trim()) : null,
         custom_parameters: form.custom_parameters.map((item) => ({ ...item, key: item.key.trim() })),
-        modalities: form.modalities,
       };
       const created = await api.createModelRegistry(payload);
       await onSaved(`已登记模型 ${created.model}。`);
@@ -603,7 +563,6 @@ type ImportDefaults = {
   max_context_tokens: string;
   max_output_tokens: string;
   reasoning_type: string;
-  modalities: string[];
 };
 
 function BatchImportModal({
@@ -632,7 +591,6 @@ function BatchImportModal({
     max_context_tokens: "",
     max_output_tokens: "",
     reasoning_type: "",
-    modalities: [],
   });
 
   // 远端给的是「导入前」的快照；导入成功后父级会刷新 provider.models，
@@ -700,7 +658,6 @@ function BatchImportModal({
     if (defaults.max_context_tokens.trim()) payload.max_context_tokens = Number(defaults.max_context_tokens.trim());
     if (defaults.max_output_tokens.trim()) payload.max_output_tokens = Number(defaults.max_output_tokens.trim());
     if (defaults.reasoning_type) payload.reasoning_type = defaults.reasoning_type as ReasoningType;
-    if (defaults.modalities.length) payload.modalities = defaults.modalities;
     return Object.keys(payload).length ? payload : undefined;
   };
 
@@ -908,28 +865,6 @@ function BatchImportModal({
               ))}
             </select>
           </Field>
-          <div className="cfg-field">
-            <span className="cfg-label">能力标签</span>
-            <div className="cfg-checks">
-              {MODALITIES.map((modality) => (
-                <label className="cfg-check" key={modality}>
-                  <input
-                    type="checkbox"
-                    checked={defaults.modalities.includes(modality)}
-                    onChange={() =>
-                      setDefaults((current) => ({
-                        ...current,
-                        modalities: current.modalities.includes(modality)
-                          ? current.modalities.filter((item) => item !== modality)
-                          : [...current.modalities, modality],
-                      }))
-                    }
-                  />
-                  {MODALITY_LABELS[modality]}
-                </label>
-              ))}
-            </div>
-          </div>
         </div>
       </section>
 
@@ -1076,13 +1011,33 @@ export function ModelSection({
             className={`cfg-model-row${model.enabled ? "" : " off"}${expanded === model.id ? " open" : ""}`}
             key={model.id}
           >
-            <div className="cfg-model-main">
-              <Switch
-                checked={model.enabled}
-                disabled={busyId === model.id}
-                onChange={() => void toggleEnabled(model)}
-                label={`${model.enabled ? "停用" : "启用"} ${model.model}`}
-              />
+            {/* 整卡即展开/收起的手柄（用户 2026-09-16：去掉「特化调参」按钮）。
+                内部的开关与删除按钮各自阻断冒泡，避免误触发展开。 */}
+            <div
+              className="cfg-model-main"
+              role="button"
+              tabIndex={0}
+              aria-expanded={expanded === model.id}
+              onClick={() => setExpanded((current) => (current === model.id ? null : model.id))}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  setExpanded((current) => (current === model.id ? null : model.id));
+                }
+              }}
+            >
+              <span
+                className="cfg-model-switch"
+                onClick={(event) => event.stopPropagation()}
+                onKeyDown={(event) => event.stopPropagation()}
+              >
+                <Switch
+                  checked={model.enabled}
+                  disabled={busyId === model.id}
+                  onChange={() => void toggleEnabled(model)}
+                  label={`${model.enabled ? "停用" : "启用"} ${model.model}`}
+                />
+              </span>
               <div className="cfg-model-id">
                 <b>{model.name || model.model}</b>
                 <code>{model.model}</code>
@@ -1097,11 +1052,6 @@ export function ModelSection({
                 {model.top_p !== null && <Chip tone="blue">P {model.top_p}</Chip>}
                 {model.max_output_tokens !== null && <Chip tone="indigo">输出 {model.max_output_tokens}</Chip>}
                 {model.max_context_tokens !== null && <Chip tone="indigo">上下文 {model.max_context_tokens}</Chip>}
-                {model.modalities.map((modality) => (
-                  <Chip tone="teal" key={modality}>
-                    {MODALITY_LABELS[modality] ?? modality}
-                  </Chip>
-                ))}
                 {model.custom_parameters.length > 0 && (
                   <Chip tone="purple" title={model.custom_parameters.map((item) => item.key).join("、")}>
                     特化 {model.custom_parameters.length}
@@ -1111,20 +1061,16 @@ export function ModelSection({
               <div className="cfg-row-actions">
                 <button
                   type="button"
-                  className="cfg-quiet"
-                  onClick={() => setExpanded((current) => (current === model.id ? null : model.id))}
-                  aria-expanded={expanded === model.id}
-                >
-                  {expanded === model.id ? "收起调参" : "特化调参"}
-                </button>
-                <button
-                  type="button"
                   className="cfg-quiet danger"
-                  onClick={() => void remove(model)}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    void remove(model);
+                  }}
                   disabled={busyId === model.id}
                 >
                   删除
                 </button>
+                <ChevronDown size={15} className="cfg-model-chevron" aria-hidden="true" />
               </div>
             </div>
             {expanded === model.id && (

@@ -86,7 +86,7 @@ try {
 } catch (cause) {
   check("Agent 团队页的角色面板可渲染", false, cause instanceof Error ? cause.message : String(cause));
 }
-check("角色面板用「角色路由」措辞", teamPage.includes("角色路由"));
+check("角色面板用「角色目录」措辞", teamPage.includes("角色目录"));
 
 /* ---- 单个角色方块（props 驱动）：摘要要齐，表单不在卡片里 ---- */
 
@@ -104,12 +104,15 @@ const roleAgent: Agent = {
   reasoning_type: "none",
   status: "running",
   override_keys: ["temperature"],
+  builtin: true,
+  description: null,
+  enabled: true,
 };
 
 let card = "";
 try {
   card = renderToStaticMarkup(
-    <AgentRoleCard agent={roleAgent} active selected onOpen={() => undefined} />,
+    <AgentRoleCard agent={roleAgent} active onOpen={() => undefined} />,
   );
   check("角色方块可渲染", card.length > 200, `长度 ${card.length}`);
 } catch (cause) {
@@ -119,11 +122,11 @@ try {
 check("方块显示角色名与生效模型", card.includes("数据分析 Agent") && card.includes("gpt-5.5"));
 check("方块标出当前阶段", card.includes("当前阶段"));
 check("方块标出覆盖项数", card.includes("覆盖 1 项"));
-check("方块是整块可点的按钮且带选中态", card.includes("<button") && card.includes('aria-pressed="true"'));
+check("方块是整块可点的按钮", card.includes("<button") && card.includes("配置「数据分析 Agent」"));
 check(
   "表单不在方块里",
   !card.includes("清除全部覆盖") && !card.includes("层次来源") && !card.includes("绑定与调参"),
-  "表单应移出网格，放进下方的配置面板",
+  "表单应放进弹窗，不在卡片网格里",
 );
 
 /* ---- 角色配置面板（props 驱动）：表单在这里 ---- */
@@ -240,7 +243,7 @@ try {
   check(
     "配置页与记录页不再整页居中",
     !centered(styles) && !centered(config),
-    "`.config-page` 不应再有 `max-width` + `margin:0 auto`；标题与副路由必须左对齐",
+    "`.config-page` 自身不应有 `max-width` + `margin:0 auto`；限宽居中只落在直接子元素上",
   );
   check(
     "副路由容器只占内容宽度",
@@ -248,9 +251,10 @@ try {
     "`.ui-tabs` 需要 width:fit-content，否则会撑满一行",
   );
   check(
-    "内容列限宽居中（标题与副路由仍左置）",
-    /\.config-page\s*>\s*:not\(\.page-heading\):not\(\.ui-tabs\)\s*\{[^}]*max-width:\s*1180px[^}]*margin-inline:\s*auto/.test(styles),
-    "内容子元素需要 max-width:1180px + margin-inline:auto，否则宽屏下详情卡拉满整行",
+    "整页共用一条限宽居中的内容轴（标题、副路由与内容对齐）",
+    /\.config-page\s*>\s*\*\s*\{[^}]*max-width:\s*1180px[^}]*margin-inline:\s*auto/.test(styles) &&
+      /\.config-page\s*>\s*\.ui-tabs\s*\{[^}]*width:\s*fit-content/.test(styles),
+    "`.config-page > *` 需要 max-width:1180px + margin-inline:auto，且 `.config-page > .ui-tabs` 保持 fit-content",
   );
 } catch (cause) {
   check("读得到样式表以校验版式", false, cause instanceof Error ? cause.message : String(cause));
@@ -284,7 +288,6 @@ const detail: ProviderRegistryDetail = {
       max_context_tokens: 128000,
       max_output_tokens: 2048,
       custom_parameters: [{ key: "thinking_budget", value: "2048", type: "number" }],
-      modalities: ["text", "vision"],
       created_at: "2026-09-15T08:00:00Z",
       updated_at: "2026-09-15T08:00:00Z",
       updated_by: null,
@@ -301,7 +304,6 @@ const detail: ProviderRegistryDetail = {
       max_context_tokens: null,
       max_output_tokens: null,
       custom_parameters: [],
-      modalities: [],
       created_at: null,
       updated_at: null,
       updated_by: null,
@@ -337,9 +339,11 @@ try {
 }
 
 check("渲染出两条模型", section.includes("Stub Alpha") && section.includes("stub-beta"));
-check("渲染出特化徽标", section.includes("OpenAI 推理") && section.includes("特化 1") && section.includes("图像"));
+check("渲染出特化徽标", section.includes("OpenAI 推理") && section.includes("特化 1") && section.includes("上下文 128000"));
 check("渲染出启用/停用开关", (section.match(/role="switch"/g) ?? []).length >= 2, String((section.match(/role="switch"/g) ?? []).length));
 check("渲染出批量引入入口", section.includes("批量引入") && section.includes("手动登记"));
+check("模型行是整卡展开手柄且不再有独立调参按钮", section.includes("aria-expanded") && !section.includes("特化调参") && section.includes("cfg-model-chevron"));
+check("模型行不再渲染无效的能力徽标", !section.includes("能力") && !section.includes("图像"));
 
 const passed = results.filter(([ok]) => ok).length;
 for (const [ok, label] of results) console.log(`${ok ? "PASS" : "FAIL"}  ${label}`);

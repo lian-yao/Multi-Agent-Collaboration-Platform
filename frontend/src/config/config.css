@@ -149,6 +149,19 @@
 }
 
 
+/* Provider 品牌图标位（providerIcons.tsx 的 ProviderMark）：
+ * 白底方块托彩色品牌标，无图标的预设回退上面的字母 monogram。 */
+.cfg-mark {
+  display:grid;
+  flex:0 0 auto;
+  place-items:center;
+  border:1px solid var(--cfg-line-soft, #e8f0f3);
+  border-radius:9px;
+  background:#fff;
+  color:var(--cfg-ink, #33505d)
+}
+
+
 
 .cfg-stack {
   display:grid;
@@ -931,7 +944,33 @@
   flex-wrap:wrap;
   align-items:center;
   gap:11px;
-  padding:12px 14px
+  padding:12px 14px;
+  /* 整卡即展开/收起手柄（无独立「特化调参」按钮） */
+  cursor:pointer
+}
+
+
+.cfg-model-main:focus-visible {
+  outline:2px solid #39839c;
+  outline-offset:-2px
+}
+
+
+.cfg-model-switch {
+  display:inline-flex;
+  flex:0 0 auto
+}
+
+
+.cfg-model-chevron {
+  flex:0 0 auto;
+  color:var(--cfg-ink-4,#a4b2b8);
+  transition:transform var(--cfg-ease,.16s cubic-bezier(.4,0,.2,1))
+}
+
+
+.cfg-model-row.open .cfg-model-chevron {
+  transform:rotate(180deg)
 }
 
 
@@ -1386,10 +1425,9 @@
 
 
 .cfg-agent-card {
+  position:relative;
   display:grid;
-  gap:12px;
   width:100%;
-  padding:14px;
   border:1px solid var(--cfg-line);
   border-radius:var(--cfg-radius);
   background:var(--cfg-surface);
@@ -1397,6 +1435,95 @@
   color:inherit;
   text-align:left;
   appearance:none
+}
+
+
+
+.cfg-agent-card.disabled {
+  opacity:.62
+}
+
+
+
+.cfg-agent-open {
+  display:grid;
+  gap:12px;
+  padding:14px;
+  border:0;
+  background:transparent;
+  color:inherit;
+  text-align:left;
+  cursor:pointer;
+  appearance:none
+}
+
+
+
+.cfg-agent-delete {
+  position:absolute;
+  top:8px;
+  right:8px;
+  display:grid;
+  width:26px;
+  height:26px;
+  padding:0;
+  place-items:center;
+  border:1px solid transparent;
+  border-radius:7px;
+  background:transparent;
+  color:var(--cfg-ink-4);
+  cursor:pointer;
+  opacity:0;
+  transition:opacity .12s ease,background .12s ease,color .12s ease
+}
+
+
+
+.cfg-agent-card:hover .cfg-agent-delete,
+.cfg-agent-card:focus-within .cfg-agent-delete {
+  opacity:1
+}
+
+
+
+.cfg-agent-delete:hover {
+  border-color:var(--cfg-danger-soft,#f1c9c9);
+  background:#fdeeee;
+  color:#b0483f
+}
+
+
+
+.cfg-agent-off {
+  flex:0 0 auto;
+  padding:2px 6px;
+  border-radius:999px;
+  background:#f5f0e6;
+  color:#8a7a52;
+  font-size:9px;
+  font-style:normal;
+  line-height:1.5
+}
+
+
+
+.cfg-agent-modal-head {
+  display:flex;
+  align-items:center;
+  gap:10px;
+  margin-bottom:16px;
+  padding:10px 12px;
+  border:1px solid var(--cfg-line-faint);
+  border-radius:var(--cfg-radius);
+  background:var(--cfg-surface-muted,#f7fafb)
+}
+
+
+
+.cfg-agent-modal-head > div {
+  display:flex;
+  flex-wrap:wrap;
+  gap:6px
 }
 
 
@@ -1598,9 +1725,7 @@
   inset:0;
   z-index:60;
   display:flex;
-  align-items:flex-start;
-  justify-content:center;
-  padding:5vh 16px 16px;
+  padding:24px 16px;
   background:#14232d61;
   overflow-y:auto
 }
@@ -1608,6 +1733,10 @@
 
 
 .cfg-modal {
+  /* 两轴安全居中（用户 2026-09-16 要求弹窗上下也置中）：
+   * 视口有富余时 margin:auto 在横竖两轴都居中；弹窗高于视口时自动贴顶，
+   * 配合 backdrop 的 overflow-y:auto 依然能滚到被遮住的内容。 */
+  margin:auto;
   width:min(560px,100%);
   border:1px solid var(--cfg-line);
   border-radius:12px;

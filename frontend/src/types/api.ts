@@ -64,9 +64,6 @@ export interface Workflow {
 export const REASONING_TYPES = ["none", "openai", "gemini", "anthropic"] as const;
 export type ReasoningType = (typeof REASONING_TYPES)[number];
 
-export const MODALITIES = ["text", "vision", "pdf"] as const;
-export type Modality = (typeof MODALITIES)[number];
-
 export const CUSTOM_PARAMETER_TYPES = ["text", "number", "boolean", "json"] as const;
 export type CustomParameterType = (typeof CUSTOM_PARAMETER_TYPES)[number];
 
@@ -109,6 +106,10 @@ export interface Agent {
   status: string;
   /** 当前**显式覆盖**的字段名（未列出的字段来自环境配置或默认路由）。 */
   override_keys: string[];
+  /** 内置流水线角色（不可删除）；`false` = 自定义角色。 */
+  builtin: boolean;
+  description: string | null;
+  enabled: boolean;
 }
 
 export interface Provider {
@@ -191,6 +192,16 @@ export interface AgentConfigUpdate {
   top_p?: number | null;
   max_output_tokens?: number | null;
   reasoning_type?: ReasoningType | null;
+}
+
+/** `POST /api/v1/config/agents` 的请求体：新建自定义角色。 */
+export interface AgentRegistryCreate {
+  id: string;
+  name: string;
+  role: string;
+  description?: string | null;
+  system_prompt?: string | null;
+  enabled?: boolean;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -294,7 +305,6 @@ export interface ModelRegistry {
   max_context_tokens: number | null;
   max_output_tokens: number | null;
   custom_parameters: CustomParameter[];
-  modalities: string[];
   created_at: string | null;
   updated_at: string | null;
   updated_by: string | null;
@@ -317,7 +327,6 @@ export interface ModelRegistryCreate {
   max_context_tokens?: number | null;
   max_output_tokens?: number | null;
   custom_parameters?: CustomParameter[];
-  modalities?: string[];
 }
 
 /** `provider_id` 不在此接口范围（换 Provider 等于换条目）。 */
@@ -331,7 +340,6 @@ export interface ModelRegistryUpdate {
   max_context_tokens?: number | null;
   max_output_tokens?: number | null;
   custom_parameters?: CustomParameter[];
-  modalities?: string[];
 }
 
 export interface ModelBatchImportRequest {
@@ -346,7 +354,6 @@ export interface ModelBatchImportRequest {
     max_context_tokens?: number | null;
     max_output_tokens?: number | null;
     reasoning_type?: ReasoningType;
-    modalities?: string[];
   };
 }
 

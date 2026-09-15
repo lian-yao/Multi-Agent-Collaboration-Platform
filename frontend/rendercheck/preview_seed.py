@@ -34,6 +34,7 @@ AGENTS = [
         "llm_model_id": "openai-main:gpt-5.5", "temperature": 0.3, "top_p": None,
         "max_output_tokens": None, "reasoning_type": "openai", "status": "running",
         "override_keys": ["temperature"],
+        "builtin": True, "description": "收集、检索并整理任务主题相关的事实与要点。", "enabled": True,
     },
     {
         "id": "analyst", "name": "数据分析 Agent", "role": "analyst",
@@ -41,6 +42,7 @@ AGENTS = [
         "llm_model_id": "anthropic-main:claude-sonnet-4", "temperature": 0.2, "top_p": 0.9,
         "max_output_tokens": 8192, "reasoning_type": "anthropic", "status": "running",
         "override_keys": ["temperature", "top_p", "max_output_tokens"],
+        "builtin": True, "description": "基于信息清单进行归纳、对比与提炼。", "enabled": True,
     },
     {
         "id": "reporter", "name": "报告生成 Agent", "role": "reporter",
@@ -48,12 +50,14 @@ AGENTS = [
         "llm_model_id": "google-main:gemini-2.5-pro", "temperature": 0.5, "top_p": None,
         "max_output_tokens": None, "reasoning_type": "gemini", "status": "idle",
         "override_keys": [],
+        "builtin": True, "description": "整合分析摘要，生成结构清晰的正式报告。", "enabled": True,
     },
     {
         "id": "planner", "name": "任务规划 Agent", "role": "planner",
         "model": "deepseek-v3.2", "provider": "deepseek-main", "provider_name": "DeepSeek 端点",
         "llm_model_id": None, "temperature": 0.1, "top_p": None, "max_output_tokens": None,
         "reasoning_type": "none", "status": "idle", "override_keys": [],
+        "builtin": False, "description": "拆解任务并规划执行步骤（自定义角色）。", "enabled": True,
     },
 ]
 
@@ -85,24 +89,24 @@ MODELS = [
     {"id": "openai-main:gpt-5.5", "provider_id": "openai-main", "model": "gpt-5.5", "name": "GPT-5.5",
      "enabled": True, "reasoning_type": "openai", "temperature": 0.3, "top_p": None,
      "max_context_tokens": 200000, "max_output_tokens": 16384, "custom_parameters": [],
-     "modalities": ["text", "vision"], "created_at": iso(-86400), "updated_at": iso(-3600), "updated_by": None},
+     "created_at": iso(-86400), "updated_at": iso(-3600), "updated_by": None},
     {"id": "openai-main:gpt-5.5-mini", "provider_id": "openai-main", "model": "gpt-5.5-mini", "name": "GPT-5.5 mini",
      "enabled": True, "reasoning_type": "openai", "temperature": None, "top_p": None,
      "max_context_tokens": 128000, "max_output_tokens": None, "custom_parameters": [],
-     "modalities": ["text"], "created_at": iso(-86400), "updated_at": None, "updated_by": None},
+     "created_at": iso(-86400), "updated_at": None, "updated_by": None},
     {"id": "anthropic-main:claude-sonnet-4", "provider_id": "anthropic-main", "model": "claude-sonnet-4",
      "name": "Claude Sonnet 4", "enabled": True, "reasoning_type": "anthropic", "temperature": 0.2,
      "top_p": 0.9, "max_context_tokens": 200000, "max_output_tokens": 8192,
      "custom_parameters": [{"key": "thinking_budget", "value": "4096", "type": "number"}],
-     "modalities": ["text", "vision", "pdf"], "created_at": iso(-172800), "updated_at": iso(-7200), "updated_by": None},
+     "created_at": iso(-172800), "updated_at": iso(-7200), "updated_by": None},
     {"id": "google-main:gemini-2.5-pro", "provider_id": "google-main", "model": "gemini-2.5-pro",
      "name": "Gemini 2.5 Pro", "enabled": True, "reasoning_type": "gemini", "temperature": 0.5,
      "top_p": None, "max_context_tokens": 1000000, "max_output_tokens": 65536, "custom_parameters": [],
-     "modalities": ["text", "vision", "pdf"], "created_at": iso(-259200), "updated_at": None, "updated_by": None},
+     "created_at": iso(-259200), "updated_at": None, "updated_by": None},
     {"id": "vllm-local:qwen3-32b", "provider_id": "vllm-local", "model": "qwen3-32b", "name": None,
      "enabled": False, "reasoning_type": "none", "temperature": None, "top_p": None,
      "max_context_tokens": 32768, "max_output_tokens": None, "custom_parameters": [],
-     "modalities": ["text"], "created_at": iso(-604800), "updated_at": None, "updated_by": None},
+     "created_at": iso(-604800), "updated_at": None, "updated_by": None},
 ]
 
 MCP_SERVERS = [

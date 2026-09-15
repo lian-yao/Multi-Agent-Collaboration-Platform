@@ -1,8 +1,9 @@
 /* styles.css — 全局设计令牌、外壳与页面版式
  *
  * 全站唯一的全局样式表，因此也是唯一的令牌来源（--cfg-* 与基础变量都写在 :root）。
- * 页面级版式约定：标题（.page-heading）与副路由（.ui-tabs）左对齐全宽、不居中；
- * 其下的内容列限宽 1180px 居中——宽屏下卡片不再拉满整行（用户 2026-09-15 明确要求）。
+ * 页面级版式约定：`.config-page` 的全部直接子元素共用一条限宽 1180px 的内容轴
+ * 居中——宽屏下卡片不拉满整行，标题/副路由/当前任务条/内容也始终对齐
+ * （用户 2026-09-16 反馈：标题贴最左、内容飘中间的两截式版式看着像坏掉了）。
  */
 
 :root {
@@ -2430,14 +2431,18 @@ svg {
   min-width:0
 }
 
-/* 内容列：标题与副路由保持左置全宽，其下内容限宽居中。
- * .config-page 自身不许再有 max-width/margin:auto（见渲染冒烟的版式断言），
- * 限宽只落在内容子元素上——副路由下面那行提示（cfg-alert）、面板容器、
- * 团队页的 AgentPanel 根节点都会被这条规则罩住。 */
-.config-page > :not(.page-heading):not(.ui-tabs) {
+/* 内容列：整页共用一条限宽居中的内容轴——标题、副路由、当前任务条与面板
+ * 的左缘全部对齐（用户 2026-09-16 要求修复两截式版式）。
+ * .config-page 自身不许再有 max-width/margin:auto（见渲染冒烟的版式断言）；
+ * 副路由仍是 fit-content（page-tabs.css），这里显式压回，避免 width:100% 争抢。 */
+.config-page > * {
   width:100%;
   max-width:1180px;
   margin-inline:auto
+}
+
+.config-page > .ui-tabs {
+  width:fit-content
 }
 
 

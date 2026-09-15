@@ -2,6 +2,7 @@ import type {
   Agent,
   AgentConfigList,
   AgentConfigUpdate,
+  AgentRegistryCreate,
   DataPage,
   McpCompactToolList,
   McpDiscovery,
@@ -245,5 +246,11 @@ export const api = {
     json<Agent>(`/api/v1/config/agents/${encodeURIComponent(id)}`, {
       method: "PATCH",
       body: JSON.stringify(payload),
+    }),
+  createAgentRegistry: (payload: AgentRegistryCreate) =>
+    json<Agent>("/api/v1/config/agents", body(payload)),
+  deleteAgentRegistry: (id: string) =>
+    noContent(`/api/v1/config/agents/${encodeURIComponent(id)}`, {
+      method: "DELETE",
     }),
 };
