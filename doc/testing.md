@@ -55,7 +55,7 @@ cd deploy; .\start.ps1                     # 起完整环境
 | I-07 | 可观测数据输出 | 关键 Span 与指标可在 Jaeger/Prometheus 查到 | M4 |
 | I-08 | 配置热更新 | PATCH agent 后新执行使用新配置 | M4 |
 | I-09 | D7-D8 只读巡检接口 | Provider/Agent/工具/调用/指标接口的分页、`availability` 区分「未接入」与「零条记录」、404/422/503 契约 | M4 |
-| I-10 | Provider 配置读写 | `GET/PUT /api/v1/config/provider`：403 fail-closed、200 生效值与回退、422 校验、503 写失败；覆盖值落 `provider_configs` 并镜像 Redis，响应与日志不含密钥（ADR-014） | M4 |
+| I-10 | Provider 配置读写 | `GET/PUT /api/v1/config/provider`：200 生效值与回退、422 校验、503 写失败、裸请求可写（不鉴权，ADR-015）；覆盖值落 `provider_configs` 并镜像 Redis，响应与日志不含密钥（ADR-014） | M4 |
 
 ### 2.3 端到端测试（E）
 
@@ -91,7 +91,7 @@ Dapr orchestration 终态）。实测数据见 §4.2；`tests/unit/test_workflow
 
 注意：该演练路径曾有缺口——`app/workflows/poc.py` 用 `session_id="demo-session"`
 触发 `finalize_activity` 的报告消息写入抛 `badly formed hexadecimal UUID string`，
-业务行是 `completed` 而 Dapr orchestration 是 `FAILED`（缺口 F-05，见 ADR-015）。
+业务行是 `completed` 而 Dapr orchestration 是 `FAILED`（缺口 F-05，见 ADR-016）。
 **F-05 已由成员 B 修复**（`session_id` 不再硬编码，且 CLI 对运行时终态非 `COMPLETED`
 即非零码退出）；`scripts/measure_recovery.py` 的日志侧终态校验**保留为守卫**
 （不因对方修好而撤掉）。§4.2 的 E-03 数据取自修复前，且走 poc 的确定性（假模型）路径，
@@ -116,7 +116,7 @@ uv run python scripts/perf_concurrency.py --sessions 10 --concurrency 10 --json 
   暴露 Prometheus 文本端点（D 侧）且 `metrics` 表未建（B 侧），因此改从**行为日志**采样
   （`event=llm.finish` 的 `input_tokens`/`output_tokens`/`total_tokens`/`duration_ms`、
   `event=tool.call` 的 `status`）——数值是真实测量值，通道与事实源的差异在本文件与
-  ADR-015 中显式标注；工具调用 0 次时成功率输出 `null`（不谎报 0%）。
+  ADR-016 中显式标注；工具调用 0 次时成功率输出 `null`（不谎报 0%）。
   这两条通道随后都已由 B/D 落地（F-04），**事实源通道现已可用**，
   可另取一轮从 `/metrics` 或 `metrics` 表取数并与此处数据对比。
 - 模型名：`event=llm.finish` 的 `model` 字段在 F-03 修复后为真实模型名
@@ -132,10 +132,10 @@ uv run python scripts/perf_concurrency.py --sessions 10 --concurrency 10 --json 
 
 Provider 配置面板（`frontend/src/Inspection.tsx::ProviderConfigPanel`）的验证步骤：
 
-1. 起后端（真实 PostgreSQL + Redis，配置 `ADMIN_TOKEN`）与 `npm run dev`；
+1. 起后端（真实 PostgreSQL + Redis）与 `npm run dev`；
 2. 「工具与配置」页应显示生效的 provider/model/地址/温度与凭据状态；
-3. 不填或填错管理员令牌提交 → 页面提示 403，配置不变；
-4. 填对令牌、改模型或地址提交 → 提示已保存，页面回读生效值，关键字段不出现密钥；
+3. 填入非法取值（例如 Temperature 填 3）提交 → 页面给出取值错误，配置不变；
+4. 改模型或地址后提交 → 提示已保存，页面回读生效值，响应与页面都不出现密钥；
 5. 点「清除覆盖并回退环境配置」→ 页面回到环境配置值。
 
 浏览器端的自动化用例（Playwright 之类）尚未引入，属后续增量。
@@ -153,23 +153,24 @@ Provider 配置面板（`frontend/src/Inspection.tsx::ProviderConfigPanel`）的
 ### 4.1 M4 当前状态（2026-09-15）
 
 成员 C 的 D7-8（内置工具/沙箱/可观测接入）落地后的实测状态。
-**M4 代码完成、验收未闭环**（口径与 `doc/roadmap.md` D7-D8 一致）：代码与测试
-证据齐备（`uv run pytest -q` → 323 passed / 0 failed），但 U-09/I-06 在真实模型
-路径下的端到端验收未通过，剩余缺口已不在 C 侧，见每行的「缺口」。
-**测试全绿 ≠ M4 完成**，缺口的判定依据是验收证据而不是用例数量。
+**M4 已完成（2026-09-15 验收通过）**（口径与 `doc/roadmap.md` D7-D8 一致）：
+真实 Dapr Workflow + OpenAI 兼容 API（`deepseek-flash`）产出了工具调用并落审计表，
+详见文末验证记录与 `doc/roadmap.md`。
+**注意判定标准**：M4 的完成依据是「真实模型路径下的验收证据」，而不是用例数量——
+测试全绿曾是 M4 未闭环时的状态，因此不能用测试结果替代验收。
 
 | 用例 | 状态 | 证据 / 缺口 |
 | --- | --- | --- |
 | U-06 工具函数独立行为 | 通过 | `tests/unit/test_builtin_tools.py`：计算器返回值与拒绝面、只读 SQL 校验与真实只读执行、注册表发现/调用、`web_search` 注入 fetcher 的离线解析（ADR-012） |
 | U-07 工具调用幂等键 | 通过 | `tests/unit/test_tool_audit.py`（ADR-011） |
 | U-08 沙箱边界拒绝越权 | 通过 | `tests/unit/test_sandbox_policy.py`：Python/Shell 越权拒绝、策略先于后端、`denied` 后端不降级执行（ADR-012） |
-| U-09 流水线接入 MCP 工具 | 单元级通过，真实路径未验收 | `tests/unit/test_pipeline_tools.py`（15 例全绿，含「阶段活动消费默认注册表」，ADR-009）；假模型返回规范 `tool_calls`，真实模型返回裸 JSON、流水线不产生调用，故该用例不能作为 M4 验收证据 |
+| U-09 流水线接入 MCP 工具 | 通过（含真实模型验收） | `tests/unit/test_pipeline_tools.py`（15 例全绿，含「阶段活动消费默认注册表」，ADR-009）。真实路径已验收：API 模型下 collector/analyst 两阶段各产生一次 `calculator` 调用（`21*2`、`21+21`，`succeeded`） |
 | U-10 行为日志事件 | 通过 | `tests/unit/test_observability.py`（ADR-010） |
-| I-06 MCP 工具发现与调用 | 部分 | `tests/unit/test_mcp_tools.py` 走 `mcp.shared.memory` 的**真实 MCP 协议往返**（发现、调用、错误还原、目录）；真实 PostgreSQL 上的 `tool_calls` 落库与读回已于 2026-09-15 验收（`calculator` `21*2`→`42`，`GET /workflows/{id}/tool-calls` 返回 1 条）；缺跨进程 stdio |
+| I-06 MCP 工具发现与调用 | 通过（缺跨进程 stdio） | `tests/unit/test_mcp_tools.py` 走 `mcp.shared.memory` 的**真实 MCP 协议往返**（发现、调用、错误还原、目录）；真实流水线验收（2026-09-15）：Workflow 内 2 次 `calculator` 调用落 `tool_calls` 并读回（`21*2`、`21+21` → `42`）；仍缺跨进程 stdio 传输的端到端用例 |
 | I-07 可观测数据输出 | 通过 | `tests/unit/test_observability_metrics.py`：Span 与属性/异常、指标去重、Prometheus 文本、`metrics` 表写入（SQLite 与表缺失两种路径）、降级不阻塞；`metrics` 表已由 `app/core/checkpoint.py::MetricRecord` 建出，2026-09-15 在真实 PostgreSQL 上跑通采样落库与 `/api/v1/metrics` 读回（16 条采样），真实 Prometheus 上抓到 `backend`/`dapr-sidecar` 两个 `up` target（43 条 `macp_*` 序列），真实 Jaeger 上查到 `stage.run`/`llm.chat` span；Token 按真实模型名归因（F-03 回归，见 §4.2） |
-| I-08 配置热更新 | 通过 | `PATCH /api/v1/config/agents/{agent_id}` 已实现（`doc/api.md` §5.7、ADR-013）：覆盖写 `agent_configs`，阶段活动执行时解析生效配置，无需重启；单元用例 `tests/unit/test_agent_config.py`（合并/校验/回退/表契约），集成用例 `tests/integration/test_config_api.py`（403/404/422/503/200 与生效值）；真实 PostgreSQL 上已跑通写入—读回—新执行生效 |
+| I-08 配置热更新 | 通过 | `PATCH /api/v1/config/agents/{agent_id}` 已实现（`doc/api.md` §5.7、ADR-013）：覆盖写 `agent_configs`，阶段活动执行时解析生效配置，无需重启；单元用例 `tests/unit/test_agent_config.py`（合并/校验/回退/表契约），集成用例 `tests/integration/test_config_api.py`（404/422/503/200 与生效值，裸请求可写见 ADR-015）；真实 PostgreSQL 上已跑通写入—读回—新执行生效 |
 | I-09 只读巡检接口 | 通过 | `tests/integration/test_inspection_api.py`；覆盖分页、`availability` 区分「未接入」与「零条记录」、默认工具目录接线（`/tools` 返回 4 个注册工具）与 Prometheus 文本端点（`/metrics`）；用 SQLite 内存表与注入目录数据，不等于真实 PostgreSQL/MCP 验收 |
-| I-10 Provider 配置读写 | 通过（含真实环境冒烟） | 单元与集成用例：`tests/unit/test_provider_config.py`（26 例：表契约、合并顺序、Redis 命中/回源/回填、镜像失败降级、密钥脱敏、字段校验）与 `tests/integration/test_provider_config_api.py`（15 例：403/422/503/200、显式 null 清除、provider 切换）。2026-09-15 真实环境冒烟（本机 PostgreSQL 5433 + Redis 6380 + uvicorn）：无令牌/错误令牌 `PUT` → `403 CONFIG_WRITE_FORBIDDEN`；正确令牌 `PUT` → `200` 且响应不含密钥；`GET` 回读生效值；`/providers` 反映新值；删除 `provider:config` 后 `GET` 仍返回存储值并自动回填缓存。测试数据已清理 |
+| I-10 Provider 配置读写 | 通过（含真实环境冒烟） | 单元与集成用例：`tests/unit/test_provider_config.py`（26 例：表契约、合并顺序、Redis 命中/回源/回填、镜像失败降级、密钥脱敏、字段校验）与 `tests/integration/test_provider_config_api.py`（11 例：422/503/200、显式 null 清除、provider 切换、裸请求可写）。2026-09-15 真实环境冒烟（本机 PostgreSQL 5433 + Redis 6380 + uvicorn）：`PUT` 不带任何令牌 → `200` 且响应不含密钥；`GET` 回读生效值；`/providers` 反映新值；删除 `provider:config` 后 `GET` 仍返回存储值并自动回填缓存。测试数据已清理 |
 
 2026-09-15（M4 收口后）：`uv run pytest -q` → **294 passed / 1 failed**，
 失败项与上面同一处，仍属成员 A 的过期前置条件；新增
@@ -192,9 +193,25 @@ M4 未闭环的剩余缺口只剩真实流水线的工具调用行为（模型�
 （ADR-014），覆盖值落 `provider_configs` 并镜像 Redis。剩余缺口不变：**尚未在真实
 API 模型下跑通工具调用**，因此 M4 仍是「代码完成、验收未闭环」。
 
+2026-09-15（取消写入令牌后，ADR-015）：`uv run pytest -q` → **359 passed / 0 failed**。
+删除 7 个令牌相关用例（`test_config_api.py` 4 例、`test_provider_config_api.py` 4 例，
+其中两例为参数化），改为各留 1 例「裸请求即可写入」；`AdminSettings` 与
+`get_admin_settings()` 一并移除，因此用例总数下降属于预期，不是跳过或删除有效断言。
+`npm --prefix frontend run build` 通过（前端同步删除令牌输入框与 403 分支）。
+
+2026-09-15（M4 真实验收，缺口二关闭）：compose 容器栈 + `deepseek-flash` 真实运行。
+提交「用 calculator 计算 21*2」后 Workflow `completed`（collect → analyze → report），
+`GET /workflows/{id}/tool-calls` 返回 **2 条** `calculator` 记录（`21*2`、`21+21`，
+均 `succeeded`，输出 `{"value": 42}`），报告正文引用 `42`；
+`GET /metrics?workflow_id=...` 返回 **20 条**采样，含各阶段 Token
+（943/77/1020、1216/128/1344、1858/1193/3051）与 `tool_calls` 指标。
+同一任务在 `deepseek-v4-pro` 上也产生 1 条成功调用，可作对照。
+据此 M4 由「代码完成、验收未闭环」转为**已完成**；U-09/I-06 的剩余缺口只剩
+跨进程 stdio 传输与浏览器端自动化，不影响 M4 结论。
+
 ### 4.2 E 系列当前状态（2026-09-15，成员 C D9-10）
 
-三层证据与完整数据见 ADR-015；命令（真实环境验收与并发测量需先配好提供方凭据，
+三层证据与完整数据见 ADR-016；命令（真实环境验收与并发测量需先配好提供方凭据，
 默认提供方已是 OpenAI 兼容 API，缺凭据 fail-fast，见 ADR-014）：
 
 ```bash
@@ -204,23 +221,29 @@ uv run python scripts/perf_concurrency.py --sessions 10 --concurrency 10
 uv run python scripts/measure_recovery.py --hold-seconds 15 --restart-lead-seconds 1
 ```
 
+**提供方前提**：下表除 E-01/E-02 另有注明外，数据都测于本轮 D9-10 落地时的
+Ollama `qwen2.5-coder:7b`（E-03 走 poc 的确定性假模型路径）；此后默认提供方改为
+OpenAI 兼容 API，表中「未达成」的结论已在 API 模型下复测通过（见上一条记录），
+但**并发与恢复两组性能数据尚未在 API 模型下重取**。
+
 | 用例 | 状态 | 证据 / 缺口 |
 | --- | --- | --- |
-| E-01 单 Agent 问答 | 部分 | 真实环境跑通：会话→消息→轮询→`completed`，报告消息落库；但**答复内容未达成**——真实模型把工具调用写成纯文本，报告正文是 `{"name": "web_search", ...}`（缺口 F-02，实测于 Ollama `qwen2.5-coder:7b`） |
-| E-02 多 Agent 协作 | 部分 | 真实环境三步依次完成（`checkpoint.completed_steps=[collect, analyze, report]`，2-4s/条）；同受 F-02 影响（`tool_calls=0`，工具未真正执行）；F-02 的结论同属 Ollama 下的测量，默认提供方改 API 后需带凭据复测 |
+| E-01 单 Agent 问答 | 通过（结论分提供方） | 真实环境跑通：会话→消息→轮询→`completed`，报告消息落库。答复内容在 Ollama `qwen2.5-coder:7b` 下**未达成**——报告正文是 `{"name": "web_search", ...}` 这样的工具调用 JSON 文本（缺口 F-02）；换 OpenAI 兼容 API（`deepseek-flash`）后达成：报告 1877 字并引用工具返回值 `42`（见 §4.1 与 `doc/roadmap.md` 验证记录） |
+| E-02 多 Agent 协作 | 通过（结论分提供方） | 真实环境三步依次完成（`checkpoint.completed_steps=[collect, analyze, report]`，2-4s/条）；同受 F-02 影响（Ollama 下 `tool_calls=0`，工具未真正执行），API 模型下 collector/analyst 各产生一次 `calculator` 调用 |
 | E-03 故障恢复 | 通过（旧数据有缺口） | `scripts/measure_recovery.py`：不可用 2.62s、**恢复耗时 ≤0.2s（目标 <5s）**、业务状态保留 `completed`/三步齐全；该次演练的 Dapr 终态为 FAILED（缺口 F-05，**已由 B 修复**），修复后的演练需重跑以确认两个终态同时成功。数据取自 poc 的确定性（假模型）路径 |
 | E-04 Web 会话管理 | 部分 | API 侧通过：暂停 → 新消息被 409 `SESSION_PAUSED` 拒绝 → 恢复 → 原 Workflow 续跑 `completed`；**Web UI 侧未验**（需浏览器端到端） |
 | E-05 一键部署 | 部分 | compose 全服务健康、`/health` 200、`/api/v1/agents` 三角色、`/api/v1/providers` 非空；容器侧 `/metrics`、`/tools` 与 Prometheus/Jaeger 已由 B/D 验收（`doc/roadmap.md`「M4 代码落地情况」）；**`start.ps1` 全流程与 `stop.ps1` 未在本轮重跑** |
-| 并发会话（§3.2） | 通过 | 10 会话/并发度 10：成功率 1.0、HTTP 5xx 0、受理延迟 p50 0.46s、端到端 p50 16.54s / p95 18.61s、Token 合计 18650（621.7/次调用）、工具调用成功率**无样本**（0 次，F-02） |
+| 并发会话（§3.2） | 通过 | 10 会话/并发度 10：成功率 1.0、HTTP 5xx 0、受理延迟 p50 0.46s、端到端 p50 16.54s / p95 18.61s、Token 合计 18650（621.7/次调用）、工具调用成功率**无样本**（0 次；Ollama 下模型未发起工具调用，F-02 之外的模型行为差异，API 模型下重测后应不再为 0） |
 
-合入 `master` 后（2026-09-15）：`uv run pytest -q` → **378 passed / 0 failed / 5 skipped**
-（378 = master 的 366 例 + 本分支新增 12 例：E 系列 6、性能口径 4、F-03 回归 2；
-5 skipped 为需要 compose 的 `test_live_e2e.py`）。
+合入 `master` 后（2026-09-15）：`uv run pytest -q` → **371 passed / 0 failed / 5 skipped**
+（5 skipped 为需要 compose 的 `test_live_e2e.py`；比先前 378 例少，是 master
+删掉 7 个令牌用例所致，不是跳过或删除有效断言）。
 
-缺口状态（详见 ADR-015 F-01～F-06）：
+缺口状态（详见 ADR-016 F-01～F-06）：
 F-01 跨阶段同工具调用被审计主键合并且返回首个结果（A+B，**仍未清**，影响工具链路正确性）；
-F-02 真实模型不产出结构化 `tool_calls`（需 A/B 决策；实测于 Ollama `qwen2.5-coder:7b`，
-默认提供方改 OpenAI 兼容 API 后需带凭据复测才能定论）；
+F-02 真实模型不产出结构化 `tool_calls`（**已关闭**：该现象实测于 Ollama
+`qwen2.5-coder:7b`，默认提供方改为 OpenAI 兼容 API 后已复测通过——
+`deepseek-flash` 下两阶段各产生一次 `calculator` 调用，报告引用返回值 `42`）；
 F-03 Token 采样缺 `model` 标签（C 侧，**已修复**：改为从回调 `metadata["ls_model_name"]`
 取真实模型名并在 `run_id` 上传递，回归用例见 `test_observability_metrics.py`）；
 F-04 `metrics` 表（B）、`/tools` 接线与 Prometheus 文本端点（D）、A 的失败用例与 I-08

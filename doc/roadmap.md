@@ -24,20 +24,21 @@
   （Fake 仅保留为恢复演练开关，见 ADR-007）；最终报告作为 `messages(role=assistant)`
   在终态回写并经 `GET /messages` 返回（见 ADR-008）。
 
-### D7-D8（M4 工具生态与可观测）：代码完成，验收未闭环（2026-09-15）
+### D7-D8（M4 工具生态与可观测）：已完成（2026-09-15）
 
-按 `分工.md` §3 的四条分工记录落地情况。**四条分工的代码均已落地、测试全绿
-（`uv run pytest -q` → 323 passed / 0 failed）；M4 验收未闭环**——A 的分工原文是
-「流水线接入 MCP 工具**并验收**」，当前只有假模型单元级证据，真实模型路径下流水线
-没有产生任何工具调用。验收路径已按 ADR-014 改为由 OpenAI 兼容 API 承担，Ollama
-降为备用。状态口径与 `doc/testing.md` §4.1 一致，**不得只凭测试全绿判定 M4 完成**。
+按 `分工.md` §3 的四条分工记录落地情况。**四条分工均已完成，M4 验收通过**：
+真实 Dapr Workflow + OpenAI 兼容 API（`deepseek-flash`）跑通 collect → analyze → report，
+collector 与 analyst 两阶段各产生一次 `calculator` 工具调用（`21*2`、`21+21`，均
+`succeeded`），审计落 `tool_calls` 表并可经 `GET /workflows/{id}/tool-calls` 读回；
+Token 采样按阶段记录（total 1020 / 1344 / 3051）。踩坑与决策见下，证据见验证记录。
+状态口径与 `doc/testing.md` §4.1 一致。
 
 | 分工 | 负责 | 状态 | 落地内容 |
 | --- | --- | --- | --- |
-| 流水线接入 MCP 工具并验收 | A | 代码完成，验收未闭环 | 编排层冻结工具契约（`ToolSpec`/`ToolCall`/`ToolCallRecord`/`ToolRegistry`）与模型驱动的 ReAct 调用循环，阶段载荷回传 `tool_calls`，注册表缺失时保持原行为（ADR-009）；并补充结构化行为日志（ADR-010）。代码与单元级证据齐备，但真实模型路径未产生工具调用，验收证据待补 |
+| 流水线接入 MCP 工具并验收 | A | 已完成 | 编排层冻结工具契约（`ToolSpec`/`ToolCall`/`ToolCallRecord`/`ToolRegistry`）与模型驱动的 ReAct 调用循环，阶段载荷回传 `tool_calls`，注册表缺失时保持原行为（ADR-009）；并补充结构化行为日志（ADR-010）。真实模型验收见下方验证记录 |
 | 支持工具调用审计落库 | B | 已完成 | `tool_calls` 表与 `app/core/tool_audit.py`：先写 running 再执行，成功/失败回写，按 `call_id` 幂等缓存、并发重放拒绝；阶段活动透传 `run_id`/`workflow_run_id` 接入审计（ADR-011） |
 | 完成内置工具、沙箱、可观测接入 | C | 已完成（代码与单元级证据） | `app/tools` 四个内置工具（计算器 AST 白名单、网页搜索、沙箱代码执行、只读 SQL）、`app/sandbox` 策略层 + Docker 隔离后端、`app/mcp` Server/Client/注册表（inprocess/stdio/http 三种传输）、`app/observability` 追踪 + Prometheus 指标 + `metrics` 采样 + 模型回调（ADR-012） |
-| 展示调用链路与 Token 统计 | D | 已完成（含 Provider 配置写入面板） | 新增只读接口 `/providers`、`/agents/{id}`、`/tools`、`/workflows/{id}/tool-calls`、`/metrics`，Web 工作台接入工具调用详情与 Token 采样展示（`doc/api.md` §5）；`app/api/main.py` 已注入 `tool_catalog` 并新增 Prometheus 文本端点 `/metrics`（`doc/api.md` §5.6），2026-09-15 补齐；同日「工具与配置」页新增 Provider 配置表单，读写 §5.8（含 403 提示、清空即回退环境配置、清除覆盖按钮），令牌由操作者手动输入且只留内存 |
+| 展示调用链路与 Token 统计 | D | 已完成（含 Provider 配置写入面板） | 新增只读接口 `/providers`、`/agents/{id}`、`/tools`、`/workflows/{id}/tool-calls`、`/metrics`，Web 工作台接入工具调用详情与 Token 采样展示（`doc/api.md` §5）；`app/api/main.py` 已注入 `tool_catalog` 并新增 Prometheus 文本端点 `/metrics`（`doc/api.md` §5.6），2026-09-15 补齐；同日「工具与配置」页新增 Provider 配置表单，读写 §5.8（清空即回退环境配置、清除覆盖按钮），写入不鉴权（ADR-015） |
 
 - **M4 代码落地情况（2026-09-15）**：代码侧原缺口已全部落地——MCP 注册表与 4 个内置工具、工具沙箱隔离、
   OpenTelemetry 追踪、Prometheus 指标采集（ADR-012）；读取接线（工具目录注入与
@@ -45,8 +46,8 @@
   （`app/core/checkpoint.py::MetricRecord` + `init_checkpoint_schema()`，
   `doc/data-model.md` §3）；容器 `OBS_*` 与 Prometheus 抓取配置
   （`backend:8000/metrics`，见 `doc/deployment.md`）。
-  **M4 验收未闭环的唯一阻塞项（属 A 的 D7-D8 范围，尚未收口）**：
-  - 本地 qwen2.5-coder:7b 在真实运行中把工具调用当文本输出（例如
+  **缺口二已收口（2026-09-15）**，过程与结论保留如下：
+  - 原阻塞：本地 qwen2.5-coder:7b 在真实运行中把工具调用当文本输出（例如
     `{"name": "web_search", "arguments": {...}}`），未返回原生 `tool_calls`，
     所以真实流水线没有工具调用、审计记录为 0 条；工具审计链路本身已在真实库上
     单独验证通过。2026-09-15 复核：Ollama 把该模型标记为 tools-capable，其模板
@@ -55,8 +56,10 @@
   - 2026-09-15 决策（ADR-014）：模型接入改为「API 优先、Ollama 备用」，
     Provider 配置（provider/model/base_url/api_key/temperature）由系统保存
     （`provider_configs` 事实源 + Redis 镜像，`doc/api.md` §5.8）。
-    **待办：拿到可用凭据后在 API 模型下重跑真实 Workflow，产出 `tool_calls`
-    审计记录即可关闭本缺口。**
+  - 验收：`deepseek-flash` 真实运行产出 2 条 `tool_calls`（均 `succeeded`），
+    报告正文引用了工具返回值 `42`。首次试跑失败暴露的过程问题：模型名写成
+    `deep` 时 DeepSeek 返回 400 并列出支持的名称，说明**配置错误会以阶段失败
+    fail-fast 暴露**，不会被吞掉。
 - **端到端联调（2026-09-15 已跑通）**：真实 PostgreSQL + Dapr Workflow + Ollama 提交消息
   → Workflow `completed`（collect/analyze/report 三段）→ `metrics` 表写入 16 条采样
   （`stage_duration_ms`、`stage_runs`、`input_tokens`/`output_tokens`/`total_tokens`、
@@ -80,6 +83,7 @@
   `ResponseError: model 'qwen2.5-coder:7b-does-not-exist' not found (404)`
   （collect 已用环境配置跑完）；清除覆盖后再次提交任务恢复 `completed`。
   容器未配置 `ADMIN_TOKEN` 时同一请求返回 `403 CONFIG_WRITE_FORBIDDEN`。
+  **2026-09-15 更新**：该令牌边界已按 ADR-015 取消，上面的令牌步骤不再适用。
 
 ### D9-10（M5 端到端与性能）：进行中
 
@@ -87,18 +91,22 @@
 
 | 分工 | 负责 | 状态 | 落地内容 |
 | --- | --- | --- | --- |
-| 端到端测试补缺 | C | 已完成 | `tests/e2e/`：无容器回归网（真实 API/Workflow/流水线/工具/可观测，仅替换 Dapr 运行时与 PostgreSQL 落库）与真实 compose 验收入口（默认 skip，`MACP_E2E_LIVE=1` 启用，覆盖 E-01/E-02/E-04/I-06/E-05 健康）；E-03 由 `scripts/measure_recovery.py` 脚本化测量；并发会话由 `scripts/perf_concurrency.py` 测量（ADR-015） |
-| 性能数据 | C | 已完成 | 10 并发会话：成功率 1.0、受理延迟 p50 0.46s、端到端 p50 16.54s / p95 18.61s、Token 18650（621.7/次）；E-03 恢复耗时 ≤0.2s（目标 <5s）、不可用 2.62s；数据采集通道与口径见 ADR-015 |
+| 端到端测试补缺 | C | 已完成 | `tests/e2e/`：无容器回归网（真实 API/Workflow/流水线/工具/可观测，仅替换 Dapr 运行时与 PostgreSQL 落库）与真实 compose 验收入口（默认 skip，`MACP_E2E_LIVE=1` 启用，覆盖 E-01/E-02/E-04/I-06/E-05 健康）；E-03 由 `scripts/measure_recovery.py` 脚本化测量；并发会话由 `scripts/perf_concurrency.py` 测量（ADR-016） |
+| 性能数据 | C | 已完成 | 10 并发会话：成功率 1.0、受理延迟 p50 0.46s、端到端 p50 16.54s / p95 18.61s、Token 18650（621.7/次）；E-03 恢复耗时 ≤0.2s（目标 <5s）、不可用 2.62s；数据采集通道与口径见 ADR-016 |
 | Web UI 与部署编排 | D | 未完成 | Web 控制台、`start.ps1`/`stop.ps1` 全流程尚未在 M5 口径下验收（本轮只做了 compose 已起后的健康检查） |
 
-- **M5 未完成**：E-01/E-02 的「结构化报告」在真实模型下不达成（缺口 F-02：
-  模型把工具调用写成纯文本 `content`，`tool_calls=0`，工具未真正执行；
-  该结论实测于 Ollama `qwen2.5-coder:7b`，默认提供方已按 ADR-014 改为
-  OpenAI 兼容 API，**拿到凭据后需在 API 模型下重跑真实 Workflow 才能定论**）；
-  E-05 的 `start.ps1 → 健康检查 → stop.ps1` 全流程、E-04 的 Web UI 侧均未验。
-- **本轮新发现的跨模块缺口（均未改他人代码，见 ADR-015）**：
+- **M5 未完成**：E-01/E-02 的「结构化报告」曾因缺口 F-02 不达成，该缺口已在
+  API 模型下复测通过（见「验证记录」中 2026-09-15 的 M4 真实验收）后关闭；
+  M5 剩余未验的是
+  E-05 的 `start.ps1 → 健康检查 → stop.ps1` 全流程与 E-04 的 Web UI 侧。
+  本轮的并发与恢复性能数据仍测于 Ollama 提供方 + poc 假模型路径，
+  默认提供方改 API 后建议带凭据重取一轮。
+- **本轮新发现的跨模块缺口（均未改他人代码，见 ADR-016）**：
   F-01 跨阶段同工具调用被审计主键合并、返回首个结果（A+B，**仍未清**）；
-  F-02 真实模型不产出结构化 `tool_calls`（需 A/B 决策）；
+  F-02 真实模型不产出结构化 `tool_calls`（C 侧上报，**已关闭**：Ollama
+  `qwen2.5-coder:7b` 下模型把调用写成 `content` 里的裸 JSON；默认提供方改
+  OpenAI 兼容 API 后，`deepseek-flash` 在 collector/analyst 两阶段各产生一次
+  `calculator` 调用并落审计表）；
   F-03 Token 采样缺 `model` 标签（C 侧，**已修复**：取回调 `metadata["ls_model_name"]`）；
   F-04（B：`metrics` 表；D：`/tools` 接线与 Prometheus 文本端点；A：失败用例与 I-08）
   ——**三项均已落地**（`metrics` 建表与真实库采样、容器 `/metrics` 抓取、I-08 配置热更新）；
@@ -151,14 +159,37 @@
   **300 passed / 1 failed / 5 skipped**（1 failed 为当时 A 的过期前置条件用例，
   已在 master 上修复；5 skipped 为需要 compose 的 `tests/e2e/test_live_e2e.py`）。
   真实 compose 环境：`MACP_E2E_LIVE=1 uv run pytest tests/e2e/test_live_e2e.py -q -s` →
-  4 passed + 1 xfail（F-02 记为未达成）；并发与恢复实测数据见 ADR-015。
-- 2026-09-15（C 的分支合入 master 后）：`uv run pytest -q` → **378 passed / 0 failed /
-  5 skipped**（378 = master 的 366 例 + 本分支新增 12 例，5 skipped 为需要 compose 的
-  `test_live_e2e.py`）。合并时 `doc/roadmap.md`、`doc/testing.md` 各有同点追加型冲突，
-  已按「master 记录在前、本分支记录在后」解决；并做了语义对齐：本分支 ADR 改号为
-  **015**（原 013 与 master 的 `013-agent-config-hot-update` 重号）、F-04 三项前置
-  标为已落地、F-05 标为已修复、F-02 补上「实测于 Ollama `qwen2.5-coder:7b`、
-  默认提供方改 API 后需凭据复测」的前提。
+  4 passed + 1 xfail（当时 F-02 未达成，见下）；并发与恢复实测数据见 ADR-016。
+- 2026-09-15（取消写入令牌后，ADR-015）：`uv run pytest -q` → **359 passed / 0 failed**
+  （删除 7 个令牌用例、各留 1 例「裸请求可写」；`AdminSettings`/`get_admin_settings()`
+  一并移除，用例数下降属预期），`npm --prefix frontend run build` 通过。
+  真实环境复测（本机 PostgreSQL 5433 + Redis 6380 + uvicorn，**不配置任何令牌**）：
+  `PUT /api/v1/config/provider` → `200` 且响应不含密钥；`GET` 回读生效值；
+  `/providers` 反映新值；删除 `provider:config` 后 `GET` 仍返回存储值并自动回填。
+  冒烟数据与缓存键已清理。
+- 2026-09-15（M4 真实验收，缺口二关闭）：容器栈（compose：backend + dapr-sidecar +
+  scheduler + placement + PostgreSQL + Redis + Jaeger + Prometheus）上，
+  Provider 配置由界面写入（`provider=openai`，`model=deepseek-flash`，
+  `base_url=https://api.deepseek.com`，凭据已配置），提交「用 calculator 计算 21*2」
+  后 Workflow `completed`（collect → analyze → report）：
+  - `GET /workflows/{id}/tool-calls` → 2 条 `calculator` 记录（`21*2`、`21+21`，
+    均 `succeeded`，输出 `{"value": 42}`）；
+  - 报告作为 `messages(role=assistant)` 落库，1877 字，正文引用工具返回值 `42`；
+  - `GET /metrics?workflow_id=...` → 20 条采样，含各阶段 `input/output/total_tokens`
+    （collector 943/77/1020、analyst 1216/128/1344、reporter 1858/1193/3051）与
+    `tool_calls`/`tool_call_duration_ms`（`tool_name=calculator`）；
+  - 对照：同一任务在 `deepseek-v4-pro` 上也产生 1 条成功调用（`21*2`）。
+  失败样本保留：模型名填 `deep` 时阶段 `collect` 以 400 失败、
+  Workflow 置 `failed`，`workflow_runs.error` 记录服务端原文。
+- 2026-09-15（C 的分支再次合入 master 后）：`uv run pytest -q` → **371 passed /
+  0 failed / 5 skipped**（5 skipped 为需要 compose 的 `test_live_e2e.py`；
+  用例数比 master 的 359 多出的是本分支的 E 系列与性能口径用例，
+  比上一轮的 378 少则是 master 删掉 7 个令牌用例所致）。
+  合并时 `doc/roadmap.md`、`doc/testing.md` 各有同点追加型冲突，已按
+  「master 记录在前、本分支记录在后」解决；并做语义对齐：本分支 ADR 改号为
+  **016**（013 与 015 已分别被 master 的配置热更新、取消写入令牌占用）、
+  F-02 按 master 的真实 API 验收标为**已关闭**、F-04 三项前置标为已落地、
+  F-05 标为已修复。
 - 注意事项：数据库读取用例使用 SQLite 内存表与注入目录数据，MCP 用例走内存协议往返而非
   跨进程 stdio，因此不代表真实 PostgreSQL、真实 MCP Server 或浏览器端到端验收。
   本轮已补上真实 compose 上的 REST 链路验收，但 Web UI 侧（E-04）与

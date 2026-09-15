@@ -30,10 +30,12 @@
    因此不会引入新的不确定性；同时保证「PATCH 后新执行使用新配置」无需重启进程。
 4. **provider 不在接口范围**：`llm_provider` 关联 base_url 与凭据，属部署配置。
    接口只允许改 `model` 与 `temperature`，避免通过 API 改变出网目标。
-5. **权限边界 fail-closed**：写接口要求请求头 `X-Admin-Token` 等于环境变量
+5. ~~**权限边界 fail-closed**：写接口要求请求头 `X-Admin-Token` 等于环境变量
    `ADMIN_TOKEN`；`ADMIN_TOKEN` 未配置（空）时一律 `403 CONFIG_WRITE_FORBIDDEN`，
    令牌缺失或错误同样 `403`。默认拒绝比默认放行安全：忘记配置只是功能不可用，
-   不会把「谁能改模型」暴露给任意调用方。
+   不会把「谁能改模型」暴露给任意调用方。~~
+   **2026-09-15 由 ADR-015 取代**：用户决定取消该限制，写接口不再鉴权，
+   边界改由部署网络承担。
 6. **审计用结构化日志 + 表内元数据**：成功写入产生
    `event=config.agent.updated`（`agent_id`、`actor`、`before`/`after`、`request_id`，
    沿用 ADR-010 的日志约定），表内落 `updated_by` / `updated_at`。

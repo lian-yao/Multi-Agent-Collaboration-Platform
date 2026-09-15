@@ -19,10 +19,10 @@
 6. 额外校验 Dapr orchestration 终态（从 backend 日志取）：业务库写的是 `completed`
    而运行时可能是 `FAILED`（`finalize_activity` 写业务终态后、写报告消息时抛错），
    只看业务行会把这种情况误判成恢复成功。两者不一致时脚本以非零码退出并标注。
-   该不一致即缺口 F-05（见 ADR-015），**已由成员 B 修复**（poc 不再硬编码
+   该不一致即缺口 F-05（见 ADR-016），**已由成员 B 修复**（poc 不再硬编码
    `session_id="demo-session"`，且 CLI 对运行时终态非 `COMPLETED` 即非零码退出）。
    本校验**保留为守卫**：不因为对方说自己修好了就撤掉，跑一次新演练即可确认两个终态
-   同时为成功。ADR-015 里的 E-03 数据取自修复前，且走 poc 的确定性（假模型）路径。
+   同时为成功。ADR-016 里的 E-03 数据取自修复前，且走 poc 的确定性（假模型）路径。
 
 定义说明：若重启期间持久化定时器尚未到期，实例本就不该继续执行，此时
 `恢复耗时` 会包含剩余等待时间；脚本同时给出 `timer_pending_seconds`（服务可用时
@@ -304,7 +304,7 @@ def main(argv: list[str] | None = None) -> int:
         if orchestration == "FAILED":
             print(
                 "      注意：业务行是 completed 但 Dapr orchestration 为 FAILED，"
-                "两者终态不一致（缺口 F-05，详见 ADR-015；若 poc 侧修复已生效，"
+                "两者终态不一致（缺口 F-05，详见 ADR-016；若 poc 侧修复已生效，"
                 "这里应不再触发）",
                 file=sys.stderr,
             )

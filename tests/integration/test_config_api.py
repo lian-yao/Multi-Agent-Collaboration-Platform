@@ -1,13 +1,15 @@
-"""`PATCH /api/v1/config/agents/{agent_id}` 契约（`doc/api.md` §5.7、ADR-013）。"""
+"""`PATCH /api/v1/config/agents/{agent_id}` 契约（`doc/api.md` §5.7、ADR-013）。
+
+写入不鉴权（ADR-015，2026-09-15 取消 `ADMIN_TOKEN`），因此这里不再有 403 用例。
+"""
 
 import pytest
 from fastapi.testclient import TestClient
 
 import app.api.main as api_main
-from app.config import AdminSettings, AgentSettings
+from app.config import AgentSettings
 from app.core.checkpoint import UNSET
 
-TOKEN = "test-admin-token"
 ENV_SETTINGS = dict(
     _env_file=None,
     llm_provider="ollama",
@@ -18,7 +20,7 @@ ENV_SETTINGS = dict(
 
 @pytest.fixture
 def config_api(monkeypatch):
-    """隔离环境配置与覆盖表：内存覆盖表 + 可注入的管理员令牌。"""
+    """隔离环境配置与覆盖表：内存覆盖表替身。"""
 
     state: dict = {"rows": {}, "calls": []}
 
@@ -38,44 +40,28 @@ def config_api(monkeypatch):
         return row
 
     monkeypatch.setattr(api_main, "get_settings", lambda: AgentSettings(**ENV_SETTINGS))
-    monkeypatch.setattr(
-        api_main, "get_admin_settings", lambda: AdminSettings(_env_file=None, admin_token=TOKEN)
-    )
     monkeypatch.setattr(api_main, "agent_config_reader", reader)
     monkeypatch.setattr(api_main, "update_agent_config", update)
     return TestClient(api_main.app), state
 
 
-def _patch(client, agent_id="collector", body=None, token=TOKEN, headers=None):
+def _patch(client, agent_id="collector", body=None, headers=None):
     request_headers = dict(headers or {})
-    if token is not None:
-        request_headers["X-Admin-Token"] = token
     return client.patch(f"/api/v1/config/agents/{agent_id}", json=body or {}, headers=request_headers)
 
 
-@pytest.mark.parametrize("token", [None, "wrong-token", ""])
-def test_write_rejected_without_valid_token(config_api, token):
+def test_write_succeeds_without_any_token(config_api):
+    """取消令牌后，裸请求即可写入（ADR-015）。"""
+
     client, state = config_api
-
-    response = _patch(client, body={"temperature": 0.5}, token=token)
-
-    assert response.status_code == 403
-    assert response.json()["code"] == "CONFIG_WRITE_FORBIDDEN"
-    assert TOKEN not in response.text
-    assert state["calls"] == []
-
-
-def test_write_fails_closed_when_token_not_configured(monkeypatch, config_api):
-    client, state = config_api
-    monkeypatch.setattr(
-        api_main, "get_admin_settings", lambda: AdminSettings(_env_file=None, admin_token="")
-    )
 
     response = _patch(client, body={"temperature": 0.5})
 
-    assert response.status_code == 403
-    assert response.json()["code"] == "CONFIG_WRITE_FORBIDDEN"
-    assert state["calls"] == []
+    assert response.status_code == 200
+    assert response.json()["temperature"] == 0.5
+    assert state["calls"] == [
+        {"agent_id": "collector", "model": UNSET, "temperature": 0.5, "actor": None}
+    ]
 
 
 def test_patch_updates_effective_config(config_api):

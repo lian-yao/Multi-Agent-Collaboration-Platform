@@ -17,9 +17,12 @@ MACP_E2E_LIVE=1 uv run pytest tests/e2e/test_live_e2e.py -q -s
 
 默认**跳过**，因此 `uv run pytest` 在无容器环境下仍然是全绿的可回归用例集
 （无容器回归网见 `test_pipeline_e2e.py`）。
-真实模型为本地 Ollama（Qwen2.5-Coder 7B）：首次调用需加载模型（约 8-12s），
-之后单条三步流水线实测 2-4s；超时可用 `MACP_E2E_TIMEOUT`（秒，默认 300）覆盖，
-环境地址用 `MACP_E2E_BASE_URL`（默认 `http://localhost:8000`）。
+提供方：默认已是 OpenAI 兼容 API（ADR-014，缺凭据 fail-fast），需先配好凭据；
+本文件最初测于本地 Ollama（Qwen2.5-Coder 7B，首次调用含模型加载 8-12s、
+之后单条三步流水线 2-4s），该提供方下报告会退化成工具调用 JSON 文本（ADR-016 F-02），
+因此 E-01/E-02 的验收口径以 API 提供方为准。
+超时可用 `MACP_E2E_TIMEOUT`（秒，默认 300）覆盖，环境地址用
+`MACP_E2E_BASE_URL`（默认 `http://localhost:8000`）。
 """
 
 from __future__ import annotations
@@ -151,23 +154,18 @@ def _looks_like_bare_tool_call(content: str) -> bool:
     return isinstance(payload, dict) and "name" in payload and "arguments" in payload
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="已知缺口 F-02（ADR-015）：真实模型不产出结构化 tool_calls，"
-    "阶段结论退化成工具调用 JSON 文本（实测于 Ollama qwen2.5-coder:7b；"
-    "默认提供方已按 ADR-014 改为 OpenAI 兼容 API，需带凭据复测才能定论）；"
-    "修复后本用例会 XPASS，需改为正式断言",
-)
 def test_live_report_is_a_report_not_a_tool_call_payload(
     live_client: httpx.Client,
 ) -> None:
-    """E-01/E-02 的通过标准「生成结构化报告」在真实模型下**尚未达成**。
+    """E-01/E-02 的通过标准「生成结构化报告」。
 
-    实测（2026-09-15，Ollama qwen2.5-coder:7b）：报告消息内容为
-    `{"name": "web_search", "arguments": {"query": "…", "max_results": 5}}`——
-    模型把工具调用写进了 `content` 而不是 `tool_calls`，因此
-    `event=stage.finish ... tool_calls=0`，工具从未真正执行，最终报告是这串 JSON。
-    证据与处置（不改代码、不换模型，仅上报）见 ADR-015 F-02。
+    原本是 strict xfail：2026-09-15 在 Ollama `qwen2.5-coder:7b` 下，报告消息内容是
+    `{"name": "web_search", "arguments": {"query": "…", "max_results": 5}}` 这样的裸
+    JSON——模型把工具调用写进了 `content` 而不是 `tool_calls`，工具从未真正执行
+    （缺口 F-02）。默认提供方改为 OpenAI 兼容 API 后已复测通过：`deepseek-flash`
+    两阶段各产生一次 `calculator` 调用，报告正文引用返回值 `42`（ADR-016 F-02）。
+    因此这里改成正式断言——**它按 API 提供方验收 E-01/E-02**；若在 Ollama 提供方下
+    跑，本用例会失败，那正是 F-02 记录的现象。
     """
 
     session_id = _create_session(live_client)
@@ -178,9 +176,9 @@ def test_live_report_is_a_report_not_a_tool_call_payload(
 
     messages = live_client.get(f"/api/v1/sessions/{session_id}/messages").json()
     report = messages["items"][-1]["content"]
-    print(f"\n[F-02] 报告内容抽样={report[:200]}")
+    print(f"\n[E-01/E-02] 报告内容抽样={report[:200]}")
     assert not _looks_like_bare_tool_call(report), (
-        "报告消息仍是工具调用 JSON 文本（F-02）：模型未输出结构化 tool_calls"
+        "报告消息仍是工具调用 JSON 文本（F-02 现象）：模型未输出结构化 tool_calls"
     )
 
 
@@ -189,9 +187,9 @@ def test_live_tool_calls_are_readable_from_postgresql(
 ) -> None:
     """I-06（真实库部分）：`tool_calls` 表可读且按 Workflow 过滤。
 
-    真实模型是否真的发起工具调用由模型能力决定（见 ADR-015 记录的缺口），
-    因此这里断言的是**落库链路可用**：表存在时 available、分页自洽、
-    返回行都属于本次 Workflow；确有行时状态必须是终态。
+    真实模型是否真的发起工具调用取决于提供方与模型（Ollama qwen2.5-coder:7b 下不发起，
+    API 提供方下发起，见 ADR-016 F-02 的关闭依据），因此这里断言的是**落库链路可用**：
+    表存在时 available、分页自洽、返回行都属于本次 Workflow；确有行时状态必须是终态。
     """
 
     session_id = _create_session(live_client)

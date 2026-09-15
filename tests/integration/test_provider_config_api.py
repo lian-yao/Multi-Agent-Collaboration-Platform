@@ -1,6 +1,7 @@
 """`GET/PUT /api/v1/config/provider` 契约（`doc/api.md` §5.8、ADR-014）。
 
-用内存覆盖表 + 内存 Redis 镜像替身，验证权限边界、脱敏与生效值合并；
+写入不鉴权（ADR-015，2026-09-15 取消 `ADMIN_TOKEN`），因此这里不再有 403 用例。
+用内存覆盖表 + 内存 Redis 镜像替身，验证脱敏与生效值合并；
 真实 PostgreSQL / Redis 的联调证据见 D7-D8 验收记录。
 """
 
@@ -11,11 +12,10 @@ from fastapi.testclient import TestClient
 from sqlalchemy.exc import SQLAlchemyError
 
 import app.api.main as api_main
-from app.config import AdminSettings, AgentSettings
+from app.config import AgentSettings
 from app.core import checkpoint, provider_config
 from app.core.checkpoint import UNSET
 
-TOKEN = "test-admin-token"
 ENV_SETTINGS = dict(
     _env_file=None,
     llm_provider="openai",
@@ -58,19 +58,14 @@ def provider_api(monkeypatch):
         return row
 
     monkeypatch.setattr(api_main, "get_settings", lambda: AgentSettings(**ENV_SETTINGS))
-    monkeypatch.setattr(
-        api_main, "get_admin_settings", lambda: AdminSettings(_env_file=None, admin_token=TOKEN)
-    )
     monkeypatch.setattr(checkpoint, "get_provider_config", lambda: state["row"])
     monkeypatch.setattr(checkpoint, "upsert_provider_config", upsert)
     yield TestClient(api_main.app), state, redis
     provider_config.set_redis_factory(None)
 
 
-def _put(client, body=None, token=TOKEN, headers=None):
+def _put(client, body=None, headers=None):
     request_headers = dict(headers or {})
-    if token is not None:
-        request_headers["X-Admin-Token"] = token
     return client.put("/api/v1/config/provider", json=body or {}, headers=request_headers)
 
 
@@ -89,32 +84,9 @@ def test_get_returns_effective_env_config_without_key(provider_api):
     assert "env-key" not in response.text
 
 
-@pytest.mark.parametrize("token", [None, "wrong-token", ""])
-def test_put_rejected_without_valid_token(provider_api, token):
-    client, state, redis = provider_api
+def test_put_without_any_token_persists_and_mirrors(provider_api):
+    """取消令牌后，裸请求即可写入（ADR-015）。"""
 
-    response = _put(client, body={"model": "gpt-4o-mini"}, token=token)
-
-    assert response.status_code == 403
-    assert response.json()["code"] == "CONFIG_WRITE_FORBIDDEN"
-    assert TOKEN not in response.text
-    assert state["calls"] == []
-    assert redis.data == {}
-
-
-def test_put_fails_closed_when_token_not_configured(monkeypatch, provider_api):
-    client, state, _ = provider_api
-    monkeypatch.setattr(
-        api_main, "get_admin_settings", lambda: AdminSettings(_env_file=None, admin_token="")
-    )
-
-    response = _put(client, body={"model": "gpt-4o-mini"})
-
-    assert response.status_code == 403
-    assert state["calls"] == []
-
-
-def test_put_persists_stored_values_and_mirrors_them(provider_api):
     client, state, redis = provider_api
 
     response = _put(

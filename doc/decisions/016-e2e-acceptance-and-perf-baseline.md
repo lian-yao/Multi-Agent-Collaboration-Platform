@@ -1,4 +1,4 @@
-# ADR-015: 端到端验收与性能基线（D9-10）
+# ADR-016: 端到端验收与性能基线（D9-10）
 
 状态：已接受
 
@@ -48,34 +48,39 @@
 > **提供方前提**：本轮测量时默认提供方是 Ollama（`qwen2.5-coder:7b`），E-03 的恢复演练
 > 走 `app.workflows.poc` 的确定性（假模型）路径。此后默认提供方改为 OpenAI 兼容 API
 > （ADR-014，缺凭据 fail-fast，Ollama 降为备用），因此真实环境验收与并发测量都要配好
-> 凭据才能重跑，F-02 的结论也需在 API 模型下复测。
+> 凭据才能重跑；F-02 已在 API 模型下复测通过并关闭，并发与恢复两组数据尚未重取。
 
 命令与结果：
 
 | 项 | 命令 | 结果 |
 | --- | --- | --- |
 | 无容器回归网 | `uv run pytest tests/e2e -q` | 6 passed |
-| 真实环境验收 | `MACP_E2E_LIVE=1 uv run pytest tests/e2e/test_live_e2e.py -q -s` | 4 passed + 1 xfail（F-02 未达成） |
+| 真实环境验收 | `MACP_E2E_LIVE=1 uv run pytest tests/e2e/test_live_e2e.py -q -s` | 4 passed + 1 xfail（当时 F-02 未达成，见下） |
 | 并发性能 | `uv run python scripts/perf_concurrency.py --sessions 10 --concurrency 10` | 见下 |
 | 故障恢复 | `uv run python scripts/measure_recovery.py --hold-seconds 15 --restart-lead-seconds 1` | 见下 |
 | 全量回归（本分支，合入 master 前） | `uv run pytest -q` | 300 passed / 1 failed / 5 skipped（1 failed 为当时 A 侧过期的前置条件用例，已在 master 修复） |
-| 全量回归（合入 master 后） | `uv run pytest -q` | **378 passed / 0 failed / 5 skipped** |
+| 全量回归（第一次合入 master 后） | `uv run pytest -q` | 378 passed / 0 failed / 5 skipped |
+| 全量回归（再次合入 master 后） | `uv run pytest -q` | **371 passed / 0 failed / 5 skipped** |
 
-合入 master 后（2026-09-15）：`origin/master` 的提交已并入本分支（含 ADR-013 配置热更新、
-ADR-014 API 优先接入、`metrics` 建表、工具目录与 Prometheus 文本端点接线、I-08、前端配置面板）。
-本 ADR 因此改号为 **015**（原 013 与 master 的 `013-agent-config-hot-update` 重号）。
-378 = master 的 366 例 + 本分支新增 12 例（E 系列 6、性能口径 4、F-03 回归 2）；
+合入 master 后（2026-09-15，两次合并）：`origin/master` 的提交已并入本分支——
+第一次含 ADR-013 配置热更新、ADR-014 API 优先接入、`metrics` 建表、工具目录与
+Prometheus 文本端点接线、I-08、前端配置面板；第二次含 ADR-015 取消配置写入令牌、
+M4 真实验收（工具调用在 API 模型下跑通，F-02 由此关闭）。
+本 ADR 因此改号为 **016**（013 与 015 已分别被 master 的配置热更新、取消写入令牌占用）。
+用例数从 378 降到 371 是 master 删掉 7 个令牌用例所致，不是跳过或删除有效断言；
 5 skipped 仍是需要 compose 的 `tests/e2e/test_live_e2e.py`。
 
 以下数据均为**合入 master 前**在本机 compose 上测得：
 
 - **E-01/E-02**：单条流水线 2-4s（模型预热后），首次调用含加载 8-12s；
   终态 `completed`，`workflow_runs.checkpoint.completed_steps=[collect, analyze, report]`，
-  报告消息落 `messages(role=assistant)`。通过标准「生成结构化报告」**未达成**，见 F-02。
+  报告消息落 `messages(role=assistant)`。通过标准「生成结构化报告」在 Ollama 下
+  **未达成**（见 F-02），改 API 提供方后已达成（报告 1877 字并引用工具返回值 `42`）。
 - **E-04（API 侧）**：暂停 → 新消息 409 `SESSION_PAUSED` → 恢复 → 原 Workflow 继续跑到
   `completed`。
 - **I-06**：`GET /workflows/{id}/tool-calls` 返回 `availability=available`
-  （真实 `tool_calls` 表已建），本次 Workflow 行数 0（F-02）。
+  （真实 `tool_calls` 表已建），本次 Workflow 行数 0（Ollama 下未发起调用，F-02；
+  API 提供方下同一接口返回 2 条 `calculator` 记录）。
 - **并发（10 会话 / 并发度 10）**：成功率 1.0（10/10 `completed`），HTTP 5xx 0 次；
   受理延迟（202）p50 0.459s / p95 0.53s / max 0.53s；
   端到端 p50 16.54s / p95 18.61s / max 18.61s（mean 16.56s）；
@@ -102,7 +107,7 @@ ADR-014 API 优先接入、`metrics` 建表、工具目录与 Prometheus 文本�
   回归用例：`tests/e2e/test_pipeline_e2e.py::test_audit_key_collapses_distinct_calls_across_stages`。
   建议修法：`tool_scope` 带上阶段（与 `app/core/tool_audit.py` 模块文档
   「call_id 取自 workflow_id + stage + tool_name」一致）。
-- **F-02 真实模型不产出结构化 `tool_calls`**（模型/提示词侧，需 A/B 决策）。
+- **F-02 真实模型不产出结构化 `tool_calls`**（模型/提示词侧，**已关闭**）。
   真实环境日志：`event=stage.start ... tools=4`（四个工具都已绑定）但
   `event=stage.finish ... tool_calls=0`；报告消息内容就是
   `{"name": "web_search", "arguments": {"query": "…", "max_results": 5}}` 这样的纯文本，
@@ -111,10 +116,14 @@ ADR-014 API 优先接入、`metrics` 建表、工具目录与 Prometheus 文本�
   处置：不改代码、不加提示词 hack、不换模型；以
   `test_live_e2e.py::test_live_report_is_a_report_not_a_tool_call_payload`
   的 strict xfail 固定为「已知未达成」，一旦修复该用例会 XPASS 逼人更新。
-  **提供方前提（复测须知）**：本节结论测于 Ollama `qwen2.5-coder:7b`；
+  **提供方前提与关闭依据**：本节结论测于 Ollama `qwen2.5-coder:7b`；
   此后默认提供方改为 OpenAI 兼容 API（ADR-014，缺凭据 fail-fast），
-  该模型下工具调用是否成立需配好凭据后重跑真实 Workflow 才能定论，
-  xfail 的 reason 已注明这一点。
+  在该提供方下已复测通过（2026-09-15，M4 真实验收）：`deepseek-flash` 跑通
+  collect → analyze → report，collector/analyst 各产生一次 `calculator` 调用
+  （`21*2`、`21+21`，均 `succeeded`），报告正文引用工具返回值 `42`。
+  因此 F-02 记为**已关闭**，并印证了当时的判断——问题出在该模型对工具调用
+  格式的指令遵从度，不是编排层的工具链路。`test_live_e2e.py` 里那条 xfail
+  已相应改为正式断言（见「影响」）。
 - **F-03 性能数据的按模型归因不可用**（C 侧，**已修复**）。
   `app/observability/callbacks.py::_model_name()` 对 ChatOllama 取到的是类名
   （日志实测 `event=llm.start model=ChatOllama`），`event=llm.finish` 则完全没有
@@ -189,8 +198,11 @@ ADR-014 API 优先接入、`metrics` 建表、工具目录与 Prometheus 文本�
 - **F-01 仍未清**，会让工具链路的正确性结论失真，因此在文档里标为未清缺口；
   F-05 已由 B 修复（本 ADR 的 E-03 数据取自修复前，恢复演练的终态一致性
   需在修复后重跑一遍确认），F-04 三项前置已全部落地。
-- **F-02 不修则真实模型下的工具演示无法成立**（当前报告是工具调用 JSON 文本），
-  演示口径要么换模型/提示词，要么在文档中明确降级说明。
+- **F-02 已关闭**（换用 API 提供方后复测通过），因此真实模型下的工具演示成立；
+  `tests/e2e/test_live_e2e.py::test_live_report_is_a_report_not_a_tool_call_payload`
+  已从 strict xfail 改为正式断言——**该翻转未在本机复跑**（本机无 compose 与凭据），
+  下次带凭据跑 `MACP_E2E_LIVE=1` 时由该用例本身验证；若在 Ollama 提供方下跑，
+  它会失败，那正是 F-02 描述的现象，M5 的验收口径以 API 提供方为准。
 - **F-03 已修复**（C 侧自有的 `app/observability/callbacks.py`，未触碰他人代码）：
   Token 采样与 `event=llm.*` 日志现在带真实模型名，
   `doc/15 ...§六` 的「按模型对比 Token 效率」在通道可用后具备前提；

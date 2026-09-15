@@ -34,7 +34,6 @@
 | 500 | `INTERNAL_ERROR` | 已实现 | Workflow 调度失败等内部错误 |
 | 404 | `AGENT_NOT_FOUND` | 已实现 | 查询的 Agent 角色不存在 |
 | 503 | `DATA_SOURCE_UNAVAILABLE` | 已实现 | 审计或指标数据源读取失败 |
-| 403 | `CONFIG_WRITE_FORBIDDEN` | 已实现 | 配置写入被拒绝：缺少/错误的管理员令牌，或服务端未配置 `ADMIN_TOKEN` |
 | 404 | `TOOL_NOT_FOUND` | 规划 | 工具不存在；当前没有工具路由 |
 
 ## 2. 核心对象与状态
@@ -293,7 +292,7 @@ item 字段为 metric_name、value（有限数值）、labels（JSON 对象）�
 - `temperature`：`0.0`–`2.0`（闭区间）。
 - `provider` 不在本接口范围：它涉及 base_url 与凭据，由 §5.8 单独管理；未写入覆盖时回退 API 进程的 `AGENT_LLM_PROVIDER`。
 
-权限边界：必须携带请求头 `X-Admin-Token`，其值等于服务端环境变量 `ADMIN_TOKEN`。服务端未配置 `ADMIN_TOKEN`（空字符串）时**一律拒绝**（fail-closed），返回 `403 CONFIG_WRITE_FORBIDDEN`；令牌错误或缺头同样是 `403`。错误响应体不包含令牌内容。
+权限边界：**本接口不鉴权**（ADR-015，2026-09-15 起）：任何能访问该 API 的调用方都可以写入。部署时必须把 API 限制在本机或可信内网，不要直接暴露到公网（见 `doc/deployment.md`）。
 
 响应 `200` 返回与 §5.2 完全同构的 Agent 对象（生效配置）。
 
@@ -301,7 +300,6 @@ item 字段为 metric_name、value（有限数值）、labels（JSON 对象）�
 
 | HTTP | code | 含义 |
 | --- | --- | --- |
-| 403 | `CONFIG_WRITE_FORBIDDEN` | 未配置/缺少/错误的 `X-Admin-Token` |
 | 404 | `AGENT_NOT_FOUND` | 角色不存在 |
 | 422 | 框架默认 | Pydantic 校验失败（空 body、非法 temperature、超长 model、空白 model） |
 | 503 | `DATA_SOURCE_UNAVAILABLE` | 覆盖值写入失败（写操作必须显式失败，不回退、不静默成功） |
@@ -354,7 +352,7 @@ item 字段为 metric_name、value（有限数值）、labels（JSON 对象）�
 - `api_key`：1–500 字符；**只写入、不回读**，响应与日志都不含原值。
 - `temperature`：`0.0`–`2.0`（闭区间）。
 
-权限边界：`PUT` 必须携带请求头 `X-Admin-Token`，规则与 §5.7 完全一致（`ADMIN_TOKEN` 未配置时一律 `403`，fail-closed）。`GET` 是只读接口，不需要令牌。
+权限边界：**本接口不鉴权**（ADR-015，规则与 §5.7 一致）：`GET` 与 `PUT` 都可匿名调用，部署边界要求见 §5.7。
 
 响应：两者都返回上面的 `GET` 结构（`PUT` 返回写入后的生效值，同样不含密钥）。
 
@@ -362,11 +360,10 @@ item 字段为 metric_name、value（有限数值）、labels（JSON 对象）�
 
 | HTTP | code | 含义 |
 | --- | --- | --- |
-| 403 | `CONFIG_WRITE_FORBIDDEN` | 未配置/缺少/错误的 `X-Admin-Token`（仅 `PUT`） |
 | 422 | 框架默认或 `VALIDATION_ERROR` | Pydantic 校验失败或取值非法（空 body、非法 provider、超长字段、非 http(s) base_url、temperature 越界） |
 | 503 | `DATA_SOURCE_UNAVAILABLE` | 覆盖值写入失败（写操作必须显式失败，不回退、不静默成功） |
 
-持久化与一致性：覆盖值写入 `provider_configs`（单行，`doc/data-model.md` §3）；**PostgreSQL 为事实源**，写入成功后把同一份配置镜像到 Redis `provider:config`（`doc/data-model.md` §4）。Redis 写失败只记警告、不影响响应，读取时未命中会回源 PostgreSQL 并回填；Redis 与 PostgreSQL 都不可用时回退环境配置并记警告，读接口不因此失败。解密/加密不在本期范围，`api_key` 以明文存储在事实源与镜像中，访问边界由数据库与 `ADMIN_TOKEN` 保证。
+持久化与一致性：覆盖值写入 `provider_configs`（单行，`doc/data-model.md` §3）；**PostgreSQL 为事实源**，写入成功后把同一份配置镜像到 Redis `provider:config`（`doc/data-model.md` §4）。Redis 写失败只记警告、不影响响应，读取时未命中会回源 PostgreSQL 并回填；Redis 与 PostgreSQL 都不可用时回退环境配置并记警告，读接口不因此失败。加密不在本期范围，`api_key` 以明文存储在事实源与镜像中，访问边界由数据库权限与部署网络保证（ADR-014、ADR-015）。
 
 审计：每次成功写入产生结构化日志 `event=config.provider.updated`（含 `actor`、变更字段名、`before`/`after` 的**脱敏**快照——`api_key` 只记 `set`/`unset`）。
 
@@ -400,7 +397,7 @@ POST /api/v1/agents/{agent_id}/run
 - 初始化顺序：并行调用 `GET /agents` 与 `POST /sessions`。
 - 发送消息后保存 `workflow_id`，每 2 秒轮询一次 Workflow；终态为 `completed`、`failed`、`cancelled` 时停止轮询。
 - Token 与调用明细由 §5 读取；区分加载、失败、未接入、无记录、有记录，运行时轮询，终态补刷。切换 Workflow 时丢弃旧请求结果；调用和指标独立失败，不能阻断会话功能。主决策 Agent 选择仍为预览，任务标题取用户消息摘要。
-- Provider 配置（§5.8）已有前端入口：写接口需要 `ADMIN_TOKEN`，而**令牌不由服务端下发**——由操作者在页面上手动输入，只保留在页面内存（不写 `localStorage`/`sessionStorage`，不入日志、不入构建产物），刷新页面后需重新输入。服务端未配置 `ADMIN_TOKEN` 时写入一律 `403`，页面按 403 提示令牌缺失或不正确。其余只读展示继续走 §5.1 / §4.9 / §5.2 与 §5.8 的 `GET`。
+- Provider 配置（§5.8）已有前端入口：页面直接读写生效配置，**不需要令牌**（ADR-015）。页面只提交被改动的字段，凭据输入框留空表示不修改；由于响应不含密钥，页面不会回显凭据原值。其余只读展示继续走 §5.1 / §4.9 / §5.2 与 §5.8 的 `GET`。
 - Agent 覆盖（§5.7 的 `PATCH`）仍没有前端入口：它只调整角色模型与温度，本期经脚本或接口直接调用。
 - Agent 执行台根据 Workflow 的 `checkpoint.completed_steps` 与 `current_step` 展示阶段状态；不得在无 Workflow 时预填三张 Agent 卡片。
 
