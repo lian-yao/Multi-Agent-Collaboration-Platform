@@ -46,6 +46,26 @@
   审计链路（B）、注册表与工具（C）、只读接口（D）均已就位，缺的是真实数据库上的跑通。
 - **其他未实现**：`PATCH /api/v1/config/agents/{agent_id}` 配置热更新（见 `doc/api.md` §6）。
 
+### D9-10（M5 端到端与性能）：进行中
+
+按 `分工.md` §3 记录本轮（角色 C：端到端测试补缺、性能数据）的落地情况。
+
+| 分工 | 负责 | 状态 | 落地内容 |
+| --- | --- | --- | --- |
+| 端到端测试补缺 | C | 已完成 | `tests/e2e/`：无容器回归网（真实 API/Workflow/流水线/工具/可观测，仅替换 Dapr 运行时与 PostgreSQL 落库）与真实 compose 验收入口（默认 skip，`MACP_E2E_LIVE=1` 启用，覆盖 E-01/E-02/E-04/I-06/E-05 健康）；E-03 由 `scripts/measure_recovery.py` 脚本化测量；并发会话由 `scripts/perf_concurrency.py` 测量（ADR-013） |
+| 性能数据 | C | 已完成 | 10 并发会话：成功率 1.0、受理延迟 p50 0.46s、端到端 p50 16.54s / p95 18.61s、Token 18650（621.7/次）；E-03 恢复耗时 ≤0.2s（目标 <5s）、不可用 2.62s；数据采集通道与口径见 ADR-013 |
+| Web UI 与部署编排 | D | 未完成 | Web 控制台、`start.ps1`/`stop.ps1` 全流程尚未在 M5 口径下验收（本轮只做了 compose 已起后的健康检查） |
+
+- **M5 未完成**：E-01/E-02 的「结构化报告」在真实模型下不达成（缺口 F-02：
+  模型把工具调用写成纯文本 `content`，`tool_calls=0`，工具未真正执行）；
+  E-05 的 `start.ps1 → 健康检查 → stop.ps1` 全流程、E-04 的 Web UI 侧均未验。
+- **本轮新发现的跨模块缺口（均未改他人代码，见 ADR-013）**：
+  F-01 跨阶段同工具调用被审计主键合并、返回首个结果（A+B）；
+  F-02 真实模型不产出结构化 `tool_calls`（需 A/B 决策）；
+  F-03 Token 采样缺 `model` 标签（C 侧，**已修复**：取回调 `metadata["ls_model_name"]`）；
+  F-04（B：`metrics` 表；D：`/tools` 接线与 Prometheus 文本端点；A：失败用例与 I-08）；
+  F-05 poc/故障演练路径业务终态 `completed` 与 Dapr 终态 `FAILED` 不一致（B）。
+
 ### 验证记录
 
 - 2026-09-11（合并 A/B/D 三份 D7-D8 提交后）：`uv run pytest -q` → **127 passed**，
@@ -57,9 +77,15 @@
   唯一失败是 A 的 `tests/unit/test_pipeline_tools.py::test_role_stage_without_registry_does_not_bind_tools`：
   它用「C 的模块不存在」构造「没有注册表」的前置条件，注册表落地后该前置条件不再成立
   （见 ADR-012「影响」）。
+- 2026-09-15（C 的 D9-10 落地后）：`uv run pytest -q` → **300 passed / 1 failed / 5 skipped**
+  （1 failed 仍为 A 侧既有失败；5 skipped 为需要 compose 的 `tests/e2e/test_live_e2e.py`）。
+  真实 compose 环境：`MACP_E2E_LIVE=1 uv run pytest tests/e2e/test_live_e2e.py -q -s` →
+  4 passed + 1 xfail（F-02 记为未达成）；并发与恢复实测数据见 ADR-013。
 - 前端 TypeScript 与 Vite 构建通过（D 侧记录）。
 - 注意事项：数据库读取用例使用 SQLite 内存表与注入目录数据，MCP 用例走内存协议往返而非
   跨进程 stdio，因此不代表真实 PostgreSQL、真实 MCP Server 或浏览器端到端验收。
+  本轮已补上真实 compose 上的 REST 链路验收，但 Web UI 侧（E-04）与
+  `start.ps1`/`stop.ps1` 全流程（E-05）仍未验。
 
 ### 范围说明
 

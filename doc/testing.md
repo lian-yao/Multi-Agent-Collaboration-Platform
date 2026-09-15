@@ -79,17 +79,44 @@ cd deploy; .\start.ps1                     # 起完整环境
 5. 轮询 `GET /workflows/{id}`，断言从 `analysis` 阶段继续并最终 `completed`；
 6. 记录从服务可用到实例恢复执行的耗时，目标 `< 5s`。
 
-自动化路线：已提供 `scripts/fault_recovery.ps1` 固化手工演练步骤。
+自动化路线：已提供 `scripts/fault_recovery.ps1` 固化手工演练步骤；
 
-现状（2026-09-11）：仍为手工脚本；`tests/unit/test_workflow_pipeline.py` 覆盖了活动重放、
-子 Workflow 实例 ID 稳定、终态回写等**单元级**的恢复语义，真实 Dapr 进程被杀→重启的
-pytest 集成用例尚未落地，E-03 仍按 M5 手工验收。
+现状（2026-09-15，成员 C D9-10）：已升级为**可重复的脚本化测量**——
+`uv run python scripts/measure_recovery.py` 按上述步骤自动执行并输出 JSON
+（不可用时长、服务可用→实例恢复执行的耗时、扣除定时器等待后的值、业务状态是否保留、
+Dapr orchestration 终态）。实测数据见 §4.2；`tests/unit/test_workflow_pipeline.py`
+仍覆盖活动重放、子 Workflow 实例 ID 稳定、终态回写等**单元级**恢复语义，
+被杀的进程改由 pytest 用例控制（需容器控制权）仍未落地。
+
+注意：该演练路径当前有未清缺口——`app/workflows/poc.py` 用
+`session_id="demo-session"` 触发 `finalize_activity` 的报告消息写入抛
+`badly formed hexadecimal UUID string`，业务行是 `completed` 而 Dapr orchestration 是
+`FAILED`（缺口 F-05，见 ADR-013）。因此脚本额外校验运行时终态并据此以非零码退出。
 
 ### 3.2 并发会话测试（E 系列性能）
 
 - 使用 `locust` 或 `hey` 模拟 10 个并发会话；
 - 断言：全部会话完成、无 5xx 比例超过阈值、平均延迟记录在报告；
 - 指标从 Prometheus 导出 Token 消耗与工具调用成功率。
+
+实现（成员 C D9-10）：未引入 `locust`/`hey`，用 `scripts/perf_concurrency.py`
+（标准库线程池 + `httpx`）实现同等测量，避免新增依赖：
+
+```bash
+uv run python scripts/perf_concurrency.py --sessions 10 --concurrency 10 --json perf.json
+```
+
+- 每个虚拟会话：创建会话 → 发消息（记录 202 受理延迟）→ 轮询 Workflow 到终态
+  （记录端到端延迟），汇总成功率、终态分布、HTTP 错误数、延迟 p50/p95/max；
+- Token 消耗与工具调用成功率：事实源要求从 Prometheus 导出，但 backend 未暴露
+  Prometheus 文本端点（D 侧）且 `metrics` 表未建（B 侧），因此改从**行为日志**采样
+  （`event=llm.finish` 的 `input_tokens`/`output_tokens`/`total_tokens`/`duration_ms`、
+  `event=tool.call` 的 `status`）——数值是真实测量值，通道与事实源的差异在本文件与
+  ADR-013 中显式标注；工具调用 0 次时成功率输出 `null`（不谎报 0%）。
+- 模型名：`event=llm.finish` 的 `model` 字段在 F-03 修复后为真实模型名
+  （修复前是集成类名或缺失），因此按模型归因 Token 效率具备前提。
+- 失败率超过 `--max-failure-rate`（默认 0）时脚本以非零码退出。
+- 脚本纯逻辑（百分位口径、日志解析、报告汇总）由 `tests/unit/test_perf_tooling.py` 固定。
 
 ## 4. 里程碑验收清单
 
@@ -114,17 +141,47 @@ pytest 集成用例尚未落地，E-03 仍按 M5 手工验收。
 | U-09 流水线接入 MCP 工具 | 通过 | `tests/unit/test_pipeline_tools.py`，含「阶段活动消费默认注册表」（ADR-009） |
 | U-10 行为日志事件 | 通过 | `tests/unit/test_observability.py`（ADR-010） |
 | I-06 MCP 工具发现与调用 | 部分 | `tests/unit/test_mcp_tools.py` 走 `mcp.shared.memory` 的**真实 MCP 协议往返**（发现、调用、错误还原、目录）；缺跨进程 stdio 与真实 PostgreSQL 上的 `tool_calls` 落库验收 |
-| I-07 可观测数据输出 | 部分 | `tests/unit/test_observability_metrics.py`：Span 与属性/异常、指标去重、Prometheus 文本、`metrics` 表写入（SQLite 与表缺失两种路径）、降级不阻塞；缺 Jaeger/Prometheus 实例上的实际抓取验收，且 `metrics` 表尚未建（B） |
+| I-07 可观测数据输出 | 部分 | `tests/unit/test_observability_metrics.py`：Span 与属性/异常、指标去重、Prometheus 文本、`metrics` 表写入（SQLite 与表缺失两种路径）、降级不阻塞、Token 按真实模型名归因（F-03 回归）；缺 Jaeger/Prometheus 实例上的实际抓取验收，且 `metrics` 表尚未建（B） |
 | I-08 配置热更新 | 未实现 | `PATCH /api/v1/config/agents/{agent_id}` 未实现（`doc/api.md` §6） |
 | I-09 只读巡检接口 | 通过 | `tests/integration/test_inspection_api.py`；用 SQLite 内存表与注入目录数据，不等于真实 PostgreSQL/MCP 验收 |
 
-运行命令与结果：`uv run pytest -q` → **288 passed / 1 failed**。
+运行命令与结果（2026-09-15，C 的 D9-10 落地后）：`uv run pytest -q` →
+**300 passed / 1 failed / 5 skipped**（新增 E 系列回归网、性能工具用例与 F-03 的
+模型归因回归用例；5 skipped 为需要 compose 环境的 `tests/e2e/test_live_e2e.py`）。
 
 唯一失败是 `tests/unit/test_pipeline_tools.py::test_role_stage_without_registry_does_not_bind_tools`：
 该用例用「成员 C 的 `app/mcp` 不存在」来构造「没有注册表」的前置条件，
 C 落地注册表后 `default_tool_registry()` 不再返回 `None`，前置条件失效。
 用例意图（没有注册表时不绑定工具、不产生调用记录）仍然成立，
 需改为 `set_tool_registry_factory(lambda: None)` 显式构造；该文件属成员 A（见 ADR-012）。
+
+### 4.2 E 系列当前状态（2026-09-15，成员 C D9-10）
+
+三层证据与完整数据见 ADR-013；命令：
+
+```bash
+uv run pytest tests/e2e -q                          # 无容器回归网（6 passed）
+MACP_E2E_LIVE=1 uv run pytest tests/e2e/test_live_e2e.py -q -s   # 真实 compose 验收
+uv run python scripts/perf_concurrency.py --sessions 10 --concurrency 10
+uv run python scripts/measure_recovery.py --hold-seconds 15 --restart-lead-seconds 1
+```
+
+| 用例 | 状态 | 证据 / 缺口 |
+| --- | --- | --- |
+| E-01 单 Agent 问答 | 部分 | 真实环境跑通：会话→消息→轮询→`completed`，报告消息落库；但**答复内容未达成**——真实模型把工具调用写成纯文本，报告正文是 `{"name": "web_search", ...}`（缺口 F-02） |
+| E-02 多 Agent 协作 | 部分 | 真实环境三步依次完成（`checkpoint.completed_steps=[collect, analyze, report]`，2-4s/条）；同受 F-02 影响（`tool_calls=0`，工具未真正执行） |
+| E-03 故障恢复 | 通过（有缺口） | `scripts/measure_recovery.py`：不可用 2.62s、**恢复耗时 ≤0.2s（目标 <5s）**、业务状态保留 `completed`/三步齐全；但该演练路径 Dapr orchestration 终态为 FAILED（缺口 F-05：poc 的 `session_id="demo-session"` 让 `finalize_activity` 写报告消息时抛 UUID 解析错误） |
+| E-04 Web 会话管理 | 部分 | API 侧通过：暂停 → 新消息被 409 `SESSION_PAUSED` 拒绝 → 恢复 → 原 Workflow 续跑 `completed`；**Web UI 侧未验**（需浏览器端到端） |
+| E-05 一键部署 | 部分 | compose 全服务健康、`/health` 200、`/api/v1/agents` 三角色、`/api/v1/providers` 非空；**`start.ps1` 全流程与 `stop.ps1` 未在本轮重跑** |
+| 并发会话（§3.2） | 通过 | 10 会话/并发度 10：成功率 1.0、HTTP 5xx 0、受理延迟 p50 0.46s、端到端 p50 16.54s / p95 18.61s、Token 合计 18650（621.7/次调用）、工具调用成功率**无样本**（0 次，F-02） |
+
+未清缺口（均不在 C 侧，详见 ADR-013 F-01～F-05）：
+F-01 跨阶段同工具调用被审计主键合并且返回首个结果（A+B，影响工具链路正确性）；
+F-02 真实模型不产出结构化 `tool_calls`（需 A/B 决策）；
+F-03 Token 采样缺 `model` 标签（C 侧，已修复：改为从回调 `metadata["ls_model_name"]`
+取真实模型名并在 `run_id` 上传递，回归用例见 `test_observability_metrics.py`）；
+F-04 `metrics` 表（B）、`/tools` 接线与 Prometheus 文本端点（D）、A 的失败用例与 I-08；
+F-05 poc/故障演练路径业务终态与 Dapr 终态不一致（B）。
 
 ## 5. 失败处理约定
 
