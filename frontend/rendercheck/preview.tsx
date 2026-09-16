@@ -36,6 +36,15 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const method = (init?.method ?? "GET").toUpperCase();
   const key = `${method} ${url.pathname}`;
 
+  // 会话删除：不真的落库，但把它从种子列表里摘掉，这样「删掉的那一行真的消失」
+  // 可以在预览里肉眼确认（评审的是行内二次确认的交互，不是持久化）。
+  if (method === "DELETE" && url.pathname.startsWith("/api/v1/sessions/")) {
+    const id = decodeURIComponent(url.pathname.slice("/api/v1/sessions/".length));
+    const list = seed["GET /api/v1/sessions"] as { items?: { id: string }[] } | undefined;
+    if (list?.items) list.items = list.items.filter((item) => item.id !== id);
+    return jsonResponse(null);
+  }
+
   if (key in seed) return jsonResponse(seed[key]);
 
   // 变更类请求（新建 / 保存 / 删除）预览不模拟落库，回一个空成功体，

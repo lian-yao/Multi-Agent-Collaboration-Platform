@@ -235,6 +235,14 @@ node_modules/.bin/esbuild rendercheck/workspace-smoke.tsx --bundle --platform=no
 `margin-inline:auto`（内容限宽居中——副路由左置但内容拉满整行同样是用户报过的问题）。
 因这两条断言按 `process.cwd()` 找样式表，**脚本必须在 `frontend/` 下运行**。
 
+行内二次确认（2026-09-16 增加，`components/InlineConfirm.tsx`）另有一组断言：**未点击时只渲染
+触发按钮**（不得出现 `ui-confirm-yes` 或「取消」）、宿主 slot 类名落在外层（各区域靠它复用
+绝对定位）、确认条的 `role="group"` 与「确认 / 取消」两键，以及最后一条**读文件断言**：
+`src/**/*.ts(x)` 不得再出现 `window.confirm|alert|prompt`。这条是用户实报问题的固化——原生
+对话框由宿主提供，沙箱 iframe（无 `allow-modals`）与浏览器「阻止此页面创建更多对话框」都会
+屏蔽它；被屏蔽时 `confirm()` 不弹窗、直接返回 `false`，挂在返回值上的删除逻辑就静默失效
+（表现为「点了删除没反应」）。**新增删除/清空类入口时先过这一条断言。**
+
 **边界要说清**：它只跑不依赖 `useEffect` 的路径，跑不到「点击 → 请求 → 回填」的交互
 链路；那部分仍是人工浏览器验收（上面两张表就是人工清单），或退到 §3.4 的静态预览。
 为什么需要它：本机 `npm install agent-browser` 长时间无产物（要拉 ~500MB Chromium），

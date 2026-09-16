@@ -14,15 +14,15 @@
  * ```
  *
  * 退出码 0 = 全通过。**覆盖边界**：只跑不依赖 effects 的渲染路径（组件树挂载、JSX、
- * hooks 顺序、空态、以及用显式 props 驱动的模型区块），外加两组读文件的静态断言
- * （样式表版式、副路由语义）。真正需要点击与 effects 的交互路径仍要人工在浏览器里
- * 过一遍——见 `doc/testing.md` §3.3。
+ * hooks 顺序、空态、以及用显式 props 驱动的模型区块），外加三组读文件的静态断言
+ * （样式表版式、副路由语义、全站禁用原生对话框）。真正需要点击与 effects 的交互路径
+ * 仍要人工在浏览器里过一遍——见 `doc/testing.md` §3.3。
  *
  * 注意：角色路由面板挂在「Agent 团队」页、采样面板挂在「任务记录」页，都不在
  * `RuntimeConfig` 里，所以这里单独挂载一次，避免换页后新位置无人验证。
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { renderToStaticMarkup } from "react-dom/server";
 import { AgentPanel, AgentRoleCard, AgentTuningPanel } from "../src/config/AgentPanel";
@@ -31,6 +31,7 @@ import { ModelSection } from "../src/config/ModelSection";
 import { RuntimeSampling } from "../src/records/Inspection";
 import { RecordsPage } from "../src/records/RecordsPage";
 import { PageTabs } from "../src/components/PageTabs";
+import { InlineConfirm, InlineConfirmBar } from "../src/components/InlineConfirm";
 import type { Agent, ProviderRegistryDetail } from "../src/types/api";
 
 (globalThis as Record<string, unknown>).fetch = async () => ({
@@ -181,7 +182,7 @@ try {
       sessionId={null}
       onOpenRun={() => undefined}
       onOpenSession={() => undefined}
-      onDeleteSession={() => undefined}
+      onDeleteSession={async () => undefined}
     />,
   );
   check("任务记录页可静态渲染", records.length > 200, `长度 ${records.length}`);
@@ -344,6 +345,66 @@ check("渲染出启用/停用开关", (section.match(/role="switch"/g) ?? []).le
 check("渲染出批量引入入口", section.includes("批量引入") && section.includes("手动登记"));
 check("模型行是整卡展开手柄且不再有独立调参按钮", section.includes("aria-expanded") && !section.includes("特化调参") && section.includes("cfg-model-chevron"));
 check("模型行不再渲染无效的能力徽标", !section.includes("能力") && !section.includes("图像"));
+
+/* ---- 危险操作的行内二次确认 + 全站禁用原生对话框 ---- */
+
+const trigger = renderToStaticMarkup(
+  <InlineConfirm
+    label="删除会话「演示」"
+    triggerClassName="cfg-quiet danger"
+    triggerLabel="删除会话：演示"
+    slotClassName="record-run-delete-slot"
+    size="sm"
+    onConfirm={() => undefined}
+  >
+    删除
+  </InlineConfirm>,
+);
+check(
+  "未点击时只渲染触发按钮，不渲染确认条",
+  trigger.includes("cfg-quiet danger") && !trigger.includes("ui-confirm-yes") && !trigger.includes("取消"),
+  trigger,
+);
+check(
+  "宿主 slot 类名落在外层（各区域靠它复用绝对定位）",
+  trigger.includes("ui-confirm-slot") && trigger.includes("record-run-delete-slot"),
+  trigger,
+);
+
+const bar = renderToStaticMarkup(
+  <InlineConfirmBar
+    question="仍要强制级联删除？"
+    confirmLabel="强制删除"
+    onConfirm={() => undefined}
+    onCancel={() => undefined}
+  />,
+);
+check(
+  "确认条带问句 + 确认 + 取消，且确认按钮不是原生对话框",
+  bar.includes("仍要强制级联删除？") && bar.includes("强制删除") && bar.includes("取消"),
+  bar,
+);
+check(
+  "确认条语义正确（role=group + 两个 button，无 confirm/alert）",
+  bar.includes('role="group"') && bar.includes('class="ui-confirm-yes"') && bar.includes('class="ui-confirm-no"'),
+  bar,
+);
+
+// 读文件断言：原生对话框由宿主提供，沙箱 iframe（无 allow-modals）、浏览器
+// 「阻止此页面创建更多对话框」、Electron/CEF 外壳都会屏蔽它；被屏蔽时 confirm()
+// 不弹窗、直接返回 false，挂在返回值上的删除逻辑就会静默失效（点了没反应）。
+const banned = /window\.(confirm|alert|prompt)\s*\(/;
+const srcRoot = join(process.cwd(), "src");
+const offenders: string[] = [];
+for (const rel of readdirSync(srcRoot, { recursive: true }) as string[]) {
+  if (!/\.(ts|tsx)$/.test(rel)) continue;
+  if (banned.test(readFileSync(join(srcRoot, rel), "utf8"))) offenders.push(rel);
+}
+check(
+  "全站不再使用 window.confirm / alert / prompt",
+  offenders.length === 0,
+  `仍在使用：${offenders.join(", ")}`,
+);
 
 const passed = results.filter(([ok]) => ok).length;
 for (const [ok, label] of results) console.log(`${ok ? "PASS" : "FAIL"}  ${label}`);

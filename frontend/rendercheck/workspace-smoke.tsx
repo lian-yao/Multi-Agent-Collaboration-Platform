@@ -220,6 +220,38 @@ try {
     "逐条明细只应留在任务记录页，合体组件应已删除",
   );
   check("协作链路按波次模型渲染", app.includes("collaborationWaves"));
+
+  // —— 会话生命周期（`doc/api.md` §4.2 / §5.13 / §5.14）——
+  // 会话只在提交首条消息时落库；初始化、新建任务、删除回退都不得建会话，否则每次刷新
+  // 都会在历史里留下一条空会话（实测一次开发期积累 108 条空会话 vs 19 条真实会话）。
+  const createCalls = (app.match(/api\.createSession\(/g) ?? []).length;
+  check(
+    "只在提交首条消息时创建会话",
+    createCalls === 1,
+    `App.tsx 里 api.createSession 调用 ${createCalls} 处，应只有 submit 里那一处`,
+  );
+  check(
+    "草稿态重置不请求后端",
+    app.includes("const startNewTask = () =>") && !app.includes("createNewTask"),
+    "「新建任务」与「删除当前会话」都应走纯前端重置的 startNewTask",
+  );
+  check(
+    "草稿态下输入区仍可用",
+    app.includes('disabled={session?.status === "paused"}') &&
+      !app.includes('disabled={!session || session.status === "paused"}'),
+    "session 为 null 是草稿态，不能把输入框与发送键禁掉",
+  );
+  check(
+    "删除成功后重拉历史列表",
+    app.includes("await onDeleteSession(item);"),
+    "侧栏下拉只在展开时拉过一次，删完不重拉就会「删了还在」",
+  );
+  const recordsSource = readFileSync("src/records/RecordsPage.tsx", "utf8");
+  check(
+    "记录页先删后拉、不与删除并发",
+    recordsSource.includes("await onDelete(item);"),
+    "并发会导致删除请求还没落地就重新拉取，拿回旧列表",
+  );
 } catch (cause) {
   check("读取源文件做静态断言", false, cause instanceof Error ? cause.message : String(cause));
 }
