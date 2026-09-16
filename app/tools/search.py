@@ -82,14 +82,31 @@ def _http_get_json(endpoint: str, params: dict[str, str], timeout: float) -> Any
     except urllib.error.HTTPError as exc:
         raise ToolExecutionError(f"搜索服务返回 HTTP {exc.code}") from exc
     except urllib.error.URLError as exc:
-        raise ToolExecutionError(f"搜索服务不可达: {exc.reason}") from exc
+        raise ToolExecutionError(_unreachable_message(endpoint, exc.reason)) from exc
     except TimeoutError as exc:
-        raise ToolExecutionError(f"搜索服务超时（{timeout}s）") from exc
+        raise ToolExecutionError(
+            f"搜索服务超时（{timeout}s）：{endpoint}；该工具需要出网访问搜索服务"
+        ) from exc
+    except OSError as exc:  # URLError 之外的底层 socket 错误
+        raise ToolExecutionError(_unreachable_message(endpoint, exc)) from exc
 
     try:
         return json.loads(body)
     except json.JSONDecodeError as exc:
         raise ToolExecutionError("搜索服务返回的不是合法 JSON") from exc
+
+
+def _unreachable_message(endpoint: str, reason: Any) -> str:
+    """把「连不上」说清楚。
+
+    无外网的演示环境里这是最常见的失败，只回一句「不可达」会让使用者以为工具坏了；
+    这里显式点出「需要出网」以及实际请求的地址，并提示可换 `TOOL_SEARCH_ENDPOINT`。
+    """
+
+    return (
+        f"搜索服务不可达（{reason}）：{endpoint}；"
+        "该工具需要出网访问搜索服务，离线环境可改用 TOOL_SEARCH_ENDPOINT 指向自建网关"
+    )
 
 
 def _parse_results(payload: Any) -> list[dict[str, str]]:
