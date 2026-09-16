@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type ChangeEvent } from "react";
 import { api } from "../api/client";
+import { InlineConfirm } from "../components/InlineConfirm";
 import {
   MCP_TRANSPORTS,
   type McpCompactTool,
@@ -482,7 +483,6 @@ export function McpPanel() {
   };
 
   const remove = async (server: McpServer) => {
-    if (!window.confirm(`删除 MCP Server「${server.name}」？其工具入口会一并移除。`)) return;
     setBusy(server.id);
     try {
       await api.deleteMcpServer(server.id);
@@ -576,14 +576,18 @@ export function McpPanel() {
                     >
                       编辑
                     </button>
-                    <button
-                      type="button"
-                      className="cfg-quiet danger"
-                      onClick={() => void remove(server)}
+                    <InlineConfirm
+                      label={`删除 MCP Server「${server.name}」`}
+                      confirmLabel="确认删除"
+                      question="工具入口会一并移除"
+                      triggerClassName="cfg-quiet danger"
+                      triggerLabel={`删除 MCP Server：${server.name}`}
+                      triggerTitle="删除该条目，其工具入口会一并移除"
                       disabled={busy === server.id}
+                      onConfirm={() => void remove(server)}
                     >
                       删除
-                    </button>
+                    </InlineConfirm>
                   </div>
                 </div>
 

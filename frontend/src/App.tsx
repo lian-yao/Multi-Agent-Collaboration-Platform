@@ -49,6 +49,7 @@ import {
 } from "lucide";
 import { api } from "./api/client";
 import { Status, statusText } from "./components/Status";
+import { InlineConfirm } from "./components/InlineConfirm";
 import { ConfigPage } from "./config/ConfigPage";
 import { AgentPanel } from "./config/AgentPanel";
 import { RecordsPage, type RecordTabId } from "./records/RecordsPage";
@@ -130,15 +131,12 @@ export function App() {
       setRefreshing(false);
     }
   }, [session, workflow]);
+  // 初始化只拉角色清单，**不**建会话：工作台起步于「草稿态」（session = null），会话在提交
+  // 首条消息时才落库。否则每次刷新页面都会在历史里留下一条空会话（`doc/api.md` §4.2 / §7）。
   useEffect(() => {
     void (async () => {
       try {
-        const [a, s] = await Promise.all([
-          api.getAgents(),
-          api.createSession(),
-        ]);
-        setAgents(a);
-        setSession(s);
+        setAgents(await api.getAgents());
       } catch (cause) {
         setError(cause instanceof Error ? cause.message : "无法连接后端服务");
       } finally {
@@ -176,8 +174,7 @@ export function App() {
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     if (
-      !session ||
-      session.status === "paused" ||
+      session?.status === "paused" ||
       sending ||
       !content.trim() ||
       workflow?.status === "running" ||
@@ -186,29 +183,45 @@ export function App() {
       return;
     setSending(true);
     setError("");
+    // 草稿态（session = null）：首条消息才把会话落到库里，用户只感知到「发出去了一条消息」。
+    let sessionId: string | null = session?.id ?? null;
+    let created = false;
     try {
-      const accepted = await api.sendMessage(session.id, content.trim());
+      if (!sessionId) {
+        const fresh = await api.createSession();
+        sessionId = fresh.id;
+        created = true;
+        setSession(fresh);
+      }
+      const accepted = await api.sendMessage(sessionId, content.trim());
       setContent("");
       setWorkflow(await api.getWorkflow(accepted.workflow_id));
-      setMessages(await api.getMessages(session.id));
+      setMessages(await api.getMessages(sessionId));
+      finalRefreshDone.current = null;
     } catch (cause) {
+      // 首条消息就没发出去 → 撤掉刚建的会话，别在历史里留一条空数据（`doc/api.md` §4.2）。
+      if (created && sessionId) {
+        try {
+          await api.deleteSession(sessionId);
+        } catch {
+          /* 撤销失败不覆盖主错误：最坏情况只多出一条空会话 */
+        }
+        setSession(null);
+      }
       setError(cause instanceof Error ? cause.message : "任务提交失败");
     } finally {
       setSending(false);
     }
   };
-  const createNewTask = async () => {
+  /** 回到草稿态的新对话模板：纯前端重置，**不**向后端建会话（`doc/api.md` §4.2）。 */
+  const startNewTask = () => {
     setError("");
-    try {
-      const nextSession = await api.createSession();
-      setSession(nextSession);
-      setMessages([]);
-      setWorkflow(null);
-      setContent("");
-      setView("workspace");
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "无法创建新任务");
-    }
+    setSession(null);
+    setMessages([]);
+    setWorkflow(null);
+    setContent("");
+    finalRefreshDone.current = null;
+    setView("workspace");
   };
   const toggleSession = async () => {
     if (!session || !workflow) return;
@@ -245,14 +258,13 @@ export function App() {
       setError(cause instanceof Error ? cause.message : "无法恢复历史会话");
     }
   };
-  const deleteSession = async (target: SessionSummary) => {
+  /** 删除会话。返回 Promise 让调用方（侧栏下拉 / 记录页）能在删除成功后再重拉列表。 */
+  const deleteSession = async (target: SessionSummary): Promise<void> => {
     setError("");
     try {
       await api.deleteSession(target.id);
-      // 删的是当前会话 → 回到一个全新会话，避免工作台还指向已删除的会话。
-      if (session?.id === target.id) {
-        await createNewTask();
-      }
+      // 删的是当前会话 → 回到草稿态的新对话模板，而不是再建一个会话。
+      if (session?.id === target.id) startNewTask();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "无法删除会话");
     }
@@ -293,12 +305,10 @@ export function App() {
             setUserMenuOpen(false);
             void openSession(target);
           }}
-          onDeleteSession={(target) => {
-            void deleteSession(target);
-          }}
+          onDeleteSession={deleteSession}
           onNewTask={() => {
             setUserMenuOpen(false);
-            void createNewTask();
+            startNewTask();
           }}
         />
         <nav className="main-nav">
@@ -373,7 +383,7 @@ export function App() {
           <div className="topbar-left">
             <button className="icon-button mobile-menu" onClick={() => setMobileNav(true)} aria-label="打开导航"><MorphStateIcon state="menu" size={19} /></button>
             {view === "workspace" ? (
-              <button className="new-task-button" type="button" onClick={() => void createNewTask()}><span>＋</span>新建任务</button>
+              <button className="new-task-button" type="button" onClick={startNewTask}><span>＋</span>新建任务</button>
             ) : (
               <div className="crumb"><b>{view === "records" ? "任务记录" : view === "team" ? "Agent 团队" : "工具与配置"}</b></div>
             )}
@@ -495,7 +505,8 @@ function SidebarUser({
   open: boolean;
   onToggle: () => void;
   onOpenSession: (target: SessionSummary) => void;
-  onDeleteSession: (target: SessionSummary) => void;
+  /** 删除成功后由本组件重拉列表，所以必须是可等待的（`doc/api.md` §5.14）。 */
+  onDeleteSession: (target: SessionSummary) => Promise<void>;
   onNewTask: () => void;
 }) {
   const [items, setItems] = useState<SessionSummary[]>([]);
@@ -527,7 +538,7 @@ function SidebarUser({
       : workflow
         ? `任务${statusText[workflow.status] ?? ""}`
         : "会话进行中"
-    : "未连接";
+    : "新对话";
 
   return (
     <div className={`sidebar-user ${open ? "is-open" : ""}`}>
@@ -588,24 +599,24 @@ function SidebarUser({
                         {time(item.updated_at)}
                       </span>
                     </button>
-                    <button
-                      type="button"
-                      className="sidebar-user-item-delete"
-                      aria-label={`删除会话：${item.title || item.id.slice(0, 8)}`}
-                      title="删除此会话"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        if (
-                          window.confirm(
-                            `确定删除会话「${item.title || "（暂无消息）"}」？\n该会话的消息与运行记录将一并删除，且不可恢复。`,
-                          )
-                        ) {
-                          onDeleteSession(item);
-                        }
+                    <InlineConfirm
+                      label={`删除会话「${item.title || "（暂无消息）"}」`}
+                      confirmLabel="删除"
+                      triggerClassName="sidebar-user-item-delete"
+                      triggerLabel={`删除会话：${item.title || item.id.slice(0, 8)}`}
+                      triggerTitle="删除此会话，消息与运行记录一并删除且不可恢复"
+                      size="sm"
+                      onConfirm={() => {
+                        // 删完必须重拉列表：下拉只在展开时拉过一次，否则被删的行会一直留在
+                        // 列表里，看起来像「删除没生效」（`doc/api.md` §5.14）。
+                        void (async () => {
+                          await onDeleteSession(item);
+                          load();
+                        })();
                       }}
                     >
                       <Trash2 size={14} />
-                    </button>
+                    </InlineConfirm>
                   </li>
                 ))}
               </ul>
@@ -887,7 +898,7 @@ function Workspace({
             value={content}
             onChange={(e) => setContent(e.target.value)}
             placeholder="描述任务，或继续补充你的想法…"
-            disabled={!session || session.status === "paused"}
+            disabled={session?.status === "paused"}
             onKeyDown={(e) => {
               if (
                 e.key === "Enter" &&
@@ -913,10 +924,7 @@ function Workspace({
               className="primary-button"
               aria-label="发送任务"
               disabled={
-                busy ||
-                !session ||
-                !content.trim() ||
-                session.status === "paused"
+                busy || !content.trim() || session?.status === "paused"
               }
             >
               {sending ? (

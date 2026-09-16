@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useState, type ChangeEvent, type FormEvent } from "react";
 import { ChevronDown } from "lucide-react";
 import { api } from "../api/client";
+import { InlineConfirm } from "../components/InlineConfirm";
 import {
   CUSTOM_PARAMETER_TYPES,
   REASONING_TYPES,
@@ -945,7 +946,6 @@ export function ModelSection({
   };
 
   const remove = async (model: ModelRegistry) => {
-    if (!window.confirm(`删除模型条目「${model.model}」？引用它的角色会退化为未绑定。`)) return;
     setBusyId(model.id);
     try {
       await api.deleteModelRegistry(model.id);
@@ -1059,17 +1059,17 @@ export function ModelSection({
                 )}
               </div>
               <div className="cfg-row-actions">
-                <button
-                  type="button"
-                  className="cfg-quiet danger"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    void remove(model);
-                  }}
+                <InlineConfirm
+                  label={`删除模型条目「${model.model}」`}
+                  confirmLabel="确认删除"
+                  triggerClassName="cfg-quiet danger"
+                  triggerLabel={`删除模型条目：${model.model}`}
+                  triggerTitle="删除后，引用它的角色会退化为未绑定"
                   disabled={busyId === model.id}
+                  onConfirm={() => void remove(model)}
                 >
                   删除
-                </button>
+                </InlineConfirm>
                 <ChevronDown size={15} className="cfg-model-chevron" aria-hidden="true" />
               </div>
             </div>
