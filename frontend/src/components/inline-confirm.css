@@ -5,7 +5,11 @@
  * 屏蔽它；被屏蔽时 `confirm()` 不弹窗、直接返回 false，挂在返回值上的删除逻辑会静默失效。
  *
  * 1. 确认条与触发按钮共用同一个 slot，armed 时**就地替换**，不产生位移。
- * 2. 视觉沿用 cfg 设计令牌，配置页、记录页、侧栏三者一致。
+ * 2. **容器与触发按钮同形**：圆角 6px 与 `.sidebar-user-item-delete` / `.cfg-quiet` /
+ *    `.record-run-delete`(7px) 同族，内层按钮圆角 6-2=4px 与外框同心；不画容器描边，
+ *    否则按钮自带的边会和外框叠成「框套框」。
+ * 3. 间距压到 2px：容器内左右各 2px，两键之间 2px；`sm` 总高 22+4=26px，正好等于
+ *    侧栏图标位的高度，armed 后整行不变形。
  */
 
 .ui-confirm-slot {
@@ -17,18 +21,19 @@
 .ui-confirm {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 2px 3px 2px 7px;
-  border: 1px solid var(--cfg-danger-soft, #f1c9c9);
-  border-radius: var(--cfg-radius-sm, 8px);
+  gap: 2px;
+  padding: 2px;
+  border: 0;
+  border-radius: 6px;
   background: var(--cfg-danger-surface, #fdf3f1);
 }
 
 .ui-confirm-q {
   max-width: 260px;
+  padding: 0 4px 0 2px;
   color: var(--cfg-ink-2, #456572);
   font-size: 11px;
-  line-height: 1.35;
+  line-height: 1.3;
 }
 
 .ui-confirm-yes,
@@ -36,21 +41,24 @@
   font: inherit;
   font-size: 11px;
   line-height: 1;
-  padding: 5px 9px;
-  border: 1px solid transparent;
-  border-radius: 6px;
+  height: 24px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 4px;
   white-space: nowrap;
   cursor: pointer;
+  transition: background var(--cfg-ease, .16s cubic-bezier(.4, 0, .2, 1)),
+    color var(--cfg-ease, .16s cubic-bezier(.4, 0, .2, 1));
 }
 
+/* 确认键做实心软红：一眼看出这是"会真删东西"的那个键，也不需要自己的描边 */
 .ui-confirm-yes {
-  border-color: var(--cfg-danger-soft, #f1c9c9);
-  background: #fdeeee;
-  color: #b0483f;
+  background: #f0c7c2;
+  color: #9c3a2e;
 }
 
 .ui-confirm-yes:hover:not(:disabled) {
-  background: #f9dcdc;
+  background: #e7b3ad;
 }
 
 .ui-confirm-no {
@@ -59,7 +67,7 @@
 }
 
 .ui-confirm-no:hover {
-  background: var(--cfg-surface-hover, #f4f9fb);
+  background: var(--cfg-surface, #fff);
   color: var(--cfg-ink-2, #456572);
 }
 
@@ -75,14 +83,14 @@
   cursor: progress;
 }
 
-/* 图标位（26–28px）专用：不撑高所在行 */
+/* 图标位（26–28px）专用：总高 26px，与触发按钮等高，不撑高所在行 */
 .ui-confirm-sm {
-  gap: 3px;
-  padding: 1px 2px 1px 5px;
+  gap: 2px;
 }
 
 .ui-confirm-sm .ui-confirm-yes,
 .ui-confirm-sm .ui-confirm-no {
   height: 22px;
-  padding: 0 7px;
+  padding: 0 8px;
+  font-size: 10.5px;
 }

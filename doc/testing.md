@@ -237,11 +237,16 @@ node_modules/.bin/esbuild rendercheck/workspace-smoke.tsx --bundle --platform=no
 
 行内二次确认（2026-09-16 增加，`components/InlineConfirm.tsx`）另有一组断言：**未点击时只渲染
 触发按钮**（不得出现 `ui-confirm-yes` 或「取消」）、宿主 slot 类名落在外层（各区域靠它复用
-绝对定位）、确认条的 `role="group"` 与「确认 / 取消」两键，以及最后一条**读文件断言**：
-`src/**/*.ts(x)` 不得再出现 `window.confirm|alert|prompt`。这条是用户实报问题的固化——原生
-对话框由宿主提供，沙箱 iframe（无 `allow-modals`）与浏览器「阻止此页面创建更多对话框」都会
-屏蔽它；被屏蔽时 `confirm()` 不弹窗、直接返回 `false`，挂在返回值上的删除逻辑就静默失效
-（表现为「点了删除没反应」）。**新增删除/清空类入口时先过这一条断言。**
+绝对定位）、确认条的 `role="group"` 与「确认 / 取消」两键，以及两条**读文件断言**：
+
+1. `src/**/*.ts(x)` 不得再出现 `window.confirm|alert|prompt`。这条是用户实报问题的固化——原生
+   对话框由宿主提供，沙箱 iframe（无 `allow-modals`）与浏览器「阻止此页面创建更多对话框」都会
+   屏蔽它；被屏蔽时 `confirm()` 不弹窗、直接返回 `false`，挂在返回值上的删除逻辑就静默失效
+   （表现为「点了删除没反应」）。**新增删除/清空类入口时先过这一条断言。**
+2. `.ui-confirm` 容器规则必须与触发按钮**同形**：`border-radius: 6px`（与
+   `.sidebar-user-item-delete` / `.cfg-quiet` 同款）、`border: 0`（按钮自带的边会和容器边叠成
+   「框套框」）、`padding: 2px` 且 `gap: 2px`。用户 2026-09-16 反馈过「外层容器不融洽、间距
+   太大」，改确认条样式时别把这条改红。
 
 **边界要说清**：它只跑不依赖 `useEffect` 的路径，跑不到「点击 → 请求 → 回填」的交互
 链路；那部分仍是人工浏览器验收（上面两张表就是人工清单），或退到 §3.4 的静态预览。

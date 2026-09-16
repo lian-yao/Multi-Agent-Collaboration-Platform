@@ -390,6 +390,23 @@ check(
   bar,
 );
 
+// 读文件断言：确认条容器要和触发按钮**同形**——圆角 6px（`.sidebar-user-item-delete`
+// 与 `.cfg-quiet` 同款）、不画自己的描边（否则按钮自带的边会和容器边叠成「框套框」，
+// 用户 2026-09-16 反馈过），间距压到 2px。
+const confirmCss = readFileSync(
+  join(process.cwd(), "src", "components", "inline-confirm.css"),
+  "utf8",
+);
+const confirmRule = /\.ui-confirm\s*\{([^}]*)\}/.exec(confirmCss)?.[1] ?? "";
+check(
+  "确认条容器与触发按钮同形（圆角 6px、无描边、间距 2px）",
+  /border-radius:\s*6px/.test(confirmRule) &&
+    /border:\s*0/.test(confirmRule) &&
+    /padding:\s*2px/.test(confirmRule) &&
+    /gap:\s*2px/.test(confirmRule),
+  confirmRule.trim() || "没读到 .ui-confirm 规则",
+);
+
 // 读文件断言：原生对话框由宿主提供，沙箱 iframe（无 allow-modals）、浏览器
 // 「阻止此页面创建更多对话框」、Electron/CEF 外壳都会屏蔽它；被屏蔽时 confirm()
 // 不弹窗、直接返回 false，挂在返回值上的删除逻辑就会静默失效（点了没反应）。
