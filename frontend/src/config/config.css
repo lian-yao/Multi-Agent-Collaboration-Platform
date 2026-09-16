@@ -1459,10 +1459,19 @@
 
 
 
-.cfg-agent-delete {
+/* 删除入口的宿主 slot：定位与显隐都在 slot 上，armed 后确认条原地替换按钮不会位移。
+   复合选择器用于压过 inline-confirm.css 里 `.ui-confirm-slot` 的基础样式。 */
+.ui-confirm-slot.cfg-agent-delete-slot {
   position:absolute;
   top:8px;
   right:8px;
+  opacity:0;
+  transition:opacity .12s ease
+}
+
+
+
+.cfg-agent-delete {
   display:grid;
   width:26px;
   height:26px;
@@ -1473,14 +1482,13 @@
   background:transparent;
   color:var(--cfg-ink-4);
   cursor:pointer;
-  opacity:0;
-  transition:opacity .12s ease,background .12s ease,color .12s ease
+  transition:background .12s ease,color .12s ease
 }
 
 
 
-.cfg-agent-card:hover .cfg-agent-delete,
-.cfg-agent-card:focus-within .cfg-agent-delete {
+.cfg-agent-card:hover .cfg-agent-delete-slot,
+.ui-confirm-slot.cfg-agent-delete-slot:focus-within {
   opacity:1
 }
 

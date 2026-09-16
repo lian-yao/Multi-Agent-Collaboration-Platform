@@ -1,0 +1,88 @@
+/* inline-confirm.css — 危险操作的行内二次确认（InlineConfirm / InlineConfirmBar）
+ *
+ * 硬约束：全站不再使用 `window.confirm` / `alert` / `prompt`。原生对话框由宿主提供，
+ * 内置预览的 sandbox iframe、浏览器「阻止此页面创建更多对话框」、Electron/CEF 外壳都会
+ * 屏蔽它；被屏蔽时 `confirm()` 不弹窗、直接返回 false，挂在返回值上的删除逻辑会静默失效。
+ *
+ * 1. 确认条与触发按钮共用同一个 slot，armed 时**就地替换**，不产生位移。
+ * 2. 视觉沿用 cfg 设计令牌，配置页、记录页、侧栏三者一致。
+ */
+
+.ui-confirm-slot {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.ui-confirm {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 3px 2px 7px;
+  border: 1px solid var(--cfg-danger-soft, #f1c9c9);
+  border-radius: var(--cfg-radius-sm, 8px);
+  background: var(--cfg-danger-surface, #fdf3f1);
+}
+
+.ui-confirm-q {
+  max-width: 260px;
+  color: var(--cfg-ink-2, #456572);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.ui-confirm-yes,
+.ui-confirm-no {
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  padding: 5px 9px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.ui-confirm-yes {
+  border-color: var(--cfg-danger-soft, #f1c9c9);
+  background: #fdeeee;
+  color: #b0483f;
+}
+
+.ui-confirm-yes:hover:not(:disabled) {
+  background: #f9dcdc;
+}
+
+.ui-confirm-no {
+  background: transparent;
+  color: var(--cfg-ink-3, #8499a2);
+}
+
+.ui-confirm-no:hover {
+  background: var(--cfg-surface-hover, #f4f9fb);
+  color: var(--cfg-ink-2, #456572);
+}
+
+.ui-confirm-yes:focus-visible,
+.ui-confirm-no:focus-visible {
+  outline: 2px solid var(--cfg-accent, #3f7f93);
+  outline-offset: 1px;
+}
+
+.ui-confirm-yes:disabled,
+.ui-confirm-no:disabled {
+  opacity: .55;
+  cursor: progress;
+}
+
+/* 图标位（26–28px）专用：不撑高所在行 */
+.ui-confirm-sm {
+  gap: 3px;
+  padding: 1px 2px 1px 5px;
+}
+
+.ui-confirm-sm .ui-confirm-yes,
+.ui-confirm-sm .ui-confirm-no {
+  height: 22px;
+  padding: 0 7px;
+}
