@@ -1146,6 +1146,13 @@ def list_sessions(
     摘要由「首条用户消息 + 最新一次 workflow 终态」构成，供前端历史列表直接
     渲染，无需逐会话二次请求（`doc/api.md` §5.13）。
 
+    **只返回至少有一条 `messages` 的会话**（接口层兜底，`doc/api.md` §5.13 /
+    `doc/data-model.md` §3 生命周期不变量）：前端在首条消息提交时才建会话，
+    绕过前端直接 `POST /sessions` 造出的空行不该堆在历史列表里。`total` 与
+    `rows` 用同一条过滤条件，否则分页会错位。判定用「存在消息」而非「存在
+    `role=user` 的消息」——消息先于 workflow 写入（§4.4），所以跑过任务的
+    会话必然命中，不会被误过滤。
+
     返回 `(items, total)`；`items` 每项为 `_session_to_dict` 基础上额外注入
     `title`（首条用户消息截断）与 `latest_workflow_status`（可空）。
     """
@@ -1155,9 +1162,21 @@ def list_sessions(
     page = max(page, 1)
     page_size = max(min(page_size, 100), 1)
     with get_session_factory()() as session:
-        total = session.scalar(select(func.count()).select_from(SessionRecord)) or 0
+        # 用 `IN (SELECT session_id FROM messages)` 而不是 `EXISTS(关联子查询)`：
+        # 后者会被 SQLAlchemy 编译成自带 FROM 的非关联子查询（`FROM messages, sessions`），
+        # 语义退化成「只要库里存在任意一条消息就全部通过」，过滤形同虚设。
+        has_message = SessionRecord.id.in_(select(Message.session_id))
+        total = (
+            session.scalar(
+                select(func.count())
+                .select_from(SessionRecord)
+                .where(has_message)
+            )
+            or 0
+        )
         rows = session.scalars(
             select(SessionRecord)
+            .where(has_message)
             .order_by(SessionRecord.updated_at.desc())
             .offset((page - 1) * page_size)
             .limit(page_size)

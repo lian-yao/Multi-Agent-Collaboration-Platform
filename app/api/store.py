@@ -124,8 +124,11 @@ class InMemoryApiStore:
     def list_sessions(
         self, *, page: int, page_size: int
     ) -> tuple[list[dict[str, Any]], int]:
+        # 与 SQL 实现（`checkpoint.list_sessions`）保持同一契约：只列出至少有一条
+        # 消息的会话，`total` 同条件过滤（`doc/api.md` §5.13）。
+        with_messages = {m["session_id"] for m in self.messages.values()}
         rows = sorted(
-            self.sessions.values(),
+            (row for row in self.sessions.values() if row["id"] in with_messages),
             key=lambda row: row["updated_at"],
             reverse=True,
         )

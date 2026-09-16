@@ -57,6 +57,10 @@ erDiagram
 这些「真正产生过消息」的会话。绕过前端直接建会话留下的无消息行属于脏数据，可安全删除
 （它们没有 `agent_runs` / `workflow_runs` 依赖）。
 
+接口层对上述不变量做兜底：`GET /api/v1/sessions` 只返回**至少有一条 `messages`** 的会话
+（`items` 与 `total` 同条件过滤），`doc/api.md` §5.13。因此即使有人只用 `POST /sessions`
+造行，历史列表也不会被空会话污染。
+
 ### messages（消息历史）
 
 | 字段 | 类型 | 约束/默认 | 说明 |

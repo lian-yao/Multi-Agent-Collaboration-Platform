@@ -103,7 +103,7 @@ def test_list_sessions_returns_summaries(monkeypatch) -> None:
     monkeypatch.setattr(api_main, "get_workflow_service", lambda: workflow_service)
     client = TestClient(app)
 
-    # 建两个会话：一个发消息（产生 workflow），一个只创建不发消息（无 workflow）。
+    # 两个都发过消息的会话：摘要 =「首条用户消息 + 最新 workflow 终态」。
     first = client.post("/api/v1/sessions", json={"user_id": "demo-user"}).json()
     first_id = first["id"]
     client.post(
@@ -113,6 +113,10 @@ def test_list_sessions_returns_summaries(monkeypatch) -> None:
 
     second = client.post("/api/v1/sessions", json={"user_id": "demo-user"}).json()
     second_id = second["id"]
+    client.post(
+        f"/api/v1/sessions/{second_id}/messages",
+        json={"content": "再帮我画一张趋势图"},
+    )
 
     response = client.get("/api/v1/sessions")
     assert response.status_code == 200
@@ -124,25 +128,59 @@ def test_list_sessions_returns_summaries(monkeypatch) -> None:
     assert len(payload["items"]) == 2
 
     # 按 updated_at 倒序：后建的 second 在前。
+    assert [item["id"] for item in payload["items"]] == [second_id, first_id]
+
     titles = {item["id"]: item["title"] for item in payload["items"]}
     assert titles[first_id] == "帮我分析这份数据"
-    assert titles[second_id] == "（暂无消息）"
+    assert titles[second_id] == "再帮我画一张趋势图"
 
     # 有 workflow 的会话带 latest_workflow_status 与 latest_workflow_id。
     by_id = {item["id"]: item for item in payload["items"]}
     assert by_id[first_id]["latest_workflow_status"] == "running"
     assert by_id[first_id]["latest_workflow_id"] is not None
-    assert by_id[second_id]["latest_workflow_status"] is None
-    assert by_id[second_id]["latest_workflow_id"] is None
+
+
+def test_list_sessions_hides_sessions_without_messages(monkeypatch) -> None:
+    """没有消息的会话不出现在历史列表里，`total` 同条件过滤（`doc/api.md` §5.13）。
+
+    空会话只可能来自绕过前端直接 `POST /sessions`（前端草稿态不落库）；接口层要兜住它，
+    否则列表会被无意义的空行堆满、`total` 与分页也会跟着错位。
+    """
+    store = InMemoryApiStore()
+    monkeypatch.setattr(api_main, "api_store", store)
+    client = TestClient(app)
+
+    empty = client.post("/api/v1/sessions", json={"user_id": "demo-user"}).json()
+    assert client.get("/api/v1/sessions").json()["total"] == 0
+
+    real = client.post("/api/v1/sessions", json={"user_id": "demo-user"}).json()
+    client.post(
+        f"/api/v1/sessions/{real['id']}/messages",
+        json={"content": "有内容才该被记录"},
+    )
+
+    payload = client.get("/api/v1/sessions").json()
+    assert payload["total"] == 1
+    assert [item["id"] for item in payload["items"]] == [real["id"]]
+    assert empty["id"] not in {item["id"] for item in payload["items"]}
+
+    # 被过滤只是不出现在列表里，`GET /sessions/{id}` 仍按 §4.2 返回它（删除入口要用）。
+    assert client.get(f"/api/v1/sessions/{empty['id']}").status_code == 200
 
 
 def test_list_sessions_pagination(monkeypatch) -> None:
     store = InMemoryApiStore()
     monkeypatch.setattr(api_main, "api_store", store)
+    monkeypatch.setattr(api_main, "get_workflow_service", lambda: FakeWorkflowService())
     client = TestClient(app)
 
-    for _ in range(3):
-        client.post("/api/v1/sessions", json={"user_id": "demo-user"})
+    # 每个会话都得先发一条消息：空会话会被 §5.13 的服务端过滤挡住，不进列表。
+    for index in range(3):
+        created = client.post("/api/v1/sessions", json={"user_id": "demo-user"}).json()
+        client.post(
+            f"/api/v1/sessions/{created['id']}/messages",
+            json={"content": f"第 {index + 1} 条消息"},
+        )
 
     page_one = client.get("/api/v1/sessions?page=1&page_size=2")
     assert page_one.status_code == 200
