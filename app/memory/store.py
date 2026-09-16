@@ -1,7 +1,7 @@
 """记忆读写接口契约。
 
 仅声明会话记忆（短期）与长期记忆的读写协议与一致性语义，
-不包含任何实现或外部 IO。真实存储实现由存储层完成（见 ADR-005）：
+不包含任何实现或外部 IO。Redis 实现在 `app/memory/redis_store.py`（见 ADR-005）：
 - 会话记忆落 Redis List `session:{id}:messages`（TTL 7 天）；
   按 data-model §5，Redis 只服务会话上下文读取，可丢失，
   PostgreSQL messages 表为最终事实源。

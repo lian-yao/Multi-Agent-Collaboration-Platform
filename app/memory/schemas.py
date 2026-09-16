@@ -100,6 +100,22 @@ def memory_entry_value(entry: MemoryEntry) -> str:
     return json.dumps(data, ensure_ascii=False)
 
 
+def memory_entry_from_value(key: str, payload: str | bytes) -> MemoryEntry:
+    """从 Hash 的 field + value 还原一条长期记忆，是 `memory_entry_value` 的逆操作。
+
+    key 取自 Hash 的 field（value 里不存 key），因此这里把它补回去；
+    value 若也带了 key 字段则以 field 为准，避免两处不一致时静默取到旧值。
+    """
+
+    if isinstance(payload, bytes):
+        payload = payload.decode("utf-8")
+    data = json.loads(payload)
+    if not isinstance(data, dict):
+        raise ValueError("长期记忆项的 value 不是 JSON 对象")
+    fields = {name: value for name, value in data.items() if name != "key"}
+    return MemoryEntry(key=key, **fields)
+
+
 def serialize_memory_entry(entry: MemoryEntry) -> str:
     """返回含 key 的完整记忆项 JSON（用于展示/审计，不入 Hash 结构）。"""
     return entry.model_dump_json()
