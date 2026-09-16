@@ -8,8 +8,9 @@
 - 沙箱不可用时**不降级为宿主进程执行**（安全边界不做静默降级）。
 
 本文件只验证策略层与拒绝后端，因此不依赖 Docker，也不真正执行任何代码；
-容器隔离参数（禁网、只读根文件系统、内存/CPU/进程数上限）由
-`app/sandbox/docker_runtime.py` 的配置核对，见 `doc/testing.md` §2.1 的 U-08 说明。
+容器隔离参数（禁网、只读根文件系统、内存/CPU/进程数上限）与 fail closed 语义
+由同目录的 `test_sandbox_docker_runtime.py` 用假 Docker 客户端守卫，
+见 `doc/testing.md` §2.1 的 U-08 说明。
 """
 
 from __future__ import annotations
