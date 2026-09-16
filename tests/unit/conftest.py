@@ -6,11 +6,36 @@ PostgreSQL，也不该在 buffer 满时触发一次建连。
 
 Provider 配置用例同理：模块级 Redis 客户端换成内存替身，单元测试不连真实 Redis
 （`app/core/provider_config.py`，ADR-014）。
+
+**数据库 DSN 的自足化**：`resolve_provider_settings` / `resolve_agent_settings`
+的合并顺序是 Redis → PostgreSQL → 环境回退，Redis 那一段由 `memory_redis` 替身兜住，
+PostgreSQL 那一段却没有。「读不到就回退环境配置」在应用层是 fail-soft 的，但
+**传输层的连不上不是读失败而是阻塞**：DSN 指向一个不可达的 PostgreSQL 时，建连会
+一直等在 `select` 上，用例不报错也不结束，整个 `tests/unit` 因此挂住（表现为
+pytest 长时间无输出，后面的用例根本不会执行）。所以这里在导入应用模块**之前**把
+DSN 钉成一个自足的内存 SQLite：查询会因「表不存在」快速失败，正好落回应用层
+既定的「配置库里没有覆盖行 → 用环境默认值」分支，语义与无覆盖行一致。
+要让这组用例对着真实 PostgreSQL 跑，设 `MACP_UNIT_DATABASE_URL`。
 """
 
 from __future__ import annotations
 
-import pytest
+import os
+
+REGRESSION_DATABASE_URL = "sqlite+pysqlite:///:memory:"
+"""单元回归的默认数据库：进程内 SQLite，不建连、不落盘。"""
+
+# 必须在导入 `app.*` 之前设置：`app/core/storage.py` 的引擎与 session 工厂是
+# 模块级 lru_cache，一旦用错 DSN 建过就换不回来了。
+#
+# 显式给出的 DSN 优先（`MACP_UNIT_DATABASE_URL`，其次运行环境里已有的 `DATABASE_URL`）：
+# 一次 pytest 进程会加载多个 conftest，若这里无条件覆盖，`DATABASE_URL=真实库 pytest tests`
+# 会被静默改写成 SQLite，集成用例就再也连不上目标库了。
+_explicit_dsn = os.getenv("MACP_UNIT_DATABASE_URL") or os.getenv("DATABASE_URL")
+os.environ["DATABASE_URL"] = _explicit_dsn or REGRESSION_DATABASE_URL
+
+# 以下导入一律晚于 DSN 设定（`app.core.storage` 的引擎是模块级缓存，必须先定 DSN）。
+import pytest  # noqa: E402
 
 from app.core.provider_config import set_redis_factory
 from app.observability.metrics import (

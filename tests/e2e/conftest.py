@@ -11,22 +11,42 @@
    → 写回 `app.api.store.InMemoryApiStore` 与内存审计表，语义（状态迁移校验、
    报告消息幂等、running→终态）与真实实现保持一致。
 
-替身边界之外的链路都是真代码；真实 Dapr + PostgreSQL 上的验收见
-`test_live_e2e.py`（需要 compose 环境，按环境变量启用）。
+**数据库 DSN 的自足化**：替身只覆盖了 checkpoint 的写入侧，读取侧仍有一处会碰配置库
+——`app/core/checkpoint.py::get_provider_config()`（读 Provider 覆盖行，未命中即回落
+环境默认值）。DSN 指向不可达的 PostgreSQL 时，SQLAlchemy 建连会一直等在 `select` 上，
+用例不是快速失败而是**挂住**，ADR-016 的「无容器也能跑」因此不成立。
+所以这里在导入应用模块**之前**把 DSN 钉成一个自足的内存 SQLite，
+语义等价于「配置库里没有覆盖行」（两者都回落到环境默认设置）。
+要让这组用例对着真实 PostgreSQL 跑，设 `MACP_E2E_DATABASE_URL`。
+真实 Dapr + PostgreSQL 上的验收见 `test_live_e2e.py`（走 HTTP，不使用这里的 DSN）。
 """
 
 from __future__ import annotations
 
+import os
 import threading
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from typing import Any
 
-import pytest
-from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, ToolMessage
-from langchain_core.outputs import ChatGeneration, ChatResult
-from pydantic import Field
+REGRESSION_DATABASE_URL = "sqlite+pysqlite:///:memory:"
+"""无容器回归网的默认数据库：进程内 SQLite，不建连、不落盘。"""
+
+# 必须在导入 `app.*` 之前设置：`app/core/storage.py` 的引擎与 session 工厂是
+# 模块级 lru_cache，一旦用错 DSN 建过就换不回来了。
+#
+# 显式给出的 DSN 优先（`MACP_E2E_DATABASE_URL`，其次运行环境里已有的 `DATABASE_URL`）：
+# 一次 pytest 进程会加载多个 conftest，若这里无条件覆盖，`DATABASE_URL=真实库 pytest tests`
+# 会被静默改写成 SQLite，集成用例就再也连不上目标库了。
+_explicit_dsn = os.getenv("MACP_E2E_DATABASE_URL") or os.getenv("DATABASE_URL")
+os.environ["DATABASE_URL"] = _explicit_dsn or REGRESSION_DATABASE_URL
+
+# 以下导入一律晚于 DSN 设定（`app.core.storage` 的引擎是模块级缓存，必须先定 DSN）。
+import pytest  # noqa: E402
+from langchain_core.language_models.chat_models import BaseChatModel  # noqa: E402
+from langchain_core.messages import AIMessage, ToolMessage  # noqa: E402
+from langchain_core.outputs import ChatGeneration, ChatResult  # noqa: E402
+from pydantic import Field  # noqa: E402
 
 from app.api.store import InMemoryApiStore
 from app.core import checkpoint as checkpoint_module

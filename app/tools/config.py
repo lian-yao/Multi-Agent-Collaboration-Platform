@@ -32,7 +32,13 @@ class ToolSettings(BaseSettings):
     """只读 SQL 工具的数据源；留空时使用平台自身的 PostgreSQL（`StorageSettings.database_url`）。"""
 
     sql_timeout_seconds: int = 5
+
     sql_default_limit: int = 50
+    """模型没在入参里给 `limit` 时的返回行数上限。
+
+    生效点见 `app/tools/sql.py::SqlQueryTool.run`：入参留空取本值，
+    并统一被 `MAX_ROWS` 夹住（本值超过上限时按上限执行）。
+    """
 
 
 @lru_cache

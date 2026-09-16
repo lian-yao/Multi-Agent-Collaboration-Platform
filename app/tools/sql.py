@@ -9,6 +9,10 @@
 2. **连接层**：事务显式置为只读（PostgreSQL `SET TRANSACTION READ ONLY`、
    SQLite `PRAGMA query_only = ON`），未知方言直接失败（fail closed）。
    语句层的字符串检查只用于快速给出可读错误，权威约束在连接层。
+
+返回行数同样有两处约束：入参 `limit` 留空时取 `TOOL_SQL_DEFAULT_LIMIT`，
+两者都被 `MAX_ROWS` 夹住，并且查询按 `limit + 1` 取行以判断是否被截断
+（`truncated` 字段），而不是静默少返回。
 """
 
 from __future__ import annotations
@@ -30,6 +34,9 @@ from app.tools.config import ToolSettings, get_tool_settings
 
 READ_ONLY_PREFIXES = ("select", "with")
 READ_ONLY_DIALECTS = frozenset({"postgresql", "sqlite"})
+
+MAX_ROWS = 500
+"""单次查询返回行数的硬上限；`TOOL_SQL_DEFAULT_LIMIT` 也受它约束。"""
 
 _FORBIDDEN_KEYWORDS = (
     "insert",
@@ -74,7 +81,12 @@ class SqlQueryArgs(BaseModel):
         max_length=2000,
         description="单条只读 SELECT/WITH 查询语句",
     )
-    limit: int = Field(default=50, ge=1, le=500, description="返回行数上限")
+    limit: int | None = Field(
+        default=None,
+        ge=1,
+        le=MAX_ROWS,
+        description="返回行数上限；留空使用平台配置的默认值",
+    )
 
 
 class SqlQueryTool(BuiltinTool):
@@ -97,9 +109,10 @@ class SqlQueryTool(BuiltinTool):
     def run(self, args: SqlQueryArgs) -> dict[str, Any]:
         statement = assert_read_only_statement(args.query)
         engine = self._engine or _engine_for(self._resolve_dsn())
+        limit = _resolve_limit(args.limit, self._settings.sql_default_limit)
         try:
             rows, columns, truncated = _execute_read_only(
-                engine, statement, args.limit, self._settings.sql_timeout_seconds
+                engine, statement, limit, self._settings.sql_timeout_seconds
             )
         except ToolExecutionError:
             raise
@@ -116,6 +129,18 @@ class SqlQueryTool(BuiltinTool):
         if self._settings.sql_dsn:
             return self._settings.sql_dsn
         return get_storage_settings().database_url
+
+
+def _resolve_limit(requested: int | None, default: int) -> int:
+    """模型没给 `limit` 时取 `TOOL_SQL_DEFAULT_LIMIT`，并统一夹到 `MAX_ROWS`。
+
+    配置值可能是环境变量给的越界值，所以这里再夹一次：`MAX_ROWS` 是硬上限，
+    不是「默认值」。
+    """
+
+    if requested is not None:
+        return requested
+    return max(1, min(int(default), MAX_ROWS))
 
 
 def assert_read_only_statement(sql: str) -> str:
