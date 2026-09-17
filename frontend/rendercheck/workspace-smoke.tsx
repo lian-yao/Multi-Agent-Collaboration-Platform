@@ -13,6 +13,15 @@
  *   && node "$TEMP/workspace-smoke.cjs"
  * ```
  *
+ * 冒烟本身只跑代码，**不做类型检查**（esbuild 只转译），而 `tsconfig.json` 的
+ * `include` 只有 `src`，覆盖不到本目录。改了本文件或 `preview.tsx` 后要单独过一遍：
+ *
+ * ```bash
+ * npx tsc --noEmit --jsx react-jsx --module esnext --moduleResolution bundler \
+ *   --target es2022 --lib es2022,dom,dom.iterable --strict --skipLibCheck \
+ *   --esModuleInterop --isolatedModules rendercheck/preview.tsx
+ * ```
+ *
  * 退出码 0 = 全通过。只跑不依赖 effects 的渲染路径——`TaskUsage` / `Inspector` 这类
  * 靠 effect 拉数据的容器不在覆盖范围内，仍要人工在浏览器里过一遍。
  */
@@ -22,7 +31,19 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { CollaborationGraph, type CollaboratorNode } from "../src/workspace/CollaborationGraph";
 import { AgentStageModal, type AgentStageDetail } from "../src/workspace/AgentStageModal";
 import { TaskUsagePanel, groupUsage } from "../src/workspace/TaskUsage";
-import type { Agent, Metric } from "../src/types/api";
+import { MessageAttachmentList, PendingFileChips } from "../src/workspace/AttachmentList";
+import {
+  ATTACHMENT_EXTENSIONS,
+  MAX_ATTACHMENT_BYTES,
+  MAX_ATTACHMENT_COUNT,
+  classifyLocal,
+  describeAttachment,
+  formatBytes,
+  rejectionReason,
+  shortenName,
+  type PendingAttachment,
+} from "../src/workspace/attachments";
+import type { Agent, Attachment, Metric } from "../src/types/api";
 
 const results: [boolean, string][] = [];
 const check = (label: string, condition: boolean, detail = "") =>
@@ -98,6 +119,9 @@ const agent: Agent = {
   reasoning_type: "none",
   status: "idle",
   override_keys: ["temperature"],
+  builtin: true,
+  description: "整理任务要求与输入资料，为后续分析准备信息。",
+  enabled: true,
 };
 
 const detail: AgentStageDetail = {
@@ -191,6 +215,139 @@ check(
 );
 
 /* -------------------------------------------------------------------------- */
+/* 多模态附件（ADR-021）                                                       */
+/* -------------------------------------------------------------------------- */
+
+// 前端那份「可接受类型 / 上限」只是给用户即时反馈用的，准入判据在服务端
+// （`app/attachments/spec.py`）。两边口径一散就会「前端放行、后端 400」或者反过来
+// 「前端拦掉后端本来收得下的文件」，所以这里钉的是**口径**而不是实现：
+// 同一批扩展名、同一个 5 MB、同一个 4 个。
+check(
+  "前端扩展名表覆盖图片/代码/文档三类",
+  ["png", "py", "docx", "xlsx", "pdf"].every((ext) =>
+    (ATTACHMENT_EXTENSIONS as readonly string[]).includes(ext),
+  ),
+);
+check("附件数量上限与后端一致", MAX_ATTACHMENT_COUNT === 4);
+check("单文件上限与后端一致（5 MB）", MAX_ATTACHMENT_BYTES === 5 * 1024 * 1024);
+
+check("图片按扩展名归类", classifyLocal("截图.PNG") === "image");
+check("文档按扩展名归类", classifyLocal("季度报告.docx") === "document");
+check("代码按文本归类", classifyLocal("pipeline_graph.py") === "text");
+check(
+  "不支持的格式不静默放行",
+  classifyLocal("archive.zip") === "unsupported",
+  classifyLocal("archive.zip"),
+);
+
+const seats: PendingAttachment[] = Array.from({ length: MAX_ATTACHMENT_COUNT }, (_, i) => ({
+  key: `k${i}`,
+  name: `f${i}.txt`,
+  size: 1024,
+  kind: "text",
+  state: "ready",
+}));
+
+check(
+  "空文件被拒",
+  (rejectionReason({ name: "empty.txt", size: 0 }, []) ?? "").includes("空文件"),
+);
+check(
+  "超限文件被拒且指名是哪个文件",
+  (rejectionReason({ name: "big.pdf", size: 6 * 1024 * 1024 }, []) ?? "").includes("big.pdf"),
+  rejectionReason({ name: "big.pdf", size: 6 * 1024 * 1024 }, []) ?? "未拒绝",
+);
+check(
+  "占满名额后继续选被拒",
+  (rejectionReason({ name: "extra.txt", size: 10 }, seats) ?? "").includes("最多"),
+  rejectionReason({ name: "extra.txt", size: 10 }, seats) ?? "未拒绝",
+);
+check("合法文件放行", rejectionReason({ name: "ok.txt", size: 10 }, []) === null);
+
+check("文件名折叠保留扩展名", shortenName("一个很长的文件名用来测试折叠行为.docx").endsWith(".docx"));
+check("体积按 KB/MB 换算", formatBytes(1536) === "1.5 KB" && formatBytes(3 * 1024 * 1024) === "3.0 MB");
+
+const chip = (
+  key: string,
+  state: PendingAttachment["state"],
+  extra: Partial<PendingAttachment> = {},
+): PendingAttachment => ({ key, name: `${key}.txt`, size: 2048, kind: "text", state, ...extra });
+
+const chips = renderToStaticMarkup(
+  <PendingFileChips
+    items={[
+      chip("upload", "uploading", { name: "现场.png", kind: "image" }),
+      chip("ready", "ready", { name: "季度报告.docx", kind: "document", size: 1536 }),
+      chip("failed", "failed", { name: "扫描件.pdf", kind: "document", error: "未能解析出正文" }),
+    ]}
+    onRemove={() => undefined}
+  />,
+);
+check("待发附件三种状态都渲染", chips.includes("上传中") && chips.includes("1.5 KB"));
+check(
+  "可见文案随状态切换：上传中 / 失败原因 / 体积",
+  chips.includes("<small>上传中…</small>") &&
+    chips.includes("<small>未能解析出正文</small>") &&
+    chips.includes("<small>1.5 KB</small>"),
+  chips.slice(0, 400),
+);
+check("上传失败就地写出原因", chips.includes("未能解析出正文"));
+check(
+  "每个条目带指名到文件的移除按钮",
+  chips.includes('aria-label="移除 扫描件.pdf"') && chips.includes('aria-label="移除 现场.png"'),
+);
+check(
+  "没有待发附件时不渲染空容器",
+  renderToStaticMarkup(<PendingFileChips items={[]} onRemove={() => undefined} />) === "",
+);
+
+const sentAttachment = (over: Partial<Attachment>): Attachment => ({
+  id: "att-1",
+  session_id: "s-1",
+  message_id: "m-1",
+  name: "photo.png",
+  mime: "image/png",
+  size_bytes: 20480,
+  kind: "image",
+  status: "ready",
+  error: null,
+  created_at: "2026-09-16T10:00:00Z",
+  ...over,
+});
+
+const sent = renderToStaticMarkup(
+  <MessageAttachmentList
+    items={[
+      sentAttachment({ id: "img-1", name: "现场.png" }),
+      sentAttachment({ id: "doc-1", name: "季度报告.docx", kind: "document", size_bytes: 40960 }),
+      sentAttachment({
+        id: "bad-1",
+        name: "扫描件.pdf",
+        kind: "document",
+        status: "failed",
+        error: "未能解析出正文，已跳过内容。",
+      }),
+    ]}
+  />,
+);
+check(
+  "图片附件给可点原图链接",
+  sent.includes("/api/v1/attachments/img-1/content") && sent.includes("<img"),
+  sent.slice(0, 400),
+);
+check("非图片附件不渲染 img（正文是抽取出来的文本，没有可看的图）", !sent.includes('src="/api/v1/attachments/doc-1/content"'));
+check("已发送附件写明类型与体积", sent.includes("文档 · 40.0 KB"));
+check(
+  "解析失败的附件显式说明原因",
+  sent.includes("未能解析出正文，已跳过内容。") && sent.includes("message-attachment failed"),
+);
+check(
+  "失败项没有 error 时给兜底文案而不是空白",
+  describeAttachment(sentAttachment({ status: "failed", error: null })).includes("已跳过内容"),
+);
+check("没有附件时不渲染空容器", renderToStaticMarkup(<MessageAttachmentList items={[]} />) === "");
+
+/* -------------------------------------------------------------------------- */
 /* 静态断言：假选择已删除、职责边界已写进注释                                   */
 /* -------------------------------------------------------------------------- */
 
@@ -211,7 +368,11 @@ try {
   );
   check(
     "执行台卡片点击打开阶段弹窗而非侧栏",
-    app.includes("setDetailStage(s.id)") && !app.includes("setInspectorOpen(true)"),
+    // 静态阶段走 setDetailStage，动态步骤（id 不属于 StageId 集合）直接组装 setDetailNode；
+    // 两条路都进弹窗，都不许把右侧任务级边栏顶开。
+    app.includes("setDetailStage(node.stage)") &&
+      app.includes("setDetailNode({") &&
+      !app.includes("setInspectorOpen(true)"),
   );
   const inspection = readFileSync("src/records/Inspection.tsx", "utf8");
   check(
@@ -251,6 +412,59 @@ try {
     "记录页先删后拉、不与删除并发",
     recordsSource.includes("await onDelete(item);"),
     "并发会导致删除请求还没落地就重新拉取，拿回旧列表",
+  );
+
+  // —— 欢迎区引导卡与附件入口的版式（用户 2026-09-16 反馈）——
+  // 卡片是「任务原型」不是三个功能按钮：每张卡都要写出自己的协作形态，
+  // 而协作形态只有在规划 Agent 真的参与时才成立，所以点卡必须同时切编排模式。
+  check(
+    "欢迎卡片各自写出协作形态",
+    ["通常 1 个 Agent 直答", "调查 → 分析 → 总结", "多步核对与整理"].every((shape) =>
+      app.includes(shape),
+    ),
+  );
+  check(
+    "点卡片同时切到自动编排",
+    app.includes('onChoose(p.text, "dynamic")'),
+    "只填文字不换模式，卡片上的协作形态在当前链路下就不成立",
+  );
+  check(
+    "填提示词与设模式在同一个函数里",
+    app.includes("promptMode: OrchestrationMode") && app.includes("setMode(promptMode)"),
+  );
+  check("输入区显式写出当前编排模式", app.includes("welcome-note") && styles.includes(".welcome .welcome-note"));
+  check(
+    "旧横排卡片规则已清理",
+    !styles.includes(".suggestions button"),
+    "残留的 .suggestions button 会把新卡的图标撑成整宽",
+  );
+
+  // 构建期出过一次「CSS 规则被压缩器静默丢掉」的事故（只打 WARNING、退出码仍是 0），
+  // 所以新界面引用的每个类名都要在样式表里有定义，缺一个就说明有规则没落盘。
+  const requiredClasses = [
+    ".suggestion-icon",
+    ".suggestion-shape",
+    ".composer-attach",
+    ".composer-files",
+    ".composer-file.failed",
+    ".conversation-composer.dragging",
+    ".composer-mode button.active",
+    ".message-attachments",
+    ".message-attachment-thumb",
+  ];
+  const missingClasses = requiredClasses.filter((sel) => !styles.includes(sel));
+  check(
+    "新增界面引用的类名都有样式定义",
+    missingClasses.length === 0,
+    `缺 ${missingClasses.join(" / ")}`,
+  );
+  // 附件条目的**类名留给状态**（uploading/ready/failed），类型写在 `data-kind` 上。
+  // 写成 `.message-attachment.text` 这类选择器不会报错、只是永远不命中（初版踩过）。
+  check(
+    "附件类型按 data-kind 选择",
+    styles.includes('.message-attachment[data-kind="text"]') &&
+      styles.includes('.composer-file[data-kind="image"]'),
+    "类型在 data-kind 上，用 .message-attachment.text 之类的选择器永远命不中",
   );
 } catch (cause) {
   check("读取源文件做静态断言", false, cause instanceof Error ? cause.message : String(cause));

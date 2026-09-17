@@ -69,6 +69,7 @@ cd deploy; .\start.ps1                     # 起完整环境
 | U-09 | 流水线接入 MCP 工具 | 注册表工具被发现，按模型 `tool_calls` 调用并回填观察；失败记为 failed 且不中断；阶段载荷可序列化 | M4 |
 | U-10 | 行为日志事件 | 阶段开始/结束/失败与工具调用输出 `event=... field=value` 结构化日志，含 workflow_id 与耗时 | M4 |
 | U-11 | 动态编排计划与调度 | 计划解析只收合法形态（未知角色 / 重复 id / 自依赖 / 前向依赖 / 超步数一律整份丢弃）；规划模型抛错或返回垃圾文本时回退固定三步；依赖就绪度调度、失败连坐（含传递闭包）与最终交付物取值；Dapr 侧先规划后执行、子工作流实例 ID 稳定、业务终态与实例终态一致（ADR-019） | M5 |
+| U-12 | 多模态附件：分类 / 限额 / 解析 / 提示词 | 类型白名单（图片、文本与代码、pdf/docx/xlsx）与三类拒绝理由（空文件 / 超限 / 格式不支持）**都指名到具体文件**；文本解码的 `gb18030` 回退与可打印率闸门能挡住二进制；docx/xlsx 用标准库抽出段落与单元格；PDF 质量闸门把扫描件与 CID 字体判为 `failed`；`build_human_content` 无图片时返回**纯字符串**（不改变既有链路），有图片时升级为 content block；失败项必须出现在附件清单里（ADR-021） | M5 |
 
 ### 2.2 集成测试（I）
 
@@ -84,6 +85,7 @@ cd deploy; .\start.ps1                     # 起完整环境
 | I-08 | 配置热更新 | PATCH agent 后新执行使用新配置 | M4 |
 | I-09 | D7-D8 只读巡检接口 | Provider/Agent/工具/调用/指标接口的分页、`availability` 区分「未接入」与「零条记录」、404/422/503 契约 | M4 |
 | I-10 | Provider 配置读写 | `GET/PUT /api/v1/config/provider`：200 生效值与回退、422 校验、503 写失败、裸请求可写（不鉴权，ADR-015）；覆盖值落 `provider_configs` 并镜像 Redis，响应与日志不含密钥（ADR-014） | M4 |
+| I-11 | 多模态附件接口契约 | `POST /api/v1/attachments` 的 201、四类 400（非法 base64 / 空 / 超限 / 格式不支持）；发消息带上 `attachment_ids` 后附件归属回填且**只挂一次**（重复提交进 `unattached_attachment_ids`）；「只带图不带文字」可发送；`GET .../content` 对图片回字节、对文本与文档与失败项回 404；`DELETE` 未归属 204 / 已发出 409；删会话级联清附件（ADR-021） | M5 |
 
 ### 2.3 端到端测试（E）
 
@@ -294,6 +296,31 @@ MCP 粘贴导入与键值对编辑（2026-09-17 增加）另有一条纯函数�
 11. **契约断言**：`tests/integration/test_api.py` 断言 `PUT /api/v1/config/sandbox` 返回
     **405**。写接口是被显式测掉的——以后要加必须先改这条用例和 ADR-020。
 
+多模态附件与欢迎区引导卡（2026-09-17 增加，ADR-021 / ADR-022）另有一组断言：
+
+12. **纯函数断言**（`workspace/attachments.ts` 与后端 `app/attachments/spec.py` 持同一份口径）：
+    扩展名表命中图片 / 代码 / 文档三类、`MAX_ATTACHMENT_COUNT === 4`、
+    `MAX_ATTACHMENT_BYTES === 5 * 1024 * 1024`、`classifyLocal` 对四类文件的归类、
+    `rejectionReason` 的三类拒绝**必须指名到文件**、`formatBytes` 的 KB/MB 换算、
+    `shortenName` 折叠后仍保留扩展名。
+13. **渲染断言**：`PendingFileChips` 与 `MessageAttachmentList` 按显式 props 单独挂一次
+    （空态必须渲染成空字符串，不能留一个空容器）。三种状态的**可见文案**要各就各位
+    （上传中 / 失败原因 / 体积）；图片附件渲染 `<img>` 且指向附件正文地址，非图片
+    **不得**出现 `img`；解析失败项必须写出原因并带 `failed` 标记。
+14. **读文件断言**：`App.tsx` 必须包含三条协作形态标签、`onChoose(p.text, "dynamic")`
+    （点卡同时切模式）、`promptMode` + `setMode(promptMode)`；`styles.css` **不得再有**
+    `.suggestions button`（旧横排规则残留会把新卡的图标撑成整宽），且新增界面引用的
+    类名（`.suggestion-icon` / `.suggestion-shape` / `.welcome .welcome-note` /
+    `.composer-attach` / `.composer-files` / `.composer-file.failed` /
+    `.conversation-composer.dragging` / `.composer-mode button.active` /
+    `.message-attachments` / `.message-attachment-thumb`）**逐个都要有定义**。
+    最后一条治的是真实事故：`config.css` 曾因残缺注释让 esbuild 压缩器**静默丢掉约 3KB 规则**
+    （只打 WARNING、退出码仍是 0），所以「类名有定义」不能只靠肉眼看构建输出。
+15. **选择器口径断言**：附件条目的**类名留给状态**（`uploading` / `ready` / `failed`），
+    类型写在 `data-kind` 上。必须出现 `.message-attachment[data-kind="text"]` 与
+    `.composer-file[data-kind="image"]`——写成 `.message-attachment.text` 不会报错，
+    只是永远不命中（初版就是这么写的，靠预览自检里数 `[data-kind="document"]` 的条数才发现）。
+
 **边界要说清**：它只跑不依赖 `useEffect` 的路径，跑不到「点击 → 请求 → 回填」的交互
 链路；那部分仍是人工浏览器验收（上面两张表就是人工清单），或退到 §3.4 的静态预览。
 为什么需要它：本机 `npm install agent-browser` 长时间无产物（要拉 ~500MB Chromium），
@@ -325,14 +352,43 @@ python frontend/rendercheck/build-preview.py      # 产出 rendercheck/ui-previe
 - `preview.tsx` 必须**自己** `import "../src/styles.css"`。那一行只在 `src/main.tsx` 里，
   而预览不经过 `main.tsx`；漏了会得到一个没有全局令牌与外壳版式的空壳页面。
 - 变更类请求（保存 / 删除）预览不模拟落库，统一回空成功体，免得评审版式时被红字带偏。
+  **例外是附件（ADR-021）**：`POST /api/v1/attachments` 在内存里造一条真附件、
+  `DELETE` 真删、`POST /messages` 真把消息推进该会话的消息表——因为前端发完立刻重拉
+  `GET /messages`，不真推进去「刚发出去的那条会人间蒸发」，评审时会以为是 bug。
+- 图片附件在预览里用**内联 SVG 顶替**正文地址（`preview.tsx` 换掉
+  `api.attachmentContentUrl` 的返回值）。`<img src>` 不走 `fetch`，mock 拦不住它，
+  预览又是 `file://` 单文件，不替换必然裂图，「缩略图长什么样」就评审不出来。
+- `build-preview.py` 里 `POST /messages` 的响应必须带 `attachments` 与
+  `unattached_attachment_ids` 两个字段：前端会读后者 `.length`，缺了就在「发送成功」之后
+  抛 `TypeError`（预览里点一次发送即可复现）。
+- **注释里不能出现 `*/`。** `preview.tsx` 的一条注释写了 `/api/v1/attachments/*/content`，
+  其中的 `*/` 把块注释提前闭合，后半段代码被当成语法碎片，`tsc` 报出一串
+  「Module declaration names may only use ' or " quoted strings / Unterminated template literal」
+  这类与真实位置无关的错。写路径通配时改成 `<id>` 或 `xxx`。
+- **`tsconfig.json` 的 `include` 只有 `src`**，`rendercheck/` 不在里面，所以
+  `npm run build` 覆盖不到这三个文件（esbuild 只转译、不做类型检查）。改完要单独过一遍：
+
+  ```bash
+  cd frontend && npx tsc --noEmit --jsx react-jsx --module esnext \
+    --moduleResolution bundler --target es2022 --lib es2022,dom,dom.iterable \
+    --strict --skipLibCheck --esModuleInterop --isolatedModules rendercheck/preview.tsx
+  ```
+
+  （会剩下 `node:fs` / `process` 找不到声明的报错，那是项目没依赖 `@types/node`，不是代码问题。）
 - 产物 `ui-preview.html` 与中间产物 `.preview-bundle.*` 已进 `.gitignore`，不入库。
 
-预览产物本身可以离线自检（`jsdom` 挂载 + 点一遍侧栏与副路由与四个配置分区，30 项断言）。这条链路
-**不进仓库**，因为项目刻意不引前端测试依赖；本机想跑就临时装：
+预览产物本身可以离线自检（`jsdom` 挂载 + 点一遍侧栏、副路由、四个配置分区、会话生命周期，
+以及 2026-09-17 新增的欢迎卡与附件：三张卡在且竖排居中、**先手动切「固定三步」再点卡片**
+验证模式被切回「自动编排」、切开会话后气泡里的三种附件形态，共 42 项断言）。
+这条链路**不进仓库**，因为项目刻意不引前端测试依赖；本机想跑就临时装：
 
 ```bash
 npm i jsdom && node verify_preview.mjs frontend/rendercheck/ui-preview.html
 ```
+
+> 为什么「先手动切到固定三步」这一步不能省：模式默认就是 `dynamic`，不先改一次的话
+> 「点卡片后是自动编排」这条断言**在功能坏掉时也会通过**。凡是断言「某动作导致了状态变化」，
+> 都要先把状态置于另一个值。
 
 > **纠正一条旧结论**：早前记录「`npm install jsdom` 长时间无产物」被当成网络问题。
 > 真实原因是 **npm 在缺少 `package.json` 的目录里会挂住**——补一个最小
@@ -533,6 +589,66 @@ I-06 `/workflows/{id}/tool-calls` 返回 `availability=available`；E-04 API 侧
    「完整历史查询尚未接入」）。做完整历史需要新增 `GET /api/v1/workflows` 一类的列表
    接口，属新增能力，本轮未做；因此**不据此宣称** `分工.md` §7 的「Web UI 可展示任务历史」
    已闭环。
+
+### 4.4 多模态附件与欢迎区引导卡（2026-09-17，成员 D）
+
+对应 ADR-021 / ADR-022。新增与改动：`app/attachments/`、`attachments` 表、三个附件接口、
+发送消息契约加 `attachment_ids` 与 `orchestration_mode`、编排侧四处 `attachments` 透传、
+前端附件交互与欢迎区重做。
+
+**1. 后端（隔离存储，跑法与 §1 一致）**
+
+```bash
+DATABASE_URL="postgresql+psycopg://postgres:postgres@localhost:5433/macp_test" \
+REDIS_URL="redis://localhost:6380/15" ./.venv/Scripts/python.exe -m pytest -q
+# 669 passed, 7 skipped, 6 warnings in 11.06s
+
+DATABASE_URL="..." REDIS_URL="..." ./.venv/Scripts/python.exe -m pytest -q \
+  tests/unit/test_attachments.py tests/integration/test_attachments_api.py \
+  tests/unit/test_dynamic_pipeline.py
+# 94 passed in 2.22s
+```
+
+新增 48 例附件用例（39 单元 + 9 集成）与 3 例「附件只进根步骤」的动态编排用例。
+`7 skipped` 与 `6 warnings` 均为既有状态（需真实模型 / Starlette 弃用告警），本轮未新增跳过项。
+
+`test_attachments_api.py` 覆盖：上传 201、四类 400、挂消息后归属回填、**重复提交只挂一次**
+（第二次进 `unattached_attachment_ids`）、只带图不带文字可发送、`GET .../content` 的分支、
+`DELETE` 的 204/409、删会话级联清附件。`test_dynamic_pipeline.py` 新增：附件只进
+`depends_on` 为空的根步骤、每个根步骤都拿到、静态 `collect` 收到附件。
+
+**2. 前端（无测试框架，仍按「构建 + 无浏览器冒烟 + 预览自检」三步）**
+
+```bash
+npm --prefix frontend run build
+# 通过：tsc --noEmit && vite build，3163 modules，
+# 产物 index-CuZF9lSI.css 78.39 kB / index-Br57znTm.js 402.67 kB
+```
+
+- `rendercheck/workspace-smoke.tsx` → **75/75**（原 44 项 + 本次 31 项：附件纯函数与两类渲染、
+  4 条读文件断言、选择器口径断言）
+- `rendercheck/config-smoke.tsx` → **69/69**（无回归）
+- `rendercheck/ui-preview.html` 的 jsdom 自检 → **42/42**（原 30 项 + 本次 12 项：
+  三张引导卡与竖排居中、卡片点选切模式、气泡里三种附件形态）
+
+**3. 构建产物核对（防止样式被静默丢弃）**
+
+构建退出 0 **不等于**样式完整：`config.css` 曾因残缺注释让 esbuild 压缩器静默丢掉约 3KB 规则
+（只打 WARNING）。所以改完 CSS 要回查 `dist/assets/*.css` 里类名还在。
+本次核对结果是**注意压缩器会把属性选择器的引号去掉**：`[data-kind="text"]` 在产物里是
+`[data-kind=text]`，用带引号的形式去 `grep` 会得到 0 命中，误判成规则被丢
+（初版就误判过一次）。查的时候用去引号形式。
+
+**4. 未做 / 未验（不隐瞒）**
+
+1. **容器未重建**：本轮只跑到源码与构建产物，`docker compose up -d --build frontend backend`
+   与真实后端联调（拖文件 → chip → 发送 → 气泡）**未做**，因此不宣称 E-04 已覆盖附件路径。
+2. **图片理解未接真实模型**：`build_human_content` 在单测里断言了 content block 的身份与形状，
+   但没有向真实视觉模型发过一次图。「所选模型是否真能看图」仍取决于提供方。
+3. **PDF 只测了「可读」与「读不出」两类**：没有覆盖真实扫描件样本（用例里的 PDF 是构造的
+   极简字节）。
+4. **附件在动态编排下未做真实模型回归**：与 §4.2 里 U-11 的缺口同源（动态模式本身就没有
+   真实模型回归）。
 
 ## 5. 失败处理约定
 

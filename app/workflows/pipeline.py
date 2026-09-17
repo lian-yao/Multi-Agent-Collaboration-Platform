@@ -14,12 +14,14 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import asdict, dataclass
+from collections.abc import Sequence
+from dataclasses import asdict, dataclass, field
 from datetime import timedelta
 from typing import Any
 
 import dapr.ext.workflow as wf
 
+from app.attachments import AttachmentPayload, load_payloads
 from app.config import AgentSettings
 from app.core.agent_config import resolve_agent_settings
 from app.core.tool_audit import AuditedToolRegistry
@@ -80,6 +82,14 @@ class WorkflowTask:
     `WorkflowService.schedule` 据此选择工作流名，见 ADR-019。
     """
 
+    attachment_ids: list[str] = field(default_factory=list)
+    """随本条消息上传的附件 id（ADR-021）。
+
+    **只传 id 不传内容**：附件里可能有一张 5 MB 的图片，把 base64 塞进工作流输入
+    会直接顶爆 Dapr gRPC 的默认 4 MB 载荷上限。执行阶段按 id 取正文，
+    见 `app.attachments.load_payloads`。
+    """
+
     def asdict(self) -> dict[str, Any]:
         return asdict(self)
 
@@ -136,6 +146,7 @@ def advance_pipeline_stage(
     run_id: str | None = None,
     workflow_run_id: str | None = None,
     tool_registry: ToolRegistry | None = None,
+    attachments: Sequence[AttachmentPayload] = (),
 ) -> dict[str, Any]:
     """推进一个阶段，审计工具调用并保留 Workflow 行为日志关联。"""
 
@@ -169,6 +180,7 @@ def advance_pipeline_stage(
             tool_registry=registry,
             tool_scope=workflow_run_id or workflow_id or run_id,
             workflow_id=workflow_id,
+            attachments=attachments,
         )
     updated = complete_step(state, stage, result)
     return {**build_step_result(updated), "result": result}
@@ -191,6 +203,13 @@ def _run_stage_activity(
         or ctx.workflow_id
     )
     use_fake_model = bool(task.get("use_fake_model"))
+    # 附件只在**接收原始任务的那一步**注入（静态链路即 collect）：下游拿到的是
+    # 上游产出的正文，再塞一遍附件既无新增信息，又让图片在每次调用里重复计费。
+    attachments = (
+        ()
+        if use_fake_model
+        else tuple(load_payloads([str(value) for value in task.get("attachment_ids") or []]))
+    )
     outcome = advance_pipeline_stage(
         state,
         stage,
@@ -202,6 +221,7 @@ def _run_stage_activity(
         workflow_id=workflow_id,
         run_id=task.get("agent_run_id"),
         workflow_run_id=workflow_id,
+        attachments=attachments,
     )
     _record_checkpoint(
         workflow_id,

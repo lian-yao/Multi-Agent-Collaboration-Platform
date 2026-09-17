@@ -25,9 +25,11 @@ import {
   PanelBottom,
   PanelLeft,
   PanelRight,
+  Paperclip,
   Plus,
   RefreshCw,
   RotateCcw,
+  Search,
   Send,
   Settings2,
   ShieldCheck,
@@ -56,7 +58,24 @@ import { RecordsPage, type RecordTabId } from "./records/RecordsPage";
 import { AgentStageModal, type AgentStageDetail } from "./workspace/AgentStageModal";
 import { CollaborationGraph, type CollaboratorNode } from "./workspace/CollaborationGraph";
 import { TaskUsage } from "./workspace/TaskUsage";
-import type { Agent, Message, Session, SessionSummary, Workflow } from "./types/api";
+import { MessageAttachmentList, PendingFileChips } from "./workspace/AttachmentList";
+import {
+  ATTACHMENT_ACCEPT,
+  MAX_ATTACHMENT_COUNT,
+  classifyLocal,
+  fileToBase64,
+  rejectionReason,
+  type PendingAttachment,
+} from "./workspace/attachments";
+import type {
+  Agent,
+  Message,
+  OrchestrationMode,
+  PlanStepSummary,
+  Session,
+  SessionSummary,
+  Workflow,
+} from "./types/api";
 
 const stages = [
   {
@@ -104,6 +123,11 @@ export function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
   const [content, setContent] = useState("");
+  // 编排模式：默认自动编排（ADR-019 的 `dynamic`）。服务端默认仍是 static，
+  // 这里是**前端每次请求显式声明**的取值，输入框右侧随时可切回固定三步。
+  const [mode, setMode] = useState<OrchestrationMode>("dynamic");
+  // 待发送附件：选文件即上传，提交时只带 id（ADR-021）。
+  const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -171,12 +195,95 @@ export function App() {
   // 当前任务标题：取首条用户消息，无则视为「新建任务」。侧栏用户区与记录页页头共用。
   const currentTaskTitle =
     messages.find((message) => message.role === "user")?.content ?? "";
+
+  /**
+   * 选文件即上传（ADR-021）。
+   *
+   * 提前上传而不是等提交时再传：上传要花时间，失败要重试，两者都该在**输入阶段**
+   * 让用户看到，而不是点了发送之后等一个说不清是「在传」还是「在跑」的状态。
+   * 提交时只提交已经拿到 id 的那几个，失败的条目留在输入区让用户自己决定。
+   */
+  const pickFiles = async (files: FileList | File[]) => {
+    const list = Array.from(files);
+    // 配对而不是按下标对齐：被拒的文件不会进 `accepted`，按下标取会整体错位，
+    // 结果是把 A 的字节当成 B 的名字上传。
+    const pairs: { item: PendingAttachment; file: File }[] = [];
+    const rejected: string[] = [];
+    let slots = MAX_ATTACHMENT_COUNT - attachments.length;
+    for (const file of list) {
+      const reason = rejectionReason(file, [...attachments, ...pairs.map((p) => p.item)]);
+      if (reason || slots <= 0) {
+        rejected.push(reason ?? `单条消息最多附带 ${MAX_ATTACHMENT_COUNT} 个附件。`);
+        continue;
+      }
+      slots -= 1;
+      pairs.push({
+        file,
+        item: {
+          key: `${file.name}-${file.size}-${file.lastModified}-${Math.random().toString(36).slice(2, 8)}`,
+          name: file.name,
+          size: file.size,
+          kind: classifyLocal(file.name),
+          state: "uploading",
+        },
+      });
+    }
+    if (rejected.length) setError(rejected[0]);
+    if (!pairs.length) return;
+    setAttachments((current) => [...current, ...pairs.map((pair) => pair.item)]);
+
+    await Promise.all(
+      pairs.map(async ({ item, file }) => {
+        try {
+          const base64 = await fileToBase64(file);
+          const uploaded = await api.uploadAttachment(item.name, file.type, base64);
+          setAttachments((current) =>
+            current.map((entry) =>
+              entry.key === item.key
+                ? {
+                    ...entry,
+                    state: uploaded.status === "failed" ? "failed" : "ready",
+                    id: uploaded.id,
+                    // 服务端解析失败时附件仍然登记成功，但正文取不出来——如实标出来，
+                    // 否则用户会以为这份 PDF 被读进去了。
+                    error: uploaded.error ?? undefined,
+                  }
+                : entry,
+            ),
+          );
+        } catch (cause) {
+          setAttachments((current) =>
+            current.map((entry) =>
+              entry.key === item.key
+                ? {
+                    ...entry,
+                    state: "failed",
+                    error: cause instanceof Error ? cause.message : "上传失败",
+                  }
+                : entry,
+            ),
+          );
+        }
+      }),
+    );
+  };
+
+  const removeAttachment = (key: string) => {
+    const target = attachments.find((item) => item.key === key);
+    setAttachments((current) => current.filter((item) => item.key !== key));
+    // 已经登记到服务端的顺手删掉；删失败不影响界面（最坏情况只留一条未归属的附件行）。
+    if (target?.id) void api.deleteAttachment(target.id).catch(() => undefined);
+  };
+
   const submit = async (e: FormEvent) => {
     e.preventDefault();
+    const ready = attachments.filter((item) => item.state === "ready" && item.id);
+    const uploading = attachments.some((item) => item.state === "uploading");
     if (
       session?.status === "paused" ||
       sending ||
-      !content.trim() ||
+      uploading ||
+      (!content.trim() && !ready.length) ||
       workflow?.status === "running" ||
       workflow?.status === "pending"
     )
@@ -193,8 +300,18 @@ export function App() {
         created = true;
         setSession(fresh);
       }
-      const accepted = await api.sendMessage(sessionId, content.trim());
+      const accepted = await api.sendMessage(sessionId, content.trim(), {
+        attachmentIds: ready.map((item) => item.id as string),
+        orchestrationMode: mode,
+      });
       setContent("");
+      setAttachments([]);
+      if (accepted.unattached_attachment_ids.length) {
+        // 消息发出去了，附件缺了几个 —— 部分失败单独提示，不能并进提交失败里。
+        setError(
+          `消息已发送，但有 ${accepted.unattached_attachment_ids.length} 个附件没能附上，请重新上传。`,
+        );
+      }
       setWorkflow(await api.getWorkflow(accepted.workflow_id));
       setMessages(await api.getMessages(sessionId));
       finalRefreshDone.current = null;
@@ -220,6 +337,11 @@ export function App() {
     setMessages([]);
     setWorkflow(null);
     setContent("");
+    // 未发出的附件已登记在服务端，换任务时顺手清掉，别留孤儿行。
+    attachments.forEach((item) => {
+      if (item.id) void api.deleteAttachment(item.id).catch(() => undefined);
+    });
+    setAttachments([]);
     finalRefreshDone.current = null;
     setView("workspace");
   };
@@ -438,6 +560,11 @@ export function App() {
                 setRecordTab("calls");
                 setView("records");
               }}
+              attachments={attachments}
+              onPickFiles={pickFiles}
+              onRemoveAttachment={removeAttachment}
+              mode={mode}
+              setMode={setMode}
             />
           )}
           {view === "records" && (
@@ -646,6 +773,13 @@ type WorkspaceProps = {
   toggleSession: () => void;
   /** 跳到「任务记录」页看逐条采样与工具调用（侧栏与弹窗都只给入口，不重复渲染）。 */
   onOpenRecords: () => void;
+  /** 待发送附件（ADR-021）。上传在选文件时就发生，这里只承载状态。 */
+  attachments: PendingAttachment[];
+  onPickFiles: (files: FileList | File[]) => void;
+  onRemoveAttachment: (key: string) => void;
+  /** 编排模式（ADR-019）：`static` 固定三步，`dynamic` 由规划节点按任务分配角色。 */
+  mode: OrchestrationMode;
+  setMode: (value: OrchestrationMode) => void;
 };
 
 type StageId = (typeof stages)[number]["id"];
@@ -680,8 +814,8 @@ function participatingStages(agents: Agent[]): (typeof stages)[number][] {
 /**
  * 协作链路的波次。
  *
- * 后端当前是固定串行流水线，所以每波只有一个节点；编排层支持并行波次后，
- * 只需在这里把同波阶段放进同一个数组，`CollaborationGraph` 无需改动。
+ * 静态链路是固定串行流水线，所以每波只有一个节点；动态链路（ADR-019）按计划步骤
+ * 顺序展开——当前档位同样是串行，波内并行的 `depends_on` 同层步骤要等档 3。
  */
 function collaborationWaves(
   list: (typeof stages)[number][],
@@ -690,6 +824,22 @@ function collaborationWaves(
   completed: Set<string>,
 ): CollaboratorNode[][] {
   if (!workflow) return [];
+  const plan = planSteps(workflow);
+  if (plan.length) {
+    return plan.map((step) => {
+      const meta = stageForRole(step.role);
+      return [
+        {
+          id: step.id,
+          stageLabel: `${meta.label} · ${step.id}`,
+          agentName:
+            agents.find((agent) => agent.id === meta.agent)?.name ??
+            `${meta.agent} Agent`,
+          status: planStepStatus(step),
+        },
+      ];
+    });
+  }
   return list.map((stage) => [
     {
       id: stage.id,
@@ -700,6 +850,92 @@ function collaborationWaves(
       status: stageStatus(stage.id, workflow, completed),
     },
   ]);
+}
+
+/**
+ * 执行台节点：把「静态阶段」与「动态计划步骤」收敛成同一种形状，
+ * 渲染分支因此只有一处——否则动态链路一上线，执行台就会空着不动
+ * （它按 `stages` 常量渲染，而动态链路的进度字段是 `s1/s2/…`）。
+ */
+type DockNode = {
+  id: string;
+  label: string;
+  agent: string;
+  icon: (typeof stages)[number]["icon"];
+  tone: string;
+  responsibility: string;
+  state: string;
+  /** 静态阶段才有，用于打开固定的阶段详情弹窗。 */
+  stage: StageId | null;
+};
+
+/** 动态链路才产出计划；静态链路下 `checkpoint.plan` 不存在。 */
+function planSteps(workflow: Workflow | null): PlanStepSummary[] {
+  const plan = workflow?.checkpoint?.plan;
+  return Array.isArray(plan) ? plan : [];
+}
+
+/** 角色 id 反查静态阶段元信息；未知角色给一份兜底，不让执行台缺节点。 */
+function stageForRole(role: string) {
+  return (
+    stages.find((stage) => stage.agent === role) ?? {
+      id: role as StageId,
+      label: role,
+      agent: role,
+      icon: Bot,
+      tone: "blue",
+    }
+  );
+}
+
+/**
+ * 计划步骤的显示状态。
+ *
+ * `skipped` 必须原样透出：它和 `pending` 在界面上长得像，但语义完全相反——
+ * 一个是「还在等」，一个是「因为上游失败已经放弃」。
+ */
+function planStepStatus(step: PlanStepSummary): string {
+  if (step.status === "completed") return "completed";
+  if (step.status === "failed") return "failed";
+  if (step.status === "skipped") return "skipped";
+  return "pending";
+}
+
+function dockNodes(
+  workflow: Workflow | null,
+  agents: Agent[],
+  completed: Set<string>,
+): DockNode[] {
+  if (!workflow) return [];
+  const plan = planSteps(workflow);
+  if (plan.length) {
+    return plan.map((step) => {
+      const meta = stageForRole(step.role);
+      return {
+        id: step.id,
+        label: `${meta.label} · ${step.id}`,
+        agent: meta.agent,
+        icon: meta.icon,
+        tone: meta.tone,
+        responsibility:
+          step.depends_on.length > 0
+            ? `由规划 Agent 指派，依赖 ${step.depends_on.join("、")}`
+            : "由规划 Agent 指派，直接接收用户任务",
+        state: planStepStatus(step),
+        stage: null,
+      };
+    });
+  }
+  return participatingStages(agents).map((stage) => ({
+    id: stage.id,
+    label: stage.label,
+    agent: stage.agent,
+    icon: stage.icon,
+    tone: stage.tone,
+    responsibility: responsibilities[stage.id],
+    state: stageStatus(stage.id, workflow, completed),
+    stage: stage.id,
+  }));
 }
 
 /** 运行时长：进行中按「到现在」算，终态用 `completed_at`。 */
@@ -752,28 +988,36 @@ function Workspace({
   submit,
   toggleSession,
   onOpenRecords,
+  attachments,
+  onPickFiles,
+  onRemoveAttachment,
+  mode,
+  setMode,
 }: WorkspaceProps) {
   const stream = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
+  const filePicker = useRef<HTMLInputElement>(null);
   const followLatest = useRef(true);
   const [currentMessage, setCurrentMessage] = useState("");
   // 执行台卡片点开的是「单个 Agent 的阶段详情」，与右侧任务级侧栏解耦。
   const [detailStage, setDetailStage] = useState<StageId | null>(null);
+  // 动态链路的节点 id 是计划步骤（s1/s2…），不属于固定的 `StageId` 集合，
+  // 因此单独存一份已组装好的详情，避免为一个新形态去放宽既有的阶段类型。
+  const [detailNode, setDetailNode] = useState<AgentStageDetail | null>(null);
   const [composerExpanded, setComposerExpanded] = useState(false);
+  const [dragging, setDragging] = useState(false);
   const [atBottom, setAtBottom] = useState(true);
   const busy =
     sending || workflow?.status === "running" || workflow?.status === "pending";
   const participating = participatingStages(agents);
   const waves = collaborationWaves(participating, workflow, agents, completed);
   // 执行台把当前阶段置顶，便于执行中一眼看到谁在跑；协作链路视图仍按真实顺序渲染。
-  const runtimeStages = workflow
-    ? [...participating].sort((left, right) =>
-        left.id === activeStage ? -1 : right.id === activeStage ? 1 : 0,
-      )
-    : [];
-  const detail = detailStage
-    ? stageDetail(detailStage, workflow, agents, completed)
-    : null;
+  const runtimeNodes = dockNodes(workflow, agents, completed).sort((left, right) =>
+    left.id === activeStage ? -1 : right.id === activeStage ? 1 : 0,
+  );
+  const detail =
+    detailNode ?? (detailStage ? stageDetail(detailStage, workflow, agents, completed) : null);
+  const uploading = attachments.some((item) => item.state === "uploading");
 
   useEffect(() => {
     if (followLatest.current && stream.current)
@@ -813,9 +1057,16 @@ function Workspace({
     });
     target.focus({ preventScroll: true });
   }
-  function choosePrompt(prompt: string) {
+  function choosePrompt(prompt: string, promptMode: OrchestrationMode) {
     setContent(prompt);
+    // 卡片承诺的是「按任务分配角色」，所以必须同时把编排模式切过去——
+    // 只填文字不换模式，卡片上的协作形态就是一句在默认链路下不成立的话。
+    setMode(promptMode);
     composer.current?.focus();
+  }
+  function pickFiles(files: FileList | File[]) {
+    if (!files || !("length" in files) || !files.length) return;
+    onPickFiles(files);
   }
 
   return (
@@ -852,7 +1103,10 @@ function Workspace({
                       <div>
                         <b>任务{statusText[workflow.status]}</b>
                         <span>
-                          已完成 {completed.size} 个阶段 · 可在下方查看执行状态
+                          {planSteps(workflow).length
+                            ? `自动编排 · 计划 ${planSteps(workflow).length} 步，已完成 ${completed.size} 步`
+                            : `已完成 ${completed.size} 个阶段`}
+                          {" · 可在下方查看执行状态"}
                         </span>
                         {workflow.status === "completed" &&
                           !messages.some(
@@ -865,7 +1119,7 @@ function Workspace({
                   )}
                 </div>
               ) : (
-                <Welcome onChoose={choosePrompt} />
+                <Welcome onChoose={choosePrompt} mode={mode} />
               )}
             </div>
             {!atBottom && (
@@ -885,20 +1139,44 @@ function Workspace({
           </div>
         </div>
         <form
-          className={`conversation-composer ${composerExpanded ? "expanded" : ""}`}
+          className={`conversation-composer ${composerExpanded ? "expanded" : ""} ${dragging ? "dragging" : ""}`}
           onSubmit={(e) => {
             followLatest.current = true;
             submit(e);
           }}
+          onDragOver={(e) => {
+            // 只在真的拖了文件时才进入拖放态，否则会把文本拖选也变成「松手即上传」。
+            if (!Array.from(e.dataTransfer.types).includes("Files")) return;
+            e.preventDefault();
+            setDragging(true);
+          }}
+          onDragLeave={(e) => {
+            if (e.currentTarget.contains(e.relatedTarget as Node | null)) return;
+            setDragging(false);
+          }}
+          onDrop={(e) => {
+            if (!e.dataTransfer.files?.length) return;
+            e.preventDefault();
+            setDragging(false);
+            pickFiles(e.dataTransfer.files);
+          }}
         >
           <button type="button" className="composer-resize" aria-label={composerExpanded ? "收起输入框" : "展开输入框"} onClick={() => setComposerExpanded((expanded) => !expanded)}><Maximize2 size={13} /></button>
+          <PendingFileChips items={attachments} onRemove={onRemoveAttachment} />
           <textarea
             ref={composer}
             aria-label="任务输入"
             value={content}
             onChange={(e) => setContent(e.target.value)}
-            placeholder="描述任务，或继续补充你的想法…"
+            placeholder="描述任务，上传图片或文档，或继续补充你的想法…"
             disabled={session?.status === "paused"}
+            onPaste={(e) => {
+              // 截图直接粘贴是最常见的收图方式，比先存盘再选文件少两步。
+              const files = Array.from(e.clipboardData?.files ?? []);
+              if (!files.length) return;
+              e.preventDefault();
+              pickFiles(files);
+            }}
             onKeyDown={(e) => {
               if (
                 e.key === "Enter" &&
@@ -912,19 +1190,63 @@ function Workspace({
           />
           <div className="composer-toolbar">
             <div className="composer-hint">
+              <input
+                ref={filePicker}
+                type="file"
+                multiple
+                accept={ATTACHMENT_ACCEPT}
+                hidden
+                onChange={(e) => {
+                  if (e.target.files) pickFiles(e.target.files);
+                  // 清空 value：否则连续选同一个文件不会再触发 change。
+                  e.target.value = "";
+                }}
+              />
+              <button
+                type="button"
+                className="composer-attach"
+                aria-label="添加附件"
+                disabled={session?.status === "paused" || attachments.length >= MAX_ATTACHMENT_COUNT}
+                onClick={() => filePicker.current?.click()}
+              >
+                <Paperclip size={14} />
+                附件
+              </button>
               <small>
                 {session?.status === "paused"
                   ? "会话已暂停"
                   : busy
                     ? "等待本次执行完成"
-                    : "由编排层自动决策参与 Agent · Enter 发送 · Shift + Enter 换行"}
+                    : attachments.length
+                      ? `已附 ${attachments.length}/${MAX_ATTACHMENT_COUNT} 个文件 · 图片需所选模型支持视觉`
+                      : "可拖拽或粘贴图片/文档 · Enter 发送 · Shift + Enter 换行"}
               </small>
+            </div>
+            <div className="composer-mode" role="group" aria-label="编排模式">
+              {([
+                ["dynamic", "自动编排", "由规划 Agent 按任务决定谁参与"],
+                ["static", "固定三步", "始终走 收集 → 分析 → 报告"],
+              ] as const).map(([value, label, hint]) => (
+                <button
+                  key={value}
+                  type="button"
+                  className={mode === value ? "active" : ""}
+                  aria-pressed={mode === value}
+                  title={hint}
+                  onClick={() => setMode(value)}
+                >
+                  {label}
+                </button>
+              ))}
             </div>
             <button
               className="primary-button"
               aria-label="发送任务"
               disabled={
-                busy || !content.trim() || session?.status === "paused"
+                busy ||
+                uploading ||
+                session?.status === "paused" ||
+                (!content.trim() && !attachments.some((item) => item.state === "ready"))
               }
             >
               {sending ? (
@@ -949,9 +1271,13 @@ function Workspace({
       {detail && (
         <AgentStageModal
           detail={detail}
-          onClose={() => setDetailStage(null)}
+          onClose={() => {
+            setDetailStage(null);
+            setDetailNode(null);
+          }}
           onOpenRecords={() => {
             setDetailStage(null);
+            setDetailNode(null);
             onOpenRecords();
           }}
         />
@@ -969,7 +1295,7 @@ function Workspace({
           <div>
             <span>
               {workflow
-                ? `${completed.size} / ${runtimeStages.length} 完成`
+                ? `${completed.size} / ${runtimeNodes.length} 完成`
                 : "等待任务"}
             </span>
             <button
@@ -984,27 +1310,53 @@ function Workspace({
         </header>
         {dockOpen && workflow && (
           <div className="dock-track">
-            {runtimeStages.map((s) => {
-              const Icon = s.icon;
-              const state = stageStatus(s.id, workflow, completed);
-              const agent = agents.find((entry) => entry.id === s.agent);
-              const stepText = state === "running" ? "正在执行当前阶段" : state === "completed" ? "阶段已完成，检查点已保存" : state === "failed" ? "阶段执行失败，等待处理" : "等待前置阶段完成";
+            {runtimeNodes.map((node) => {
+              const Icon = node.icon;
+              const agent = agents.find((entry) => entry.id === node.agent);
+              const selected = detail?.stageId === node.id;
+              const stepText =
+                node.state === "running"
+                  ? "正在执行当前步骤"
+                  : node.state === "completed"
+                    ? "步骤已完成，检查点已保存"
+                    : node.state === "failed"
+                      ? "步骤执行失败，下游已跳过"
+                      : node.state === "skipped"
+                        ? "上游未成功，本步已跳过"
+                        : "等待前置步骤完成";
               return (
                 <button
-                  key={s.id}
-                  className={`dock-node cli-node ${s.tone} ${state} ${detailStage === s.id ? "selected" : ""}`}
-                  aria-label={`查看${agent?.name ?? `${s.label} Agent`}的阶段详情`}
-                  aria-pressed={detailStage === s.id}
-                  onClick={() => setDetailStage(s.id)}
+                  key={node.id}
+                  className={`dock-node cli-node ${node.tone} ${node.state} ${selected ? "selected" : ""}`}
+                  aria-label={`查看${agent?.name ?? `${node.label} Agent`}的步骤详情`}
+                  aria-pressed={selected}
+                  onClick={() => {
+                    if (node.stage) {
+                      setDetailNode(null);
+                      setDetailStage(node.stage);
+                      return;
+                    }
+                    // 动态链路的步骤 id 不属于固定的 StageId 集合，直接组装详情。
+                    setDetailStage(null);
+                    setDetailNode({
+                      stageId: node.id,
+                      stageLabel: node.label,
+                      responsibility: node.responsibility,
+                      status: node.state,
+                      agent: agent ?? null,
+                      checkpointSaved: node.state === "completed",
+                      updatedAt: workflow.updated_at,
+                    });
+                  }}
                 >
                   <span className="cli-node-head">
-                    <span className="dock-icon">{state === "completed" ? <Check size={17} /> : state === "running" ? <LoaderCircle size={17} className="spin" /> : <Icon size={17} />}</span>
-                    <span className="cli-node-title"><strong>{agent?.name ?? `${s.agent} Agent`}</strong><small>{agent?.model ?? "模型由运行时提供"}</small></span>
-                    <Status status={state} />
+                    <span className="dock-icon">{node.state === "completed" ? <Check size={17} /> : node.state === "running" ? <LoaderCircle size={17} className="spin" /> : <Icon size={17} />}</span>
+                    <span className="cli-node-title"><strong>{agent?.name ?? `${node.agent} Agent`}</strong><small>{agent?.model ?? "模型由运行时提供"}</small></span>
+                    <Status status={node.state} />
                   </span>
-                  <span className="cli-step"><i className={state === "running" ? "pulse" : ""} />{stepText}</span>
-                  <span className="cli-log"><code>{state === "running" ? ">" : "$"}</code><span>{state === "completed" ? "checkpoint.persisted" : `${s.label} · ${responsibilities[s.id]}`}</span></span>
-                  <span className="cli-meta"><span><Clock3 size={12} />{time(workflow.updated_at)}</span><span><Zap size={12} />{state === "completed" ? "已记录" : "监听中"}</span><ChevronRight size={14} /></span>
+                  <span className="cli-step"><i className={node.state === "running" ? "pulse" : ""} />{stepText}</span>
+                  <span className="cli-log"><code>{node.state === "running" ? ">" : "$"}</code><span>{node.state === "completed" ? "checkpoint.persisted" : `${node.label} · ${node.responsibility}`}</span></span>
+                  <span className="cli-meta"><span><Clock3 size={12} />{time(workflow.updated_at)}</span><span><Zap size={12} />{node.state === "completed" ? "已记录" : "监听中"}</span><ChevronRight size={14} /></span>
                 </button>
               );
             })}
@@ -1044,24 +1396,44 @@ function ConversationOutline({
     </nav>
   );
 }
-function Welcome({ onChoose }: { onChoose: (value: string) => void }) {
+/**
+ * 空白会话的引导区。
+ *
+ * 三张卡片是**任务原型**，不是三个功能按钮：它们各自代表一类协作形态，
+ * 点下去会把问题填进输入框、同时把编排模式切到「自动编排」——
+ * 卡片上写的「通常 1 个 Agent 直答」「调查 → 分析 → 总结」只有在规划 Agent
+ * 真的参与判断时才成立，所以切模式是卡片语义的一部分，不是附带的方便操作。
+ *
+ * 当前生效的模式在卡片下方**显式写出**，用户随时能在输入框右侧改回来；
+ * 宁可让这句提示显得啰嗦，也不要让卡片承诺一件当前链路不会做的事。
+ */
+function Welcome({
+  onChoose,
+  mode,
+}: {
+  onChoose: (value: string, mode: OrchestrationMode) => void;
+  mode: OrchestrationMode;
+}) {
   const prompts = [
     {
-      icon: FileText,
-      title: "解读一篇文章",
-      text: "请分析以下技术文章，提取核心观点并生成结构化报告：",
+      icon: MessageSquareText,
+      title: "直接提问",
+      text: "解释一下什么是幂等，并给一个前端场景里的例子。",
+      shape: "通常 1 个 Agent 直答",
       tone: "blue",
     },
     {
-      icon: Gauge,
-      title: "比较两种方案",
-      text: "请比较以下两种方案的优缺点，并整理为对比报告：",
+      icon: Search,
+      title: "需要检索的问题",
+      text: "查一下最近一周医药板块的行情变化，并说明可能的原因。",
+      shape: "调查 → 分析 → 总结",
       tone: "amber",
     },
     {
-      icon: Database,
-      title: "整理任务资料",
-      text: "请整理以下资料，归纳主题、分析结论并生成报告：",
+      icon: FileText,
+      title: "资料整理与长文",
+      text: "阅读我上传的附件，归纳主题、列出关键结论，并指出还需要补充什么。",
+      shape: "多步核对与整理",
       tone: "green",
     },
   ];
@@ -1071,20 +1443,28 @@ function Welcome({ onChoose }: { onChoose: (value: string) => void }) {
         <Network size={32} strokeWidth={1.5} />
       </div>
       <h2>我们一起完成什么？</h2>
-      <p>写下目标，让 Agent 团队接力协作。</p>
+      <p>写下目标；简单的直接回答，复杂的交给多个 Agent 接力。</p>
       <div className="suggestions">
         {prompts.map((p) => (
           <button
             key={p.title}
-            className={p.tone}
-            onClick={() => onChoose(p.text)}
+            type="button"
+            className={`suggestion ${p.tone}`}
+            onClick={() => onChoose(p.text, "dynamic")}
           >
-            <p.icon size={20} />
+            <span className="suggestion-icon">
+              <p.icon size={20} />
+            </span>
             <b>{p.title}</b>
-            <ChevronRight size={14} />
+            <span className="suggestion-shape">{p.shape}</span>
           </button>
         ))}
       </div>
+      <p className="welcome-note">
+        {mode === "dynamic"
+          ? "当前：自动编排 — 规划 Agent 先判断需要哪些角色，再按依赖逐步执行。"
+          : "当前：固定三步 — 始终走 收集 → 分析 → 报告。选任意卡片会切到自动编排。"}
+      </p>
     </div>
   );
 }
@@ -1109,7 +1489,9 @@ function MessageBubble({ message }: { message: Message }) {
           </b>
           <time>{time(message.created_at)}</time>
         </div>
-        <p>{message.content}</p>
+        {/* 只带附件不带文字的消息是合法的（截图提问），此时不渲染空的正文段落。 */}
+        {message.content ? <p>{message.content}</p> : null}
+        <MessageAttachmentList items={message.attachments ?? []} />
       </div>
     </article>
   );

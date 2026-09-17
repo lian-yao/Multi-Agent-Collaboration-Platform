@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import logging
 import uuid
 from datetime import datetime
 from typing import Any, Callable, Literal
+from urllib.parse import quote
 
 from fastapi import FastAPI, Query, Request, Response, status
 from fastapi.responses import JSONResponse
@@ -13,6 +16,11 @@ from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
 from app.api.store import SqlApiStore
 from app.api.inspection import InspectionStore
+from app.attachments import (
+    MAX_FILES_PER_MESSAGE,
+    AttachmentRejected,
+    prepare_upload,
+)
 from app.config import get_settings
 from app.core import mcp_registry, model_registry
 from app.core.agent_config import (
@@ -116,11 +124,62 @@ class SessionListResponse(BaseModel):
 
 
 class MessageRequest(BaseModel):
-    content: str = Field(min_length=1)
+    content: str = ""
+    """消息正文。**可以只带附件不带文字**（截图提问是很常见的用法），
+    因此这里不再要求 `min_length=1`，改由下面的校验保证二者不全空。"""
+
+    attachment_ids: list[str] = Field(
+        default_factory=list, max_length=MAX_FILES_PER_MESSAGE
+    )
+    """先经 `POST /api/v1/attachments` 上传得到的附件 id（`doc/api.md` §5.16）。
+
+    只传 id 不传内容：附件内容可能是一张 5 MB 的图片，塞进请求体会同时顶爆
+    Dapr 的活动输入体积上限与模型请求体积上限。
+    """
+
     orchestration_mode: Literal["static", "dynamic"] | None = None
     """单次执行的编排模式覆盖（ADR-019）。
 
     省略时用服务端 `AGENT_ORCHESTRATION_MODE`（默认 `static`）。
+    """
+
+    @model_validator(mode="after")
+    def _require_content_or_attachment(self) -> MessageRequest:
+        if not self.content.strip() and not self.attachment_ids:
+            raise ValueError("content 与 attachment_ids 不能同时为空。")
+        return self
+
+
+class AttachmentResponse(BaseModel):
+    id: str
+    session_id: str | None = None
+    message_id: str | None = None
+    name: str
+    mime: str = ""
+    size_bytes: int = 0
+    kind: str
+    """`image` / `text` / `document`——按「怎么被模型消费」分类，不是文件类型。"""
+
+    status: str
+    """`ready` / `failed`。`failed` 是**上传成功但解析失败**（例如扫描版 PDF）：
+    附件仍然在，但正文取不出来，前端要显式标注，不能让用户以为它被用上了。"""
+
+    error: str | None = None
+    created_at: datetime
+
+
+class AttachmentUploadRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    mime: str = Field(default="", max_length=120)
+    data_base64: str = ""
+    """base64 编码的原始字节（可带 `data:` 前缀，服务端会剥掉）。
+
+    用 JSON + base64 而不是 multipart：`python-multipart` 在本项目里只是
+    `mcp` 的传递依赖，把它变成上传链路的一等依赖需要改 `pyproject.toml` 与锁文件；
+    base64 有约 33% 的体积开销，但换来零新增依赖与前后端统一的 JSON 契约。
+
+    这里**不设** `min_length`：空文件由 `prepare_upload` 报 `ATTACHMENT_EMPTY`，
+    那个错误码比 "String should have at least 1 character" 对用户有意义得多。
     """
 
 
@@ -132,6 +191,7 @@ class MessageResponse(BaseModel):
     agent_run_id: str | None = None
     status: str
     created_at: datetime
+    attachments: list[AttachmentResponse] = Field(default_factory=list)
 
 
 class MessageAcceptedResponse(BaseModel):
@@ -140,6 +200,13 @@ class MessageAcceptedResponse(BaseModel):
     agent_run_id: str
     workflow_id: str
     status: str
+    attachments: list["AttachmentResponse"] = Field(default_factory=list)
+    unattached_attachment_ids: list[str] = Field(default_factory=list)
+    """请求里带了、但没能挂上这条消息的附件 id（不存在 / 已被别的消息挂走 / 格式非法）。
+
+    单独回一个字段而不是并进错误码：消息本身是发成功的，附件缺一个是**部分失败**，
+    报成 4xx 会让前端把已经发出去的消息当成没发出去。前端据此提示并保留本地文件。
+    """
 
 
 class MessageListResponse(BaseModel):
@@ -918,6 +985,94 @@ def delete_session(session_id: str) -> Response:
 
 
 @app.post(
+    "/api/v1/attachments",
+    response_model=AttachmentResponse,
+    status_code=201,
+    summary="上传附件（doc/api.md §5.16，ADR-021）",
+)
+def upload_attachment(payload: AttachmentUploadRequest) -> AttachmentResponse:
+    """登记一个附件：分类 → 解析正文 → 落库，返回元数据。
+
+    **不要求会话已存在**：草稿态下会话还不存在（`doc/api.md` §4.2），
+    而用户往往是先选文件再写文字。归属在发消息时才回填（`link_attachments`）。
+    """
+
+    raw = payload.data_base64.strip()
+    if "," in raw[:80] and raw.lstrip().startswith("data:"):
+        # 容忍前端直接给 FileReader 的 data URL。
+        raw = raw.split(",", 1)[1]
+    try:
+        data = base64.b64decode(raw, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ApiError(
+            "ATTACHMENT_INVALID_BASE64",
+            "附件内容不是合法的 base64。",
+            status.HTTP_400_BAD_REQUEST,
+        ) from exc
+
+    try:
+        prepared = prepare_upload(payload.name, data, payload.mime)
+    except AttachmentRejected as exc:
+        raise ApiError(exc.code, exc.message, status.HTTP_400_BAD_REQUEST) from exc
+    return AttachmentResponse.model_validate(api_store.create_attachment(**prepared))
+
+
+@app.get(
+    "/api/v1/attachments/{attachment_id}/content",
+    summary="下载附件原始内容（仅图片保留字节，doc/api.md §5.16）",
+    response_class=Response,
+)
+def download_attachment(attachment_id: str) -> Response:
+    """回附件字节，供消息气泡里的图片缩略图与查看原图使用。
+
+    **只有图片能回字节**：文本与文档在上传时就抽出了正文，原始字节按设计丢掉
+    （省库体积，执行阶段也不必再解析一遍，见 `app/attachments/prepare.py`）；
+    解析失败的附件（如扫描版 PDF）同样没有可回的内容。
+
+    这两种情况一律回 404 而不是空响应：空响应会被前端当成一份有效内容渲染出来，
+    「没内容」和「内容是空的」在这里是两件事。
+    """
+
+    row = api_store.get_attachment_content(attachment_id)
+    if row is None or row.get("data") is None:
+        raise ApiError(
+            "ATTACHMENT_CONTENT_UNAVAILABLE",
+            "该附件没有可下载的原始内容（仅图片保留字节）。",
+            status.HTTP_404_NOT_FOUND,
+        )
+    name = str(row.get("name") or "attachment")
+    return Response(
+        content=row["data"],
+        media_type=row.get("mime") or "application/octet-stream",
+        headers={
+            # 文件名含中文时用 RFC 5987 形式，避免头部按 latin-1 编码报错。
+            "Content-Disposition": "inline; filename*=UTF-8''" + quote(name, safe="")
+        },
+    )
+
+
+@app.delete("/api/v1/attachments/{attachment_id}", status_code=204)
+def remove_attachment(attachment_id: str) -> Response:
+    """删除尚未发出的附件（用户在输入区点「移除」）。
+
+    已归属消息的附件**不允许**在这里删：那会让历史消息里的附件引用变成空洞，
+    历史记录该是只读的。删会话时由外键级联清掉（`AttachmentRecord`）。
+    """
+
+    row = api_store.get_attachment(attachment_id)
+    if row is None:
+        raise ApiError("ATTACHMENT_NOT_FOUND", "附件不存在。", status.HTTP_404_NOT_FOUND)
+    if row.get("message_id"):
+        raise ApiError(
+            "ATTACHMENT_ALREADY_SENT",
+            "该附件已随消息发出，不能单独删除。",
+            status.HTTP_409_CONFLICT,
+        )
+    api_store.delete_attachment(attachment_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.post(
     "/api/v1/sessions/{session_id}/messages",
     response_model=MessageAcceptedResponse,
     status_code=202,
@@ -933,6 +1088,20 @@ def send_message(session_id: str, payload: MessageRequest) -> MessageAcceptedRes
         content=payload.content,
         agent_run_id=agent_run["id"],
     )
+    # 附件归属在消息落库后回填；没挂上的 id 直接回给调用方核对，
+    # 不静默吞掉——「传了但没用上」是用户最容易被误导的一类失败（ADR-021）。
+    linked: list[str] = []
+    unattached: list[str] = []
+    if payload.attachment_ids:
+        linked = api_store.link_attachments(
+            payload.attachment_ids,
+            message_id=message["id"],
+            session_id=session_id,
+        )
+        linked_set = set(linked)
+        unattached = [
+            value for value in payload.attachment_ids if value not in linked_set
+        ]
     workflow_id = str(uuid.uuid4())
     api_store.create_workflow(
         workflow_id,
@@ -951,6 +1120,9 @@ def send_message(session_id: str, payload: MessageRequest) -> MessageAcceptedRes
                 agent_run_id=agent_run["id"],
                 message_id=message["id"],
                 orchestration_mode=payload.orchestration_mode,
+                # 只传 id：附件内容可能是一张 5 MB 的图片，塞进工作流输入会顶爆
+                # Dapr 活动载荷上限；执行阶段按 id 取正文（ADR-021）。
+                attachment_ids=list(linked),
             )
         )
     except Exception as exc:
@@ -965,6 +1137,8 @@ def send_message(session_id: str, payload: MessageRequest) -> MessageAcceptedRes
         agent_run_id=agent_run["id"],
         workflow_id=workflow_id,
         status="pending",
+        attachments=[AttachmentResponse.model_validate(item) for item in api_store.list_attachments_for_messages([message["id"]]).get(message["id"], [])],
+        unattached_attachment_ids=unattached,
     )
 
 
@@ -976,8 +1150,14 @@ def list_session_messages(
 ) -> MessageListResponse:
     _session_or_404(session_id)
     items, total = api_store.list_messages(session_id, page=page, page_size=page_size)
+    grouped = api_store.list_attachments_for_messages([item["id"] for item in items])
     return MessageListResponse(
-        items=[MessageResponse.model_validate(item) for item in items],
+        items=[
+            MessageResponse.model_validate(
+                {**item, "attachments": grouped.get(item["id"], [])}
+            )
+            for item in items
+        ],
         page=page,
         page_size=page_size,
         total=total,

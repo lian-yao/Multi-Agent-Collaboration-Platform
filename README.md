@@ -16,6 +16,10 @@
   Token 采样，模型 Provider 配置可在「工具与配置」页读写。
 - D9-10（M5，进行中）：Web UI 与一键部署全流程（`deploy/start.ps1` / `stop.ps1`）已实跑验收；
   端到端用例、性能基线与未闭环项见 [doc/testing.md](doc/testing.md) §4。
+- 后续追加（2026-09-17）：动态编排图**并列新增、默认关闭**（ADR-019，`dynamic` 由规划节点
+  按任务分配角色，`static` 仍走固定三步）；执行边界只读可见（ADR-020）；聊天框支持引入
+  图片与文档附件，走 `image_url` / 内联正文送进模型（ADR-021，`doc/api.md` §5.16）；
+  首页引导卡改为「任务原型」并显式体现协作形态（ADR-022）。
 - Python 环境由 UV 管理，实际环境以 `pyproject.toml + uv.lock` 为准。
 
 ## 技术栈
@@ -47,6 +51,7 @@
 │   ├── conventions.md
 │   ├── api.md
 │   ├── data-model.md
+│   ├── orchestration.md
 │   ├── testing.md
 │   ├── deployment.md
 │   ├── roadmap.md

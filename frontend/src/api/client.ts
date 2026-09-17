@@ -3,6 +3,7 @@ import type {
   AgentConfigList,
   AgentConfigUpdate,
   AgentRegistryCreate,
+  Attachment,
   DataPage,
   McpCompactToolList,
   McpDiscovery,
@@ -20,6 +21,7 @@ import type {
   ModelRegistryCreate,
   ModelRegistryList,
   ModelRegistryUpdate,
+  OrchestrationMode,
   Provider,
   ProviderConfig,
   ProviderConfigUpdate,
@@ -146,11 +148,31 @@ export const api = {
   getAgent: (id: string) => json<Agent>(`/api/v1/agents/${id}`),
   getMessages: async (id: string) =>
     (await json<{ items: Message[] }>(`/api/v1/sessions/${id}/messages?page=1&page_size=100`)).items,
-  sendMessage: (id: string, content: string) =>
+  sendMessage: (
+    id: string,
+    content: string,
+    options: { attachmentIds?: readonly string[]; orchestrationMode?: OrchestrationMode } = {},
+  ) =>
     json<MessageAccepted>(`/api/v1/sessions/${id}/messages`, {
       method: "POST",
-      body: JSON.stringify({ content }),
+      body: JSON.stringify({
+        content,
+        attachment_ids: options.attachmentIds ?? [],
+        // 省略而不是传 null：省略代表「用服务端配置」，这是与后端约定的两种不同语义。
+        ...(options.orchestrationMode ? { orchestration_mode: options.orchestrationMode } : {}),
+      }),
     }),
+
+  /* ---------------------------------------------------------------------- */
+  /* §5.16 附件（ADR-021）                                                    */
+  /* ---------------------------------------------------------------------- */
+
+  uploadAttachment: (name: string, mime: string, dataBase64: string) =>
+    json<Attachment>("/api/v1/attachments", body({ name, mime, data_base64: dataBase64 })),
+  deleteAttachment: (id: string) =>
+    noContent(`/api/v1/attachments/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  /** 消息气泡里的图片/下载链接直接指这个地址，不再走 client 把字节搬进内存。 */
+  attachmentContentUrl: (id: string) => `/api/v1/attachments/${encodeURIComponent(id)}/content`,
   getWorkflow: (id: string) => json<Workflow>(`/api/v1/workflows/${id}`),
   pauseSession: (id: string) =>
     json<{ session: Session; workflow: Workflow | null }>(`/api/v1/sessions/${id}/pause`, { method: "POST" }),

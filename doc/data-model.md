@@ -27,11 +27,14 @@ erDiagram
     LLM_MODELS ||--o{ AGENT_CONFIGS : referenced_by
     LLM_MODELS ||--o| PROVIDER_CONFIGS : default_route
     MCP_SERVER_REGISTRY ||--o{ TOOL_CALL : provides
+    SESSION ||--o{ ATTACHMENT : owns
+    MESSAGE ||--o{ ATTACHMENT : attaches
 ```
 
 说明：
 
 - 一次用户消息产生一个 `agent_runs`（可关联 `workflow_runs`）。
+- `ATTACHMENT` 的两个外键都可空（草稿态上传、尚未发出的附件），见 §3.2。
 - `tool_calls.run_id` 指向触发该工具调用的 `agent_runs.id`；若由 Dapr Workflow 活动直接产生，
   同一记录再冗余 `workflow_runs.id` 到 `workflow_run_id`。
 - `workflow_runs.agent_run_id` 为可空唯一外键：AgentRun 不一定需要 Dapr Workflow。
@@ -321,6 +324,40 @@ Prompt 时需同步 roles.py 与 `BUILTIN_AGENT_SEED`，避免目录与 Prompt �
 `preset_type` 与 `api_type` 是**正交**的：同一预设族允许切换协议实现
 （例如 `deepseek` 可走 `openai-compatible` 或 `anthropic`）。
 `get_default_api_type_for_preset()` / `get_supported_api_types_for_preset()` 定义二者映射。
+
+### 3.2 多模态附件（attachments）
+
+定义在 `app/core/checkpoint.py::AttachmentRecord`，接口见 `doc/api.md` §5.16，决策见 ADR-021。
+
+| 字段 | 类型 | 约束/默认 | 说明 |
+| --- | --- | --- | --- |
+| id | UUID | PK | 附件 ID |
+| session_id | UUID | FK `sessions.id` `ON DELETE CASCADE`，**NULL** | 归属会话；草稿态下可为空，首条消息落库时回填 |
+| message_id | UUID | FK `messages.id` `ON DELETE CASCADE`，**NULL** | 归属消息；`NULL` = 尚未发出的附件 |
+| name | VARCHAR(200) | NOT NULL | 清洗后的文件名（`sanitize_name`） |
+| mime | VARCHAR(120) | `''` | 登记的 MIME |
+| size_bytes | INTEGER | `0` | **原始文件字节数**，不是抽取出的文本长度 |
+| kind | VARCHAR(20) | NOT NULL | `image` / `text` / `document` |
+| status | VARCHAR(20) | NOT NULL | `ready` / `failed`（登记成功但正文取不出来，`error` 说明原因） |
+| data | BYTEA（LargeBinary） | NULL | **仅图片**保留原始字节；其余为 NULL |
+| text_content | TEXT | NULL | 抽取出的正文，执行阶段读进提示词 |
+| error | TEXT | NULL | `status='failed'` 时的原因 |
+| created_at | TIMESTAMPTZ | `now()` | 创建时间 |
+
+索引：`idx_attachments_message (message_id)`、`idx_attachments_session (session_id)`。
+
+**两条不变量：**
+
+1. **`session_id` / `message_id` 可空是故意的**。会话在首条消息提交时才创建（§3 的
+   `sessions` 生命周期不变量），而用户往往先选文件再写文字，附件必须先能上传并独立存在；
+   发消息时才由 `link_attachments` 回填两个外键。
+2. **`link_attachments` 只认 `message_id IS NULL` 的行**。已归属别的消息的附件不会被改挂——
+   请求里重复提交它会进 `unattached_attachment_ids`（部分失败），而不是把它从原消息上抢走。
+
+**为什么放数据库而不是文件系统**：附件与消息要么同生共死（删会话就该一起没），要么就得自己
+维护一套孤儿清理与卷挂载。前者由两个 `ON DELETE CASCADE` 解决，后者要动 `deploy/`。
+代价是库体积，因此上传侧对单文件大小与单消息数量都有硬上限（`app/attachments/spec.py`）。
+`data` 只对图片落字节（要 base64 进模型请求）；文本与文档在上传时就抽出正文，原始字节用完即弃。
 
 ## 4. Redis 结构
 

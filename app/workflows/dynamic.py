@@ -30,6 +30,7 @@ from typing import Any
 
 import dapr.ext.workflow as wf
 
+from app.attachments import load_payloads
 from app.config import AgentSettings, get_settings
 from app.core.agent_config import resolve_agent_settings
 from app.core.tool_audit import AuditedToolRegistry
@@ -152,6 +153,13 @@ def dynamic_step_activity(
                 registry, run_id=run_id, workflow_run_id=workflow_id
             )
         caller = ToolCaller(registry, scope=workflow_id) if registry is not None else None
+        # 只有根步骤（depends_on 为空）需要附件：它们才是直接拿到用户原始任务的步骤。
+        # 非根步骤在这里就跳过取数，省掉一次无用的库读——图片附件按 id 取回是实打实的 I/O。
+        attachments = (
+            tuple(load_payloads([str(value) for value in task.get("attachment_ids") or []]))
+            if not step.depends_on
+            else ()
+        )
         outcome = run_plan_step(
             step,
             task["task"],
@@ -159,6 +167,7 @@ def dynamic_step_activity(
             build_chat_model(_role_settings(step.role.value)),
             caller,
             workflow_id,
+            attachments,
         )
     return {"workflow_id": workflow_id, "outcome": outcome.model_dump(mode="json")}
 

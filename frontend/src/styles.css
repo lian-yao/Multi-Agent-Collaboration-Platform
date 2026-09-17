@@ -700,73 +700,109 @@ svg {
 
 
 
+/* 卡片下方显式写出当前生效的编排模式。
+ * 选择器带 `.welcome` 是为了压过上面的 `.welcome p`（0,1,1），否则
+ * margin/color/font-size 全部落不下来。 */
+.welcome .welcome-note {
+  display:inline-flex;
+  align-items:center;
+  max-width:100%;
+  margin:26px 0 0;
+  padding:7px 14px;
+  border:1px solid #e6eef1;
+  border-radius:13px;
+  background:#f7fbfc;
+  color:#8ba0a8;
+  font-size:11px;
+  line-height:1.6;
+  text-align:center
+}
+
+
+
+/* 欢迎区引导卡（2026-09-16 重做）。
+ * 原先是「图标 + 标题」左对齐的横条，看着像三个功能按钮，也说不出这是什么
+ * 平台。现在改成竖排居中的三段卡：图标 / 标题 / 协作形态标签——标题说的是
+ * 一类任务，标签说的是这类任务通常怎么被拆开执行，卡片之间才形成对照。
+ * 三个色调只是区分任务原型，不承担语义。 */
 .suggestions {
   display:grid;
   grid-template-columns:repeat(3,minmax(0,1fr));
   gap:12px;
-  margin-top:32px;
+  margin-top:30px;
   width:100%
 }
 
 
 
-.suggestions button {
+.suggestion {
   display:flex;
-  flex-wrap:wrap;
+  flex-direction:column;
   align-items:center;
-  gap:18px;
-  text-align:left;
-  padding:18px 15px;
-  border:1px solid #e1e8eb;
-  border-radius:11px;
+  gap:9px;
+  padding:20px 14px 18px;
+  border:1px solid #e3eaed;
+  border-radius:13px;
   background:#fff;
-  color:#687f89
+  text-align:center
 }
 
 
 
-.suggestions button>svg:first-child {
-  width:100%;
-  object-position:left
+.suggestion-icon {
+  display:grid;
+  place-items:center;
+  width:40px;
+  height:40px;
+  border-radius:11px;
+  background:#eef4f7;
+  color:#4d81a0
 }
 
 
 
-.suggestions button b {
-  font-size:12px;
+.suggestion b {
+  font-size:13px;
   font-weight:500;
-  flex:1
+  color:#3a5966;
+  letter-spacing:-.01em
 }
 
 
 
-.suggestions button>svg:last-child {
-  opacity:.5
+.suggestion-shape {
+  font-size:11px;
+  line-height:1.5;
+  color:#93a5ad
 }
 
 
 
-.suggestions .blue>svg:first-child {
-  color:#5586a1
+.suggestion.blue .suggestion-icon {
+  background:#eaf3f9;
+  color:#4d81a0
 }
 
 
 
-.suggestions .amber>svg:first-child {
-  color:#b8914b
+.suggestion.amber .suggestion-icon {
+  background:#faf2e4;
+  color:#ab8746
 }
 
 
 
-.suggestions .green>svg:first-child {
-  color:#5c9779
+.suggestion.green .suggestion-icon {
+  background:#ebf4ee;
+  color:#508b6c
 }
 
 
 
-.suggestions button:hover {
-  background:#f5f9fa;
-  border-color:#aac6d0
+.suggestion:hover {
+  border-color:#b3cdd7;
+  background:#f8fbfc;
+  box-shadow:0 6px 16px #243e490d
 }
 
 
@@ -867,6 +903,115 @@ svg {
   background:#edf3f5;
   border-radius:12px 3px 12px 12px;
   padding:12px 16px
+}
+
+
+
+/* 消息里的附件（ADR-021）。
+ * 图片给可点缩略图（新开页看原图），其余类型只给图标＋一行元信息；
+ * `failed` 的项也照常渲染并写出原因——它本来就没进模型上下文。 */
+.message-attachments {
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+  margin:10px 0 0
+}
+
+
+
+.user .message-attachments {
+  justify-content:flex-end
+}
+
+
+
+.message-attachment {
+  display:flex;
+  align-items:center;
+  gap:9px;
+  min-width:0;
+  max-width:260px;
+  padding:7px 11px 7px 8px;
+  border:1px solid #e1eaee;
+  border-radius:10px;
+  background:#f8fbfc
+}
+
+
+
+.message-attachment-thumb {
+  display:grid;
+  place-items:center;
+  flex:0 0 auto;
+  width:34px;
+  height:34px;
+  overflow:hidden;
+  border-radius:7px;
+  background:#e9f2f6;
+  color:#568093
+}
+
+
+
+.message-attachment-thumb img {
+  display:block;
+  width:100%;
+  height:100%;
+  object-fit:cover
+}
+
+
+
+.message-attachment-body {
+  display:grid;
+  gap:1px;
+  min-width:0
+}
+
+
+
+.message-attachment-body b {
+  overflow:hidden;
+  color:#41616e;
+  font-size:11px;
+  font-weight:500;
+  text-overflow:ellipsis;
+  white-space:nowrap
+}
+
+
+
+.message-attachment-body small {
+  color:#93a6ad;
+  font-size:10px
+}
+
+
+
+/* 类型在 `data-kind`（类名留给状态：ready / failed），别写成 `.message-attachment.text`。 */
+.message-attachment[data-kind="text"] .message-attachment-thumb {
+  background:#ebf4ee;
+  color:#4f8c6d
+}
+
+
+
+.message-attachment.failed {
+  border-color:#f0d7d2;
+  background:#fdf7f6
+}
+
+
+
+.message-attachment.failed .message-attachment-thumb {
+  background:#f8e6e2;
+  color:#b4625a
+}
+
+
+
+.message-attachment.failed .message-attachment-body small {
+  color:#b4625a
 }
 
 
@@ -1520,8 +1665,8 @@ svg {
   .suggestions {
     gap:8px
   }
-  .suggestions button {
-    padding:14px 10px
+  .suggestion {
+    padding:16px 10px
   }
   .dock-track {
     gap:10px;
@@ -1638,19 +1783,40 @@ svg {
   .welcome-icon {
     margin-bottom:12px
   }
+  /* 窄屏把三栏卡片摊成三行：三列在手机上每列约 110px，「调查 → 分析 → 总结」
+   * 这种标签会被折成三行，反而更难读。 */
   .suggestions {
-    gap:6px;
+    grid-template-columns:minmax(0,1fr);
+    gap:8px;
     margin-top:22px
   }
-  .suggestions button {
-    padding:12px 8px;
-    gap:14px
+  .suggestion {
+    padding:14px 12px;
+    gap:7px
   }
-  .suggestions button b {
+  .suggestion-icon {
+    width:32px;
+    height:32px
+  }
+  .suggestion b {
+    font-size:12px
+  }
+  .suggestion-shape {
     font-size:10px
   }
-  .suggestions button>svg:last-child {
-    display:none
+  .welcome .welcome-note {
+    margin-top:18px
+  }
+  .suggestions {
+    gap:6px;
+    margin-top:20px
+  }
+  .suggestion {
+    padding:12px 10px;
+    gap:6px
+  }
+  .suggestion-shape {
+    font-size:10px
   }
   .dock-header {
     padding:0 15px;
@@ -1703,9 +1869,16 @@ svg {
   .suggestions {
     margin-top:16px
   }
-  .suggestions button {
-    padding:10px;
+  .suggestion {
+    padding:12px 10px;
     gap:6px
+  }
+  /* 矮屏先丢装饰性内容：图标、协作形态标签、模式说明都让位给输入框。 */
+  .suggestion-shape {
+    display:none
+  }
+  .welcome .welcome-note {
+    display:none
   }
   .conversation-composer {
     margin-bottom:12px
@@ -2410,6 +2583,7 @@ svg {
  * （doc/api.md §3），属于假选择，已移除；架构改为编排层自动决策，不由用户指定。 */
 .composer-hint {
   display:flex;
+  flex:1 1 auto;
   align-items:center;
   gap:8px;
   min-width:0
@@ -2421,6 +2595,237 @@ svg {
   overflow:hidden;
   text-overflow:ellipsis;
   white-space:nowrap
+}
+
+
+
+/* 附件入口（ADR-021）。
+ * 上传是「选完即传」，所以 chip 有三种状态：uploading / ready / failed，
+ * 失败项必须留在输入区里可见（带原因），不能静默丢掉——用户会以为传上了。 */
+.composer-attach {
+  display:inline-flex;
+  flex:0 0 auto;
+  align-items:center;
+  gap:5px;
+  padding:4px 9px 4px 8px;
+  border:1px solid #dbe7eb;
+  border-radius:7px;
+  background:#fff;
+  color:#63808d;
+  font-size:11px
+}
+
+
+
+.composer-attach:hover:not(:disabled) {
+  border-color:#aac6d0;
+  background:#f5f9fa;
+  color:#3f6b7d
+}
+
+
+
+.composer-files {
+  display:flex;
+  flex-wrap:wrap;
+  gap:6px;
+  margin:0 0 9px;
+  padding:0;
+  list-style:none
+}
+
+
+
+.composer-file {
+  display:flex;
+  align-items:center;
+  gap:8px;
+  min-width:0;
+  max-width:230px;
+  padding:6px 8px 6px 9px;
+  border:1px solid #dde8ec;
+  border-radius:9px;
+  background:#f8fbfc
+}
+
+
+
+.composer-file-icon {
+  display:grid;
+  place-items:center;
+  flex:0 0 auto;
+  width:22px;
+  height:22px;
+  border-radius:6px;
+  background:#e9f2f6;
+  color:#568093
+}
+
+
+
+.composer-file-body {
+  display:grid;
+  gap:1px;
+  min-width:0
+}
+
+
+
+.composer-file-body b {
+  overflow:hidden;
+  color:#41616e;
+  font-size:11px;
+  font-weight:500;
+  text-overflow:ellipsis;
+  white-space:nowrap
+}
+
+
+
+.composer-file-body small {
+  overflow:hidden;
+  color:#93a6ad;
+  font-size:10px;
+  text-overflow:ellipsis;
+  white-space:nowrap
+}
+
+
+
+.composer-file-remove {
+  display:grid;
+  place-items:center;
+  flex:0 0 auto;
+  width:18px;
+  height:18px;
+  padding:0;
+  border:0;
+  border-radius:5px;
+  background:transparent;
+  color:#a2b1b7
+}
+
+
+
+.composer-file-remove:hover {
+  background:#e9eff2;
+  color:#5d7d8b
+}
+
+
+
+.composer-file[data-kind="image"] .composer-file-icon {
+  background:#e9f4ee;
+  color:#4f8c6d
+}
+
+
+
+.composer-file.uploading {
+  border-style:dashed
+}
+
+
+
+.composer-file.uploading .composer-file-icon {
+  background:#eef4f6;
+  color:#8fa6b0
+}
+
+
+
+.composer-file.failed {
+  border-color:#f0d7d2;
+  background:#fdf7f6
+}
+
+
+
+.composer-file.failed .composer-file-icon {
+  background:#fae7e3;
+  color:#b4625a
+}
+
+
+
+.composer-file.failed .composer-file-body small {
+  color:#b4625a
+}
+
+
+
+/* 拖拽态：整块输入区给一层反馈，不要只改边框——边框 1px 的深浅差在拖动时看不出来。 */
+.conversation-composer.dragging {
+  border-color:#7fadbe;
+  border-style:dashed;
+  background:#f6fbfc
+}
+
+
+
+.conversation-composer.dragging::after {
+  content:"松开即可添加图片或文档";
+  position:absolute;
+  z-index:3;
+  inset:0;
+  display:grid;
+  place-items:center;
+  border-radius:inherit;
+  background:#f6fbfcf0;
+  color:#4d7e8d;
+  font-size:12px;
+  pointer-events:none
+}
+
+
+
+/* 编排模式切换（ADR-019）。
+ * 这是真的开关：`dynamic` → 规划 Agent 产出计划再执行，`static` → 固定三步。
+ * 分段控件的内层圆角＝外层圆角 − 内边距，两者同心，不画重复描边。 */
+.composer-mode {
+  display:inline-flex;
+  flex:0 0 auto;
+  gap:2px;
+  padding:2px;
+  border:1px solid #e1eaee;
+  border-radius:8px;
+  background:#f4f8fa
+}
+
+
+
+.composer-mode button {
+  padding:3px 9px;
+  border:0;
+  border-radius:6px;
+  background:transparent;
+  color:#8298a2;
+  font-size:11px;
+  white-space:nowrap
+}
+
+
+
+.composer-mode button.active {
+  background:#fff;
+  color:#3d687a;
+  box-shadow:0 1px 3px #20343d14
+}
+
+
+
+/* 输入区与附件在窄屏的收缩。
+ * 这几条必须放在上面 `.composer-*` 定义**之后**——(max-width:680px) 块在文件
+ * 中段，同特异度下按源码顺序决胜，放前面会被基础规则直接盖掉（初版就是这么丢的）。 */
+@media(max-width:680px) {
+  .composer-mode button {
+    padding:3px 7px;
+    font-size:10px
+  }
+  .composer-file,
+  .message-attachment {
+    max-width:100%
+  }
 }
 
 

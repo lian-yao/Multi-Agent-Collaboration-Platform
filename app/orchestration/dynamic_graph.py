@@ -46,6 +46,7 @@ from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
 
 from app.agents.roles import RoleId, get_role
+from app.attachments import AttachmentPayload, build_human_content
 from app.config import AgentSettings, get_settings
 from app.observability.instrumentation import observed_stage
 from app.observability.logging import get_logger, log_event
@@ -399,17 +400,24 @@ def run_plan_step(
     llm: BaseChatModel,
     caller: ToolCaller | None = None,
     workflow_id: str | None = None,
+    attachments: Sequence[AttachmentPayload] = (),
 ) -> StepOutcome:
     """执行一个计划步骤，返回结果；异常被收敛成 ``failed`` 结果而不外抛。
 
     失败在外抛与收敛之间的取舍：动态编排里步骤是显式依赖关系，单步失败只该
     影响它的下游，因此这里**收敛**；需要让整次执行失败的调用方读 ``status`` 自行判断。
+
+    ``attachments`` 只注入到**根步骤**（``depends_on`` 为空，即直接拿到用户原始任务
+    的那些步骤）。多根计划会各拿一份附件——这是有意的：它们彼此看不到对方的产出，
+    少给任何一条根步骤，那条分支的模型就完全不知道用户传了东西。
     """
 
     definition = get_role(step.role)
+    prompt = step_input(task, step, results)
+    content = build_human_content(prompt, attachments if not step.depends_on else ())
     messages = [
         SystemMessage(content=definition.system_prompt),
-        HumanMessage(content=step_input(task, step, results)),
+        HumanMessage(content=content),
     ]
     started = time.perf_counter()
     log_event(
@@ -573,6 +581,7 @@ def _node_execute(
     model: BaseChatModel,
     registry: ToolRegistry | None,
     workflow_id: str | None,
+    attachments: Sequence[AttachmentPayload] = (),
 ):
     def execute(state: DynamicPipelineState) -> dict[str, Any]:
         ready = ready_steps(state)
@@ -580,7 +589,9 @@ def _node_execute(
             return {}
         step = ready[0]
         caller = ToolCaller(registry) if registry is not None else None
-        outcome = run_plan_step(step, state.task, state.results, model, caller, workflow_id)
+        outcome = run_plan_step(
+            step, state.task, state.results, model, caller, workflow_id, attachments
+        )
         return {
             "results": {**state.results, step.id: outcome},
             "updated_at": _now(),
@@ -626,11 +637,14 @@ def build_dynamic_pipeline(
     tool_registry: ToolRegistry | None = None,
     max_steps: int = DEFAULT_MAX_PLAN_STEPS,
     workflow_id: str | None = None,
+    attachments: Sequence[AttachmentPayload] = (),
 ):
     """构建动态协作图：``planner → execute（循环）→ finalize``。
 
     ``tool_registry`` 为 None 时使用 ``default_tool_registry()``；解析不到注册表
     （例如无 MCP 实现）时步骤不调用工具，与静态图口径一致。
+
+    ``attachments`` 只在进程内直跑时使用；Dapr 链路按 id 从库里取（ADR-021）。
     """
 
     model = llm or build_chat_model(settings or get_settings())
@@ -638,7 +652,9 @@ def build_dynamic_pipeline(
 
     builder = StateGraph(DynamicPipelineState)
     builder.add_node("planner", _node_planner(model, max_steps, workflow_id))
-    builder.add_node("execute", _node_execute(model, registry, workflow_id))
+    builder.add_node(
+        "execute", _node_execute(model, registry, workflow_id, attachments)
+    )
     builder.add_node("finalize", _node_finalize(workflow_id))
 
     builder.add_edge(START, "planner")
@@ -659,6 +675,7 @@ def run_dynamic_pipeline(
     tool_registry: ToolRegistry | None = None,
     max_steps: int = DEFAULT_MAX_PLAN_STEPS,
     workflow_id: str | None = None,
+    attachments: Sequence[AttachmentPayload] = (),
 ) -> DynamicPipelineState:
     """用完整的动态图执行一次协作，返回终态 ``DynamicPipelineState``。"""
 
@@ -668,6 +685,7 @@ def run_dynamic_pipeline(
         tool_registry=tool_registry,
         max_steps=max_steps,
         workflow_id=workflow_id,
+        attachments=attachments,
     )
     output = graph.invoke(
         DynamicPipelineState(task=task),

@@ -73,13 +73,32 @@ def flatten() -> dict:
          "created_at": S.iso(-10), "updated_at": S.iso(-10)},
     ]
 
+    # 附件（ADR-021）：第一条用户消息带三种形态，好让气泡里的
+    # 「图片缩略图 / 文档条目 / 解析失败」三种样式一次看全。
+    # 图片的正文地址在 `preview.tsx` 里被换成内联 SVG（预览页取不到真的字节）。
     messages = [
         {"id": "m-1", "session_id": SESSION_ID, "role": "user",
          "content": "帮我调研 2026 年多智能体协作平台的开源方案，并输出一份对比报告。",
-         "agent_run_id": None, "status": "done", "created_at": S.iso(-320)},
+         "agent_run_id": None, "status": "done", "created_at": S.iso(-320),
+         "attachments": [
+             {"id": "att-preview-image", "session_id": SESSION_ID, "message_id": "m-1",
+              "name": "架构草图.png", "mime": "image/png", "size_bytes": 184320,
+              "kind": "image", "status": "ready", "error": None,
+              "created_at": S.iso(-320)},
+             {"id": "att-preview-doc", "session_id": SESSION_ID, "message_id": "m-1",
+              "name": "竞品功能对照表.xlsx", "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+              "size_bytes": 47104, "kind": "document", "status": "ready", "error": None,
+              "created_at": S.iso(-320)},
+             {"id": "att-preview-failed", "session_id": SESSION_ID, "message_id": "m-1",
+              "name": "现场访谈扫描件.pdf", "mime": "application/pdf", "size_bytes": 2400256,
+              "kind": "document", "status": "failed",
+              "error": "未能从 PDF 中可靠提取文本（可能是扫描件）。",
+              "created_at": S.iso(-320)},
+         ]},
         {"id": "m-2", "session_id": SESSION_ID, "role": "assistant",
          "content": "已拆分为「信息收集 → 数据分析 → 报告生成」三步，前两步已完成，正在生成报告。",
-         "agent_run_id": RUN_ID, "status": "done", "created_at": S.iso(-300)},
+         "agent_run_id": RUN_ID, "status": "done", "created_at": S.iso(-300),
+         "attachments": []},
     ]
 
     tools = [
@@ -115,9 +134,12 @@ def flatten() -> dict:
         f"DELETE /api/v1/sessions/s-history-1": None,
         f"DELETE /api/v1/sessions/s-history-2": None,
         f"GET /api/v1/sessions/{SESSION_ID}/messages": {"items": messages},
+        # 这两个字段是必填的：前端读 `accepted.unattached_attachment_ids.length`，
+        # 少了就在「发送成功」之后抛 TypeError（预览里点一次发送就能复现）。
         f"POST /api/v1/sessions/{SESSION_ID}/messages": {
             "message_id": "m-3", "session_id": SESSION_ID, "agent_run_id": RUN_ID,
             "workflow_id": WORKFLOW_ID, "status": "accepted",
+            "attachments": [], "unattached_attachment_ids": [],
         },
         f"POST /api/v1/sessions/{SESSION_ID}/pause": {
             "session": {**session, "status": "paused"}, "workflow": {**workflow, "status": "paused"}},

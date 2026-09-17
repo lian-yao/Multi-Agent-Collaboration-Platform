@@ -188,16 +188,21 @@
 ```json
 {
   "content": "对比两种方案的实测数据并生成报告",
-  "orchestration_mode": "dynamic"
+  "orchestration_mode": "dynamic",
+  "attachment_ids": ["b1c2d3e4-f5a6-4b7c-8d9e-0f1a2b3c4d5e"]
 }
 ```
 
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
-| `content` | 是 | 用户任务，长度 ≥ 1 |
+| `content` | 否 | 用户任务。**允许为空**，但此时必须有 `attachment_ids`（见下） |
+| `attachment_ids` | 否 | 先经 `POST /api/v1/attachments` 登记拿到的附件 id，最多 4 个（§5.16） |
 | `orchestration_mode` | 否 | 单次执行的编排模式覆盖，`static` / `dynamic`；省略时用服务端 `AGENT_ORCHESTRATION_MODE`（默认 `static`）。见 §3.1 与 `doc/orchestration.md` |
 
-非法取值（如 `"autonomous"`）由 `Literal` 校验拦成 `422`，**不静默退回 `static`**——
+`content` 与 `attachment_ids` **不能同时为空**（由模型校验器拦成 `422`）。放开 `content` 的
+`min_length=1` 是为了支持「只发一张截图、不打字」这种最常见的多模态用法（ADR-021）。
+
+非法 `orchestration_mode`（如 `"autonomous"`）由 `Literal` 校验拦成 `422`，**不静默退回 `static`**——
 「选了动态却悄悄变成固定流程」比直接报错更难排查。
 
 响应 `202`：
@@ -208,11 +213,30 @@
   "session_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
   "agent_run_id": "a1b2c3d4-e5f6-4a5b-9c8d-1e2f3a4b5c6d",
   "workflow_id": "e2f3a4b5-c6d7-4e8f-9a0b-1c2d3e4f5a6b",
-  "status": "pending"
+  "status": "pending",
+  "attachments": [
+    {
+      "id": "b1c2d3e4-f5a6-4b7c-8d9e-0f1a2b3c4d5e",
+      "session_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      "message_id": "c8a1d0a1-1f31-4a2e-9b7e-2f4c9a0b1c2d",
+      "name": "架构草图.png",
+      "mime": "image/png",
+      "size_bytes": 184320,
+      "kind": "image",
+      "status": "ready",
+      "error": null,
+      "created_at": "2026-09-17T10:00:00Z"
+    }
+  ],
+  "unattached_attachment_ids": []
 }
 ```
 
 接口内部在调度前会将持久化 Workflow 和 AgentRun 更新为 `running`；返回体保留 `pending` 作为接收状态。会话暂停时返回 `409 SESSION_PAUSED`。
+
+`unattached_attachment_ids` 是**部分失败**的专用出口：请求里带了、但没能挂上这条消息的附件 id
+（不存在 / 已被别的消息挂走）。**不并进错误码**——消息本身是发成功的，把它报成 `4xx` 会让前端把
+已经发出去的消息当成没发出去。
 
 调度到哪个工作流由编排模式决定（ADR-019）：`static` → `agent_pipeline`，
 `dynamic` → `agent_dynamic`；非法值一律退回 `static`。响应体不返回本次使用的模式，
@@ -222,6 +246,10 @@
 
 完成任务的报告由终态活动追加为 assistant 消息（ADR-008）；失败不追加报告。生产存储按最新消息分页，再在页内按时间升序返回。前端读取第一页最近 100 条，并在终态延迟补刷一次；完整历史加载尚未实现。
 
+每条消息带 `attachments`（该消息的附件列表，同 §4.4 的 `attachments` 结构；无附件时为空数组）。
+它由 `list_attachments_for_messages` 一次性成组取回，**不是逐条消息一次查询**——否则一页 100 条
+就是 100 次往返。
+
 `GET /api/v1/sessions/{session_id}/messages?page=1&page_size=20`
 
 响应 `200`：
@@ -229,6 +257,9 @@
 ```json
 { "items": [], "page": 1, "page_size": 20, "total": 0 }
 ```
+
+`content` 为空 + `attachments` 非空是合法的（「只发一张截图」），前端在 `content` 为空时
+不渲染空的正文段落。
 
 ### 4.6 暂停会话
 
@@ -972,6 +1003,95 @@ item 字段为 metric_name、value（有限数值）、labels（JSON 对象）�
 改限额不会让它变可用，那样的开关必然是个假开关。决策与理由见 ADR-020。
 
 前端入口：「工具与配置 → 执行边界」，只展示不编辑。
+
+### 5.16 多模态附件（上传 / 下载 / 删除）
+
+支撑「图片理解、文档理解」（ADR-021）。附件是**一等资源**：先上传登记拿到 id，发消息时用
+`attachment_ids` 引用（§4.4）。**内容不进消息体、不进编排链路**——Dapr 的 gRPC 默认限制 4 MB，
+链路里流动的永远只是 id。
+
+#### 5.16.1 上传并解析
+
+`POST /api/v1/attachments`
+
+```json
+{
+  "name": "架构草图.png",
+  "mime": "image/png",
+  "data_base64": "iVBORw0KGgoAAAANSUhEUg..."
+}
+```
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `name` | 是 | 原始文件名，服务端会做折叠与清洗（`sanitize_name`） |
+| `mime` | 否 | 浏览器给的 MIME；缺失时按 `application/octet-stream` 处理 |
+| `data_base64` | 是 | 文件字节的 base64（**不带** `data:` 前缀；带前缀也收） |
+
+用 JSON + base64 而不是 multipart：`python-multipart` 当前只是 `mcp` 的传递依赖，
+为一个上传接口把它提成一等依赖要动 `uv.lock`，收益不抵代价（ADR-021）。
+
+响应 `201`：附件对象（与 §4.4 响应里的 `attachments` 同构）。
+
+| 字段 | 说明 |
+| --- | --- |
+| `kind` | `image` / `text` / `document` |
+| `status` | `ready`（正文已抽出）/ `failed`（登记成功但正文取不出来，`error` 说明原因） |
+| `size_bytes` | 原始字节数。**注意是原文件大小**，不是抽取出来的文本长度 |
+| `text_content` | **不在响应里回传**。它只在执行阶段被读进提示词（§5.16.2 对文本/文档也不提供下载） |
+
+`failed` **仍然是登记成功的附件**（有 id、可挂消息、会出现在气泡里）。它只是没进模型上下文——
+这一点必须如实显示，否则用户会以为那份扫描件被读进去了。
+
+错误码：
+
+| 状态 | 码 | 触发条件 |
+| --- | --- | --- |
+| 400 | `ATTACHMENT_INVALID_BASE64` | `data_base64` 不是合法 base64 |
+| 400 | `ATTACHMENT_EMPTY` | 零字节 |
+| 400 | `ATTACHMENT_TOO_LARGE` | 超过 5 MB |
+| 400 | `ATTACHMENT_TYPE_UNSUPPORTED` | 扩展名不在白名单 |
+
+校验顺序即上表顺序：先解 base64，再判空与大小，最后判类型。**不支持的类型与超限一律在上传时拒**
+（`AttachmentRejected` → `400`）——收下一个永远用不上的附件，等于在界面上给用户一个「我传上去了」
+的假信号。
+
+限额（`app/attachments/spec.py`，前端 `frontend/src/workspace/attachments.ts` 持同一份口径）：
+单文件 5 MB / 单条消息 4 个 / 单文件 2 万字符 / 单条消息合计 4 万字符。前端那份**只做即时反馈**，
+准入判据始终在服务端。
+
+#### 5.16.2 读取附件原始内容
+
+`GET /api/v1/attachments/{attachment_id}/content`
+
+**只有图片能取到字节。**
+
+- 图片：返回原始字节，`Content-Type` 为登记的 `mime`；前端用它渲染气泡里的缩略图与「查看原图」；
+- 文本 / 文档：**`404 ATTACHMENT_CONTENT_UNAVAILABLE`**。它们在 `POST` 时就已经把正文抽进
+  `text_content`，原始字节按设计丢弃（省库体积，执行阶段也不必再解析一遍）；
+- 解析失败的附件、不存在的 id：同样 `404`。
+
+回 `404` 而不是空响应：空响应会被前端当成一份有效内容渲染出来，「没内容」和「内容是空的」是两件事。
+
+响应头带 RFC 5987 的 `Content-Disposition`（中文文件名用 `filename*=UTF-8''...`，避免头部按
+latin-1 编码报错）。
+
+#### 5.16.3 删除附件
+
+`DELETE /api/v1/attachments/{attachment_id}`
+
+| 状态 | 码 | 情况 |
+| --- | --- | --- |
+| 204 | — | 未归属任何消息（`message_id IS NULL`），已删除 |
+| 404 | `ATTACHMENT_NOT_FOUND` | id 不存在 |
+| 409 | `ATTACHMENT_ALREADY_SENT` | 已随消息发出，不能单独删除 |
+
+已归属消息的附件**不允许**单独删：那会让历史消息里的附件引用变成空洞，历史记录该是只读的。
+删会话时由外键级联清掉（`ON DELETE CASCADE`，见 `doc/data-model.md` §3.1）。要清理请连消息一起删
+（会话级联见 §5.14）。
+
+前端在「移除 chip」与「换任务」时调用它清理未发出的附件，失败不阻断界面
+（最坏情况只留一条未归属的附件行）。
 
 ## 6. 规划接口（当前未实现）
 

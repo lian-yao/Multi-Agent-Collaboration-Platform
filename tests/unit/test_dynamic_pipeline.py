@@ -19,6 +19,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
 from app.agents.roles import RoleId, get_role
+from app.attachments import AttachmentPayload
 from app.config import AgentSettings
 from app.orchestration.dynamic_graph import (
     DEFAULT_MAX_PLAN_STEPS,
@@ -542,3 +543,81 @@ def test_fake_step_outcome_is_deterministic():
     assert first.status is PlanStepStatus.COMPLETED
     assert "s2" in first.content and "analyst" in first.content
     assert "s1" in first.content
+
+
+# --------------------------------------------------------------------------------------
+# 附件注入（ADR-021）
+# --------------------------------------------------------------------------------------
+
+
+def _image_payload() -> AttachmentPayload:
+    return AttachmentPayload(
+        id="a1",
+        name="shot.png",
+        kind="image",
+        status="ready",
+        mime="image/png",
+        data=b"\x89PNG",
+    )
+
+
+def test_attachments_go_to_root_steps_only():
+    """附件只进根步骤：非根步骤读的是上游正文，再塞一遍等于重复计费同一张图。"""
+
+    model = ScriptedChatModel(replies=["ok"])
+    root = PlanStep(id="s1", role=RoleId.COLLECTOR, instruction="收集")
+    child = PlanStep(id="s2", role=RoleId.REPORTER, instruction="汇总", depends_on=["s1"])
+
+    run_plan_step(root, "任务", {}, model, None, "wf", (_image_payload(),))
+    root_content = model.calls[0][1].content
+    assert isinstance(root_content, list)
+    assert [block["type"] for block in root_content] == ["text", "image_url"]
+
+    run_plan_step(child, "任务", {"s1": StepOutcome(
+        step_id="s1",
+        role=RoleId.COLLECTOR,
+        instruction="收集",
+        status=PlanStepStatus.COMPLETED,
+        content="上游正文",
+    )}, model, None, "wf", (_image_payload(),))
+    child_content = model.calls[1][1].content
+    assert isinstance(child_content, str)
+    assert "上游正文" in child_content
+
+
+def test_every_root_step_gets_the_attachments():
+    """多根计划各拿一份：彼此看不到对方产出，少给谁谁就完全不知道用户传了东西。"""
+
+    model = ScriptedChatModel(replies=["a", "b"])
+    first = PlanStep(id="s1", role=RoleId.COLLECTOR, instruction="收集 A")
+    second = PlanStep(id="s2", role=RoleId.ANALYST, instruction="独立核算")
+
+    run_plan_step(first, "任务", {}, model, None, "wf", (_image_payload(),))
+    run_plan_step(second, "任务", {}, model, None, "wf", (_image_payload(),))
+
+    for call in model.calls:
+        assert isinstance(call[1].content, list)
+
+
+def test_static_collect_stage_receives_attachments():
+    """静态链路的附件注入点同样是「拿到原始任务」的 collect 阶段。"""
+
+    from app.orchestration.pipeline import new_pipeline_state, start
+    from app.orchestration.pipeline_graph import run_role_stage
+
+    model = ScriptedChatModel(replies=["收集完成"])
+    state = start(new_pipeline_state(task="任务"))
+    assert state.current_step is not None
+
+    run_role_stage(
+        state.current_step,
+        "任务",
+        previous=None,
+        llm=model,
+        tool_registry=None,
+        attachments=(_image_payload(),),
+    )
+    content = model.calls[0][1].content
+    assert isinstance(content, list)
+    assert content[0]["type"] == "text"
+    assert content[1]["type"] == "image_url"

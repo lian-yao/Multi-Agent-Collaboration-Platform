@@ -7,6 +7,33 @@
  * - `api_key` 只写不回读，所以响应里只有 `api_key_configured`。
  */
 
+export type AttachmentKind = "image" | "text" | "document" | "unsupported";
+
+/**
+ * 附件在「能不能被模型用上」这件事上的状态。
+ *
+ * `failed` 是**上传成功但正文没解析出来**（扫描版 PDF、CID 字体等）：
+ * 附件仍然在，但内容取不出来，界面必须显式标注，否则用户会以为它被用上了。
+ */
+export type AttachmentStatus = "ready" | "failed" | "unsupported";
+
+/** 已登记的附件（`doc/api.md` §5.16，ADR-021）。 */
+export interface Attachment {
+  id: string;
+  session_id: string | null;
+  message_id: string | null;
+  name: string;
+  mime: string;
+  size_bytes: number;
+  kind: AttachmentKind;
+  status: AttachmentStatus;
+  error: string | null;
+  created_at: string;
+}
+
+/** 编排模式（ADR-019）：`static` 固定三步链路，`dynamic` 由规划节点按任务分配角色。 */
+export type OrchestrationMode = "static" | "dynamic";
+
 export interface Message {
   id: string;
   session_id: string;
@@ -15,6 +42,7 @@ export interface Message {
   agent_run_id: string | null;
   status: string;
   created_at: string;
+  attachments: Attachment[];
 }
 
 export interface Session {
@@ -40,6 +68,15 @@ export type WorkflowStatus =
   | "failed"
   | "cancelled";
 
+/** 动态编排的计划步骤摘要（`app/orchestration/dynamic_graph.py::dynamic_checkpoint_summary`）。 */
+export interface PlanStepSummary {
+  id: string;
+  /** 角色 id（collector / analyst / reporter），不是阶段名。 */
+  role: string;
+  depends_on: string[];
+  status: "pending" | "completed" | "failed" | "skipped";
+}
+
 export interface Workflow {
   id: string;
   session_id: string | null;
@@ -51,6 +88,12 @@ export interface Workflow {
     current_step?: string | null;
     completed_steps?: string[];
     updated_at?: string;
+    /** 编排模式（ADR-019）：静态链路不写这个字段，动态链路为 `"dynamic"`。 */
+    mode?: string;
+    /** `llm` 表示规划节点真的产出了计划，`fallback` 表示降级到固定三步。 */
+    plan_source?: string;
+    /** 动态链路才有的协作计划；静态链路下为 undefined。 */
+    plan?: PlanStepSummary[];
   } | null;
   created_at: string;
   updated_at: string;
@@ -155,6 +198,14 @@ export interface MessageAccepted {
   agent_run_id: string;
   workflow_id: string;
   status: string;
+  attachments: Attachment[];
+  /**
+   * 请求里带了、但没能挂上这条消息的附件 id（不存在 / 已被别的消息挂走）。
+   *
+   * 单独一个字段而不是并进错误码：消息本身是发成功的，附件缺一个是**部分失败**，
+   * 报成 4xx 会让前端把已经发出去的消息当成没发出去。
+   */
+  unattached_attachment_ids: string[];
 }
 
 /** 三个只读列表接口（工具 / 指标 / 调用）共用的分页外壳。 */

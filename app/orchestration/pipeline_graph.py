@@ -29,6 +29,7 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
 
 from app.agents.roles import RoleId, get_role
+from app.attachments import AttachmentPayload, build_human_content
 from app.config import AgentSettings, get_settings
 from app.observability.instrumentation import observed_stage
 from app.observability.logging import get_logger, log_event
@@ -205,12 +206,17 @@ def _run_role_stage(
     llm: BaseChatModel,
     caller: ToolCaller | None = None,
     workflow_id: str | None = None,
+    attachments: Sequence[AttachmentPayload] = (),
 ) -> dict[str, Any]:
     role = role_for_stage(stage)
     definition = get_role(role)
+    prompt = _role_input(role, task, previous)
+    # 附件只进「拿到原始任务」的那一步（`previous is None`）：collector。
+    # 下游节点读的是上游正文，再塞一遍附件等于让同一张图在链路上重复计费。
+    content = build_human_content(prompt, attachments if previous is None else ())
     messages = [
         SystemMessage(content=definition.system_prompt),
-        HumanMessage(content=_role_input(role, task, previous)),
+        HumanMessage(content=content),
     ]
     discovered = caller.available() if caller is not None else ()
     log_event(
@@ -267,6 +273,7 @@ def run_role_stage(
     tool_registry: ToolRegistry | None = None,
     tool_scope: str | None = None,
     workflow_id: str | None = None,
+    attachments: Sequence[AttachmentPayload] = (),
 ) -> dict[str, Any]:
     """调用指定阶段对应角色的模型，返回 Workflow 阶段活动使用的载荷。
 
@@ -279,6 +286,10 @@ def run_role_stage(
 
     ``workflow_id`` 用于行为日志关联（`event=stage.start|finish|failed`），
     未显式给出 ``tool_scope`` 时也作为工具调用 ID 的 scope。
+
+    ``attachments`` 是随本条消息上传的附件（ADR-021），只会注入到没有上游的阶段
+    （静态链路的 collect）；图片转成 ``image_url`` 内容块，**需要所选模型支持视觉输入**，
+    否则批次会在模型侧失败——这是模型能力问题，不是附件链路问题。
     """
 
     resolved = PipelineStage(stage) if isinstance(stage, str) else stage
@@ -286,7 +297,15 @@ def run_role_stage(
     registry = tool_registry if tool_registry is not None else default_tool_registry()
     scope = tool_scope if tool_scope is not None else workflow_id
     caller = ToolCaller(registry, scope=scope) if registry is not None else None
-    return _run_role_stage(resolved, task, previous, model, caller, workflow_id=workflow_id)
+    return _run_role_stage(
+        resolved,
+        task,
+        previous,
+        model,
+        caller,
+        workflow_id=workflow_id,
+        attachments=attachments,
+    )
 
 
 def content_with_tools(content: str | list[Any]) -> str:
