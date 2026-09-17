@@ -205,6 +205,12 @@
 非法 `orchestration_mode`（如 `"autonomous"`）由 `Literal` 校验拦成 `422`，**不静默退回 `static`**——
 「选了动态却悄悄变成固定流程」比直接报错更难排查。
 
+**执行期间 Agent 拿到的工具比 §5.3 的静态目录多两个**：`list_session_files` / `read_session_file`
+（ADR-025）按本次会话临时绑定，让 Agent 能按需读回这条会话里的附件正文。它们**不在**
+`GET /api/v1/tools` 里，因为那份目录描述的是进程级注册表；要看它们是否真被调用，读 §5.4 的
+工具调用记录。此外，附件内容本身也会随消息进入提示词（只进接收原始任务的根步骤），
+两条路是互补的：前者是"模型已经看见了"，后者是"模型需要时再看一遍"。
+
 响应 `202`：
 
 ```json
@@ -328,6 +334,8 @@ GET /api/v1/tools?page=1&page_size=20
 item 字段为 name、description、input_schema（JSON 对象）、status。数据来自 C 的注册表目录（`app/mcp/registry.py::tool_catalog()`，见 ADR-012），返回 calculator / web_search / code_execution / sql_query 四项，status 为 available；不会把规划中的工具当成已注册工具。
 
 API 进程默认按 `MCP_TRANSPORT` 注入该目录（`InspectionStore(tool_catalog=tool_catalog)`）。注册表构建或读取失败返回 `503 DATA_SOURCE_UNAVAILABLE`，不吞掉错误伪装成空目录；只有显式构造为「未注入目录」的读取器才返回 availability=not_integrated。该接口只列目录，不探测每个工具的运行期可用性（例如沙箱后端是否可连）。
+
+**会话级工具不在这个目录里，这是有意的**（ADR-025）。`list_session_files` / `read_session_file` 的作用域是**一次执行**（绑定当时的 `session_id`），它们由 `session_scoped_registry()` 在阶段执行前临时拼进注册表，因此不进进程级目录、也不会出现在本接口的返回里。把它们算进来会让「工具与配置」页出现两个既关不掉、又在无会话执行里不存在的开关——不给假开关是本项目反复在修的毛病。要看它们是否真的被调用，读 §5.4 的工具调用记录（会出现在 `tool_calls` 里）。调用方需要知道的唯一一件事是：**任何依赖本目录来判断「Agent 有哪些工具」的逻辑都不完整**，运行期的工具集合是「本目录 + 本次会话的会话级工具」。
 
 ### 5.4 查询 Workflow 工具调用
 

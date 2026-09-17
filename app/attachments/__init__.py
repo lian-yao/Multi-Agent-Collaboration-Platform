@@ -13,8 +13,10 @@
 
 from app.attachments.prepare import (
     AttachmentRejected,
+    list_session_attachments,
     load_payloads,
     prepare_upload,
+    read_attachment_text,
     to_payload,
 )
 from app.attachments.prompt import (
@@ -50,7 +52,9 @@ __all__ = [
     "build_human_content",
     "classify",
     "describe_limits",
+    "list_session_attachments",
     "load_payloads",
     "prepare_upload",
+    "read_attachment_text",
     "to_payload",
 ]

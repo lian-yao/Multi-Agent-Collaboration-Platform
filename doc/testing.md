@@ -69,8 +69,11 @@ cd deploy; .\start.ps1                     # 起完整环境
 | U-09 | 流水线接入 MCP 工具 | 注册表工具被发现，按模型 `tool_calls` 调用并回填观察；失败记为 failed 且不中断；阶段载荷可序列化 | M4 |
 | U-10 | 行为日志事件 | 阶段开始/结束/失败与工具调用输出 `event=... field=value` 结构化日志，含 workflow_id 与耗时 | M4 |
 | U-11 | 动态编排计划与调度 | 计划解析只收合法形态（未知角色 / 重复 id / 自依赖 / 前向依赖 / 超步数一律整份丢弃）；规划模型抛错或返回垃圾文本时回退固定三步；依赖就绪度调度、失败连坐（含传递闭包）与最终交付物取值；Dapr 侧先规划后执行、子工作流实例 ID 稳定、业务终态与实例终态一致（ADR-019） | M5 |
-| U-12 | 多模态附件：分类 / 限额 / 解析 / 提示词 | 类型白名单（图片、文本与代码、pdf/docx/xlsx）与三类拒绝理由（空文件 / 超限 / 格式不支持）**都指名到具体文件**；文本解码的 `gb18030` 回退与可打印率闸门能挡住二进制；docx/xlsx 用标准库抽出段落与单元格；PDF 质量闸门把扫描件与 CID 字体判为 `failed`，且吃得下真实形态的 **FlateDecode 压缩流**与多页内容流；`build_human_content` 无图片时返回**纯字符串**（不改变既有链路），有图片时升级为 content block；失败项必须出现在附件清单里；**原件对所有类型留档**（ADR-021 / ADR-024） | M5 |
+| U-12 | 多模态附件：分类 / 限额 / 解析 / 提示词 | 类型白名单（图片、文本与代码、pdf/docx/xlsx）与三类拒绝理由（空文件 / 超限 / 格式不支持）**都指名到具体文件**；文本解码的 `gb18030` 回退与可打印率闸门能挡住二进制；docx/xlsx 用标准库抽出段落与单元格；PDF 质量闸门把扫描件判为 `failed`，吃得下真实形态的 **FlateDecode 压缩流**与多页内容流；**内嵌子集字体靠 `/ToUnicode` 解回文字**（十六进制 CID 与字面量 CID 两种写法），**字体码冲突时安全拒绝**而不是产出通顺的乱码；`build_human_content` 无图片时返回**纯字符串**（不改变既有链路），有图片时升级为 content block；失败项必须出现在附件清单里；**原件对所有类型留档**（ADR-021 / ADR-024） | M5 |
 | U-13 | 沙箱可用性探测与容器硬化 | 套接字连不上时原因要点到 `/var/run/docker.sock` 并给出可照做的动作；**只 `ping` 通不算可用**（镜像不在宿主机同样报不可用）；`SANDBOX_AUTO_PULL_IMAGE` 打开时自拉一次并重试、拉取失败还原为 `SandboxUnavailable`；探测自身抛异常时仍返回原因而不冒泡；容器参数逐条钉住（`cap_drop=['ALL']`、`read_only`、`network_disabled`、`user=nobody`、`security_opt=['no-new-privileges']`、`/app` 与 `/tmp` 的 tmpfs、`macp.role` 标签）（ADR-023） | M5 |
+| U-14 | 真实二进制附件夹具 | 6 份**真实库产出**的文件（fpdf2 / python-docx / openpyxl）逐份跑过抽取：多页 PDF 读到第三页附录、内嵌子集字体靠 `/ToUnicode` 读到正文、两字体冲突**明确失败且一个字正文都没有**、扫描件失败原因点到「文本层」、docx 表格单元格出来、xlsx 声明「公式未求值」；每份都断言 `prepare_upload` 后的 `data` 与磁盘原件**逐字节相同**；夹具目录不允许有没人测的文件 | M5（§4.5） |
+| U-15 | 会话级文件工具（Agent 读回附件） | 清单返回可读性（图片按类型算，不只看 `status`）；按 id / 完整名 / **唯一**子串解析附件，歧义时拒绝并列出候选；超 `session_file_max_chars` 截断并标注 `truncated`；图片与解析失败各给可行动提示；`SessionFileRegistry` 按会话追加且 `GET /tools` 静态目录不变；`session_scoped_registry` 在无会话/无条目时空转；**接线到 `advance_pipeline_stage` 后模型确实拿到这两个工具且调用被审计记录**（ADR-025） | M5（§4.5） |
+| U-16 | 附件回读的列契约 | 编译 `list_attachments_for_messages` 用的语句，断言选中列里**没有** `data` / `text_content`，`has_original` 是库侧 `data IS NOT NULL`，且 filter / order 仍在（ADR-024 遗留低效的回归）（§4.5） | M5（§4.5） |
 
 ### 2.2 集成测试（I）
 
@@ -687,8 +690,182 @@ npm --prefix frontend run build
    本轮只加了纯内存判断（没有变差，也没修好）。会话内附件多时这条查询会变重。
 4. **动态编排的净收益仍无度量**：与 §4.2 里 U-11 的缺口同源。
 
-## 5. 失败处理约定
+### 4.5 D9-10 收尾：真实附件样本、视觉评测集、Agent 读会话文件、附件回读列、编排净收益（2026-09-17，成员 D）
 
+§4.4 末尾登记的四条「仍未做」在本轮逐条处理，另加一条顺手修掉的既有低效。
+新增决策 [ADR-025](decisions/025-session-file-tools.md)（会话级文件工具）。
+
+**1. 后端（隔离存储，跑法与 §1 一致）**
+
+```bash
+DATABASE_URL="postgresql+psycopg://postgres:postgres@localhost:5433/macp_test" \
+REDIS_URL="redis://localhost:6380/15" ./.venv/Scripts/python.exe -m pytest -q
+# 724 passed, 7 skipped, 7 warnings in 10.50s（上一轮 682 → +42）
+```
+
+新增 42 例：
+
+| 文件 | 例数 | 覆盖 |
+| --- | --- | --- |
+| `tests/unit/test_attachment_fixtures.py` | 13 | 真实 fpdf2 / python-docx / openpyxl 产出的 6 份夹具 |
+| `tests/unit/test_session_files_tools.py` | 19 | 会话文件工具、注册表装饰、接线到阶段执行 |
+| `tests/unit/test_attachment_readback_columns.py` | 4 | 回读语句的列契约（不选 `data` / `text_content`） |
+| `tests/unit/test_attachments.py` | +6 | PDF `/ToUnicode`：十六进制 CID、字面量 CID、无 CMap、码冲突、bfrange、二进制流 |
+
+`7 skipped` 与既有 6 条 warning 不变（需真实模型 / Starlette 弃用告警）。本轮多出的
+第 7 条 warning 是**本机环境噪声**：`.pytest_cache` 目录不可写触发的
+`PytestCacheWarning: Permission denied`，与代码无关，加 `-p no:cacheprovider` 即回到 6 条。
+
+**2. 真实二进制附件夹具（上一轮「PDF 仍只有构造样本」）**
+
+`tests/unit/test_attachments.py` 里的样本是**手工拼的字节串**——它能钉住「某段正则能处理
+某种形状」，钉不住「真实工具产出的文件长什么样」。本轮补 `scripts/make_attachment_fixtures.py`
+生成、并提交 6 份**真实库产出**的夹具到 `tests/fixtures/attachments/`：
+
+| 夹具 | 生成方式 | 期望 |
+| --- | --- | --- |
+| `quarterly-report.pdf` | fpdf2，核心字体 + FlateDecode + 3 页 | 读出全文（含第三页附录） |
+| `embedded-subset-font.pdf` | fpdf2 + 内嵌 DejaVuSans TTF 子集，CID 写字面量串 | 靠 `/ToUnicode` 读出全文 |
+| `two-font-heading.pdf` | fpdf2 + Bold/Regular 两套内嵌字体 | **明确失败**，不产出乱码 |
+| `scanned-invoice.pdf` | PIL 画整页位图后贴进 PDF | 明确失败（没有文本层） |
+| `meeting-notes.docx` | python-docx（含表格） | 段落与表格单元格都出来 |
+| `budget-plan.xlsx` | openpyxl（含**无缓存结果的公式**） | 表头声明「公式未求值」 |
+
+夹具生成**不进测试依赖**（测试环境没有 fpdf2 / python-docx / openpyxl，也不该为了读夹具去装）：
+
+```bash
+uv run --no-project \
+  --with fpdf2 --with pillow --with python-docx --with openpyxl --with matplotlib \
+  python scripts/make_attachment_fixtures.py
+```
+
+用 matplotlib 只是为了取一份**开源许可**的 TTF（DejaVuSans）——内嵌商业字体（SimHei 等）
+会把字体文件带进提交物，许可上不合适。`test_fixture_directory_is_fully_covered` 钉住
+「夹具目录里不能有没人测的文件」。
+
+**这一轮真正补上的能力是 PDF 的 `/ToUnicode` 解码**：真实 PDF 的正文常写成**字形码**
+（CID）而不是字符，单靠 `latin-1` 解出来是控制字符，解析器会整份放弃。`extract_pdf` 现在
+会合并文档自带的 `/ToUnicode` CMap（`beginbfchar` / `beginbfrange`），把字面量串
+`(\000\001…)` 与十六进制串 `<0001…>` 两种写法都解回文字。
+
+**冲突码安全拒绝**是刻意保留的边界：子集字体的码各自从 0 起编，两套字体合并后同一个码
+会指向不同的字；按「能解出来就用」会产出**通顺但完全错误**的句子——比读不出来更糟，
+因为模型会当真。所以冲突时返回 `failed`，错误信息点明「字符码冲突、按此解码会得到乱码」，
+由 `two-font-heading.pdf` 钉住。
+
+**3. 视觉能力评测集（上一轮「视觉能力没有评测集」）**
+
+`scripts/vision_eval.py`：10 个**答案唯一、机器可判**的用例，覆盖计数（含颜色/形状双重筛选）、
+颜色识别、位置（最左/最高）、七段数码管 OCR、网格行列定位、以及「图中没有三角形」这类
+**否定回答**。图片用 Pillow 按固定坐标画（数字自绘七段管，不依赖字体），走**真实链路**：
+`prepare_upload` → `AttachmentPayload` → `build_human_content` → 真实模型，不绕过附件层。
+
+```bash
+MACP_VISION_EVAL=1 uv run --with pillow python scripts/vision_eval.py \
+  --out doc/evals/vision.md --keep-images .workbuddy/tmp/vision-images --gap 6
+# 10/10 通过
+```
+
+报告：[doc/evals/vision.md](evals/vision.md)。**它评的是「看不看得对」，不评回答质量**；
+期望串是「归一化后命中」，适合当趋势指标与回归闸门，不是精确准确率。
+**评测图片不入库**：脚本按固定坐标逐像素生成，换台机器画出的是同一张图（`--keep-images`
+只是给人工看一眼），所以提交一目录二进制没有意义，报告里写清用例形态就够了。
+
+**4. Agent 按需读回会话附件（上一轮「Agent 仍无法自己读文件」）**
+
+按 ADR-025 新增两个**会话级只读**工具 `list_session_files` / `read_session_file`，
+数据来自 `attachments` 表：不放宽沙箱策略（`open` / `import` 依旧禁止）、不给沙箱挂任何卷、
+不进 `GET /api/v1/tools` 静态目录。19 例覆盖：清单与读取、截断（`session_file_max_chars`）、
+图片不可读的提示、解析失败时带出原因、**子串歧义拒绝**（`invoice.pdf` 与 `invoice-2026.pdf`
+并存时不猜）、注册表按会话追加、`session_scoped_registry` 在无会话/无条目时空转。
+`tests/e2e/test_pipeline_e2e.py` 的真实工具断言改为断言它们**在执行时确实被绑定给模型**
+（`bound == {四个内置} ∪ {两个会话级}`）——只在单元测试里存在不算数。
+
+**5. 附件列表回读不再读 `data` 列（上一轮「既有低效，未修」）**
+
+ADR-024 时期 `list_attachments_for_messages` 用 `select(AttachmentRecord)` 取实体，
+`data` / `text_content` 被读出来又丢掉。现在改为显式列元信息
+（`_attachment_meta_columns()`），`has_original` 由**库侧** `data IS NOT NULL` 算出。
+返回结构与调用方口径不变。回归靠编译语句断言选中列里没有 `data` / `text_content`
+（`tests/unit/test_attachment_readback_columns.py`）——**不用 SQL 子串断言**：
+`has_original` 的表达式本身含 `attachments.data`，子串断言会误报。
+
+**6. 静态 vs 动态编排的净收益（上一轮「动态编排的净收益仍无度量」）**
+
+`scripts/orchestration_ab.py`：4 个任务 × 2 种模式，进程内直跑两条链路，对比
+墙钟 / 模型纯耗时 / 节流等待 / 步骤数 / 模型调用数 / 输入输出 token / 交付物字符 /
+「必备内容是否命中」。报告：[doc/evals/orchestration-ab.md](evals/orchestration-ab.md)。
+
+```bash
+MACP_AB_LIVE=1 uv run python scripts/orchestration_ab.py \
+  --out doc/evals/orchestration-ab.md --gap 6 --min-interval 6 --retry 2
+```
+
+**这一轮量出一个环境事实，必须先记下来**：本机网关（`localhost:3000`，one-api 系）在
+**紧接着**上一次请求结束就发下一次时，必然在 ~1.4s 内返回 500 `do_request_failed`。
+判定实验（同进程、同一模型）：
+
+| 调用 | 与上一次的间隔 | 结果 |
+| --- | --- | --- |
+| A | 首次 | 成功（2.84s） |
+| B | 立刻（同客户端） | **失败**（1.33s） |
+| C | 距 B 6s（同客户端） | 成功（2.48s） |
+| D | 立刻（**新建客户端**） | **失败**（1.52s） |
+| E | 距 D 6s | 成功（2.95s） |
+
+D 用的是新客户端却同样失败 → **不是连接复用**，是网关侧节流。第一次跑批因此
+**8 个组合全灭**，且失败形态极具误导性：静态链路第 1 步（collect）成功、第 2 步
+（analyze）必失败；动态链路规划成功、第一步必失败——看起来像"某一步有 bug"，
+实际是"第 2 次调用撞上节流"。所以脚本里加了 `GatewayThrottle`：相邻调用强制间隔
+（`--min-interval`，默认 6s）+ 只对**报错**重试，并把**等待时间与模型纯耗时分开记**。
+不加它，量到的是网关限流而不是编排差异。视觉评测（第 3 条）也是靠同样的间隔与退避
+才跑出 10/10。加上之后第二次跑批 **8/8 组合全部成功、0 次重试需要触发**。
+
+**跑出来的数（单轮采样、4 个任务，`--min-interval 6`）**：
+
+| 任务 | static token | dynamic token | 差值 | 步骤（static → dynamic） | 交付物字符（static → dynamic） |
+| --- | --- | --- | --- | --- | --- |
+| `single_question` | 6080 | 1687 | **-72.3%** | 3 → **1** | 1596 → 81 |
+| `collect_then_summarize` | 5523 | 2696 | **-51.2%** | 3 → **1** | 1805 → 403 |
+| `two_independent_sources` | 16413 | 43208 | **+163.3%** | 3 → 4 | 2610 → **736** |
+| `analysis_only` | 25432 | 35723 | +40.5% | 3 → 3 | 3697 → 6431 |
+| **合计** | 13362/次 | 20828/次 | **+55.9%** | 3.0 → 2.25 | — |
+
+「必备内容命中」两边都是 **4/4**。所以结论是：**在这个小样本上，动态编排的净收益是负的**
+（+55.9% token、+0.2 次调用，质量判据持平）。分开看两条更值得记的事实：
+
+1. **动态的「省」来自它不做三步**：前两个任务上规划节点把计划收敛成 **1 步**，等于承认
+   「这任务不值得走收集→分析→报告」。这确实便宜，但**不是动态编排的功劳**——
+   给静态链路加一条「简单任务跳过 collect」的规则成本更低（连规划调用都省了）。
+2. **动态的「贵」发生在它真正拆开的时候，而且没换来产出**：`two_independent_sources`
+   是唯一为「两路独立收集」准备的任务，动态确实拆成 4 步，但代价是 **2.6 倍 token**
+   （43208 vs 16413），交付物却**从 2610 字缩到 736 字**。更贵、更多步、产出更短——
+   这是本轮最直接的反面证据。
+
+因此**不建议在本轮之后打开 `AGENT_ORCHESTRATION_MODE=dynamic`**（默认仍是 `static`）；
+档 3（并行 / 聚合 / 反思）的前置条件**仍未满足**——现在有数了，而数说「先别加」。
+下一步该做的是把评测集做大（更多任务 + 参考输出 + 多轮采样），而不是先加并行。
+
+报告模板里还有一张**按任务看差值**的自动表，就是为了防止「合计平均值」把这种结构差异
+抹平（合计那一栏读起来像"动态贵 56%"，实际是两个方向的巨大差异相加）。原始行落在
+`doc/evals/orchestration-ab.rows.json`，改报告措辞用 `--from-rows` **离线重渲染**，
+不必再花一次 20 分钟的模型开销。
+
+**7. 仍未做 / 仍未验（不隐瞒）**
+
+1. **`orchestration_mode=dynamic` 的部署环境端到端回归**：`tests/e2e/test_live_e2e.py` 走
+   HTTP 打的是部署好的栈，至今只覆盖静态链路；动态链路的真实模型证据是脚本级的
+   （第 6 条）而不是走 compose 的。
+2. **规划质量仍只能人工读**：`plan_source` 区分 `llm` / `fallback`，但没有「降级率」指标，
+   也没有「动态的计划比固定三步更贴任务」的机器判据。
+3. **扫描件 OCR**：`scanned-invoice.pdf` 这类没有文本层的 PDF 只做到「明确失败 + 保留原件」，
+   不做 OCR。这是范围选择，不是缺陷。
+4. **多字体 PDF**：两种以上内嵌字体且码冲突时拒绝解析（第 2 条）。单字体覆盖了主流导出，
+   但「同一份文档里正文与页眉用不同字体」的场景目前读不了。
+5. **视觉评测只测 10 例、单轮采样**：够当闸门，不够当准确率；`--repeat` 与更大用例集是
+   后续的事。
+
+## 5. 失败处理约定
 - 任一用例失败：先复现，再定位，修复后将失败模式固化为新的测试或本文档约束；
 - 对 Dapr/编排等共享行为，先写测试或同步补测试，不允许“看起来正确”代替；
 - 每次里程碑结束时在报告记录：运行命令、通过数/失败数、失败原因。

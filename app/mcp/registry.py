@@ -30,7 +30,9 @@ from app.observability.logging import get_logger, log_event
 from app.observability.metrics import get_metrics_collector, record_tool_call
 from app.observability.tracing import record_exception, span
 from app.orchestration.tools import ToolCall, ToolSpec
+from app.tools.base import BuiltinTool
 from app.tools.registry import BuiltinToolRegistry, build_builtin_registry
+from app.tools.session_files import session_file_tools
 
 logger = get_logger("mcp.registry")
 
@@ -71,6 +73,49 @@ class InstrumentedToolRegistry:
         closer = getattr(self._registry, "close", None)
         if callable(closer):
             closer()
+
+
+class SessionFileRegistry:
+    """在基础注册表上追加「读本次会话附件」的工具（`app/tools/session_files.py`）。
+
+    为什么是装饰器而不是往 `build_tool_registry()` 里塞：这两个工具需要 `session_id`，
+    而那个注册表是**进程级缓存**的（ADR-009 要求它廉价可复用）。会话级的东西必须按
+    执行临时拼，不能进进程缓存。
+
+    基础工具在 `MCP_TRANSPORT=stdio/http` 时来自远端 MCP Server，这两个工具仍在平台
+    进程内执行——它们读的是平台自己的附件表，本来就没有"远端"可言。
+    """
+
+    def __init__(self, registry: Any, tools: Sequence[BuiltinTool]) -> None:
+        self._registry = registry
+        self._tools = {tool.name: tool for tool in tools}
+
+    def list_tools(self) -> tuple[ToolSpec, ...]:
+        base = tuple(self._registry.list_tools())
+        extra = tuple(
+            tool.spec() for name, tool in sorted(self._tools.items())
+        )
+        return base + extra
+
+    def call(self, request: ToolCall) -> Any:
+        tool = self._tools.get(request.tool_name)
+        if tool is not None:
+            return tool.invoke(request.arguments)
+        return self._registry.call(request)
+
+    def close(self) -> None:
+        closer = getattr(self._registry, "close", None)
+        if callable(closer):
+            closer()
+
+
+def with_session_files(registry: Any, session_id: str | None) -> Any:
+    """给注册表挂上会话文件工具；没绑定会话或功能关闭时原样返回。"""
+
+    tools = session_file_tools(session_id)
+    if not tools:
+        return registry
+    return SessionFileRegistry(registry, tools)
 
 
 def tool_catalog() -> list[dict[str, Any]]:
@@ -160,7 +205,9 @@ _registry: InstrumentedToolRegistry | None = None
 __all__ = [
     "BuiltinToolRegistry",
     "InstrumentedToolRegistry",
+    "SessionFileRegistry",
     "build_tool_registry",
     "reset_tool_registry_cache",
     "tool_catalog",
+    "with_session_files",
 ]

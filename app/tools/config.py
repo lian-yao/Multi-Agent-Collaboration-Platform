@@ -34,6 +34,20 @@ class ToolSettings(BaseSettings):
     sql_timeout_seconds: int = 5
     sql_default_limit: int = 50
 
+    session_files_enabled: bool = True
+    """是否给执行中的 Agent 挂上「读本次会话附件」的两个工具（`app/tools/session_files.py`）。
+
+    默认开启：这是「Agent 能自己读文件」在**不放宽沙箱策略**前提下唯一能落地的形态。
+    置 false 时角色节点只剩四个内置工具，行为退回到只依赖提示词里的附件内容。
+    """
+
+    session_file_max_chars: int = 20_000
+    """单次读取返回的正文上限。与 `app/attachments/spec.py` 的单文件注入上限同量级：
+    工具输出会原样回填给模型，读一份 20 万字的 PDF 会把上下文直接顶爆。"""
+
+    session_file_list_limit: int = 50
+    """`list_session_files` 返回的条数上限，避免异常会话把清单本身变成大载荷。"""
+
 
 @lru_cache
 def get_tool_settings() -> ToolSettings:

@@ -21,7 +21,11 @@
   图片与文档附件，走 `image_url` / 内联正文送进模型（ADR-021，`doc/api.md` §5.16）；
   首页引导卡改为「任务原型」并显式体现协作形态（ADR-022）；**代码执行沙箱在部署环境真正可用**
   （ADR-023，安全代价与关闭方式见下文「一键部署 → 执行边界（沙箱）」）；附件原件一律留档，
-  已发送的图片与文档都能下载原件（ADR-024）。
+  已发送的图片与文档都能下载原件（ADR-024）；**Agent 可按需读回本次会话的附件**
+  （ADR-025：会话级只读工具，不放宽沙箱策略、不给沙箱挂卷）。
+- 评测与度量（`doc/evals/`）：视觉能力评测集（10 例，答案机器可判）与
+  「静态 vs 动态编排」净收益 A/B，都用真实模型跑，用法见两节各自的报告与
+  [doc/testing.md](doc/testing.md) §4.5。
 - Python 环境由 UV 管理，实际环境以 `pyproject.toml + uv.lock` 为准。
 
 ## 技术栈
@@ -42,9 +46,9 @@
 ├── AGENTS.md                 # Agent 工作入口与硬性约束
 ├── app/                      # FastAPI 后端与编排层
 ├── frontend/                 # Web 可视化界面（React + Vite）
-├── tests/                    # 单元、集成、端到端测试
+├── tests/                    # 单元、集成、端到端测试（fixtures/ 里是真实库生成的附件固件）
 ├── deploy/                   # Docker 与 Dapr 部署资源
-├── scripts/                  # 本地开发脚本
+├── scripts/                  # 本地开发脚本、附件固件生成、视觉与编排评测
 ├── examples/                 # 示例场景（规划）
 ├── doc/                      # 项目文档
 │   ├── 15 AI Native多智能体协作平台.md
@@ -57,6 +61,7 @@
 │   ├── testing.md
 │   ├── deployment.md
 │   ├── roadmap.md
+│   ├── evals/                # 评测报告（视觉能力、编排净收益）
 │   └── decisions/
 ├── pyproject.toml            # 依赖与工具配置
 └── uv.lock                   # 环境锁定文件
@@ -140,4 +145,5 @@ cd deploy
 - 测试：[doc/testing.md](doc/testing.md)
 - 部署：[doc/deployment.md](doc/deployment.md)
 - 路线图：[doc/roadmap.md](doc/roadmap.md)
+- 评测报告：[doc/evals/](doc/evals)（视觉能力、静态 vs 动态编排净收益）
 - 决策记录：[doc/decisions](doc/decisions)

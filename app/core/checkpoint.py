@@ -1492,13 +1492,42 @@ def list_messages(
         return ([_message_to_dict(row) for row in reversed(rows)], int(total))
 
 
-def _attachment_meta(row: AttachmentRecord) -> dict[str, Any]:
+def _attachment_meta_columns() -> tuple[Any, ...]:
+    """列表回读用的列集合：**刻意排除 `data` 与 `text_content`**。
+
+    两者都是大字段：`data` 最坏是一份 5 MB 的原件，一份 4 附件的消息回读列表时
+    等于把 20 MB 字节从库搬到进程里再扔掉。`has_original` 交给数据库算——
+    `data IS NOT NULL` 是一个布尔表达式，不需要把 `data` 本身取出来。
+    """
+
+    return (
+        AttachmentRecord.id,
+        AttachmentRecord.session_id,
+        AttachmentRecord.message_id,
+        AttachmentRecord.name,
+        AttachmentRecord.mime,
+        AttachmentRecord.size_bytes,
+        AttachmentRecord.kind,
+        AttachmentRecord.status,
+        AttachmentRecord.error,
+        AttachmentRecord.created_at,
+        AttachmentRecord.data.is_not(None).label("has_original"),
+    )
+
+
+def _attachment_meta(
+    row: AttachmentRecord, has_original: bool | None = None
+) -> dict[str, Any]:
     """附件的展示字段。**不含** `data` / `text_content`：列表与消息回读都走这里，
     字节只在下载与执行阶段按 id 单独取。
 
     `has_original` 是给界面用的：没有字节的行（ADR-024 之前落库的文本/文档附件）
-    不该显示一个必然 404 的下载入口。
+    不该显示一个必然 404 的下载入口。走 `_attachment_meta_columns()` 取行时由数据库
+    算好并显式传入；直接拿 ORM 对象时（单行读取，`data` 本来就在手边）自行推导。
     """
+
+    if has_original is None:
+        has_original = getattr(row, "data", None) is not None
 
     return {
         "id": str(row.id),
@@ -1510,7 +1539,7 @@ def _attachment_meta(row: AttachmentRecord) -> dict[str, Any]:
         "kind": row.kind,
         "status": row.status,
         "error": row.error,
-        "has_original": row.data is not None,
+        "has_original": has_original,
         "created_at": row.created_at,
     }
 
@@ -1618,10 +1647,27 @@ def link_attachments(
     return sorted(linked, key=lambda item: order.get(item, len(order)))
 
 
+def _attachment_meta_statement(message_ids: list[uuid.UUID]) -> Any:
+    """`list_attachments_for_messages` 的唯一查询语句。
+
+    单独抽出来是为了能被测试直接编译断言：**这条语句绝不能出现 `attachments.data`**。
+    """
+
+    return (
+        select(*_attachment_meta_columns())
+        .where(AttachmentRecord.message_id.in_(message_ids))
+        .order_by(AttachmentRecord.created_at)
+    )
+
+
 def list_attachments_for_messages(
     message_ids: list[str],
 ) -> dict[str, list[dict[str, Any]]]:
-    """一次取多条消息的附件，按 `message_id` 分组；顺序按上传时间。"""
+    """一次取多条消息的附件，按 `message_id` 分组；顺序按上传时间。
+
+    只 SELECT 元数据列（见 `_attachment_meta_columns`）：消息列表是整页回读，
+    把每份附件的 `data` 一起读出来会白白搬运几十 MB。
+    """
 
     if not message_ids:
         return {}
@@ -1635,15 +1681,34 @@ def list_attachments_for_messages(
         return {}
 
     with get_session_factory()() as session:
-        rows = session.scalars(
-            select(AttachmentRecord)
-            .where(AttachmentRecord.message_id.in_(wanted))
-            .order_by(AttachmentRecord.created_at)
-        ).all()
+        rows = session.execute(_attachment_meta_statement(wanted)).all()
     grouped: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
-        grouped.setdefault(str(row.message_id), []).append(_attachment_meta(row))
+        grouped.setdefault(str(row.message_id), []).append(
+            _attachment_meta(row, row.has_original)
+        )
     return grouped
+
+
+def list_attachments_for_session(session_id: str | uuid.UUID) -> list[dict[str, Any]]:
+    """会话内全部附件的元数据（不含字节与正文），按上传时间。
+
+    与 `list_attachments_for_messages` 同口径、同列：只取元数据列，
+    `has_original` 由库侧 `data IS NOT NULL` 算出。
+    """
+
+    try:
+        wanted = _as_uuid(session_id)
+    except (ValueError, AttributeError):
+        return []
+
+    with get_session_factory()() as session:
+        rows = session.execute(
+            select(*_attachment_meta_columns())
+            .where(AttachmentRecord.session_id == wanted)
+            .order_by(AttachmentRecord.created_at)
+        ).all()
+    return [_attachment_meta(row, row.has_original) for row in rows]
 
 
 def load_attachment_payloads(attachment_ids: list[str]) -> list[dict[str, Any]]:

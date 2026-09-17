@@ -273,6 +273,146 @@ def test_pdf_with_no_text_layer_is_rejected() -> None:
 
 
 # --------------------------------------------------------------------------------------
+# PDF：/ToUnicode（内嵌子集字体的字形码）
+# --------------------------------------------------------------------------------------
+
+CID_SENTENCE = "Vendor onboarding notice for the platform review."
+
+
+def _objects_pdf(objects: list[bytes]) -> bytes:
+    out = bytearray(b"%PDF-1.4\n")
+    for index, obj in enumerate(objects, start=1):
+        out += str(index).encode() + b" 0 obj\n" + obj + b"\nendobj\n"
+    out += b"trailer\n<< /Root 1 0 R >>\n%%EOF\n"
+    return bytes(out)
+
+
+def _stream(body: bytes) -> bytes:
+    return b"<< /Length " + str(len(body)).encode() + b" >>\nstream\n" + body + b"\nendstream"
+
+
+def _code_table(text: str) -> dict[str, int]:
+    """按首次出现顺序从 1 开始编号——Identity-H 子集字体就是这么编的。"""
+
+    table: dict[str, int] = {}
+    for char in text:
+        if char not in table:
+            table[char] = len(table) + 1
+    return table
+
+
+def _bfchar_cmap(pairs: list[tuple[str, str]]) -> bytes:
+    lines = "".join(f"<{code}> <{target}>\n" for code, target in pairs)
+    return (
+        "/CIDInit /ProcSet findresource begin\nbegincmap\n"
+        f"{len(pairs)} beginbfchar\n{lines}endbfchar\nendcmap\n"
+    ).encode("ascii")
+
+
+def _cmap_for(text: str) -> bytes:
+    table = _code_table(text)
+    return _bfchar_cmap(
+        [(f"{code:04X}", f"{ord(char):04X}") for char, code in table.items()]
+    )
+
+
+def _cid_content(text: str, *, hex_form: bool) -> bytes:
+    """按 Identity-H 的两种真实写法之一编码正文。
+
+    - `hex_form=True`：十六进制串 `<00010002...>`；
+    - `hex_form=False`：**八进制转义的字面量串** `(\\000\\001...)`——fpdf2 与多数
+      生成器用的就是这种，也是最初漏掉的那一种。
+    """
+
+    table = _code_table(text)
+    if hex_form:
+        operand = ("<" + "".join(f"{table[ch]:04X}" for ch in text) + ">").encode()
+    else:
+        raw = b"".join(bytes.fromhex(f"{table[ch]:04X}") for ch in text)
+        operand = b"(" + b"".join(b"\\%03o" % byte for byte in raw) + b")"
+    return b"BT /F1 12 Tf 20 100 Td " + operand + b" Tj ET"
+
+
+def _cid_pdf(content: bytes, *, cmap: bytes | None) -> bytes:
+    objects = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Contents 5 0 R "
+        b"/Resources << /Font << /F1 4 0 R >> >> >>",
+        b"<< /Type /Font /Subtype /Type0 /Encoding /Identity-H /ToUnicode 6 0 R >>",
+        _stream(content),
+    ]
+    objects.append(_stream(cmap) if cmap is not None else b"<< >>")
+    return _objects_pdf(objects)
+
+
+def test_pdf_decodes_hex_cid_strings_through_tounicode() -> None:
+    data = _cid_pdf(_cid_content(CID_SENTENCE, hex_form=True), cmap=_cmap_for(CID_SENTENCE))
+    result = extract_pdf(data)
+    assert result.status is AttachmentStatus.READY
+    assert CID_SENTENCE in (result.text or "")
+
+
+def test_pdf_decodes_escaped_literal_cid_strings_through_tounicode() -> None:
+    """fpdf2 的写法：`(\\000\\001...)`。按 latin-1 看是一串控制字符。"""
+
+    data = _cid_pdf(
+        _cid_content(CID_SENTENCE, hex_form=False), cmap=_cmap_for(CID_SENTENCE)
+    )
+    result = extract_pdf(data)
+    assert result.status is AttachmentStatus.READY
+    assert CID_SENTENCE in (result.text or "")
+
+
+def test_pdf_without_tounicode_does_not_guess_hex_strings() -> None:
+    """没有 CMap 就不解十六进制串：解出来是字形序号，猜出来的只能是垃圾。"""
+
+    data = _cid_pdf(_cid_content(CID_SENTENCE, hex_form=True), cmap=None)
+    result = extract_pdf(data)
+    assert result.status is AttachmentStatus.FAILED
+    assert result.text is None
+
+
+def test_conflicting_tounicode_maps_refuse_instead_of_mixing_alphabets() -> None:
+    """同一个码被两张表映射成不同的字 → 该码作废，整份正文读不出而不是读错。"""
+
+    table = _code_table(CID_SENTENCE)
+    real = [(f"{code:04X}", f"{ord(char):04X}") for char, code in table.items()]
+    # 第二张表把同样的码全指向 'X'：冲突面足够大，正文必然解不出。
+    wrong = [(f"{code:04X}", "0058") for code in table.values()]
+    data = _cid_pdf(
+        _cid_content(CID_SENTENCE, hex_form=True),
+        cmap=_bfchar_cmap(real) + _bfchar_cmap(wrong),
+    )
+    result = extract_pdf(data)
+    assert result.status is AttachmentStatus.FAILED
+    assert result.text is None
+    assert "字符码" in (result.error or "")
+
+
+def test_bfrange_expands_a_sequential_code_run() -> None:
+    from app.attachments.extract import _pdf_to_unicode_map
+
+    cmap_body = (
+        b"begincmap\n1 beginbfrange\n<0001> <0005> <0041>\nendbfrange\nendcmap\n"
+    )
+    mapping, conflicted = _pdf_to_unicode_map([cmap_body])
+
+    assert mapping == {1: "A", 2: "B", 3: "C", 4: "D", 5: "E"}
+    assert conflicted is False
+
+
+def test_binary_stream_shapes_are_not_mined_for_text() -> None:
+    """没有文本算子的流不解：二进制流里凑出 `<hex>` 形状的概率不低，误采就是塞垃圾。"""
+
+    from app.attachments.extract import _pdf_chunk_pieces
+
+    cmap = {0x41: "A", 0x42: "B"}
+    assert _pdf_chunk_pieces(b"<< /Registry <41> /Ordering <4241> >>", cmap) == []
+    assert _pdf_chunk_pieces(b"\x00\x12<0041>\x00\x00binary", cmap) == []
+
+
+# --------------------------------------------------------------------------------------
 # extract 入口
 # --------------------------------------------------------------------------------------
 

@@ -31,11 +31,13 @@ ADR-021 决定「只有图片保留原始字节」：图片要转 base64 进模�
 
 - **库体积**：单文件 5 MB、单条消息 4 个，最坏 20 MB/条落在 PostgreSQL 的 `bytea`。
   限额本来就在（`app/attachments/spec.py`），所以增长有界；要再省只能换对象存储。
-- **列表路径会读到不要的东西**（**既有问题，本轮未改**）：`list_attachments_for_messages`
-  用 `select(AttachmentRecord)` 取实体，SQLAlchemy 默认加载全部列，`data` / `text_content`
-  在列表接口里被读出来又丢掉。这是 ADR-021 时期就有的行为，本轮只多了一个
-  `row.data is not None` 的纯内存判断，**没有让它变差**。真正的修法是给这两列加
-  `deferred=True` 并单独查 `has_original`，属于独立的性能改动。
+- **列表路径会读到不要的东西**（**已在 D9-10 收尾修掉**）：`list_attachments_for_messages`
+  当时用 `select(AttachmentRecord)` 取实体，SQLAlchemy 默认加载全部列，`data` / `text_content`
+  在列表接口里被读出来又丢掉。这是 ADR-021 时期就有的行为。现在改为
+  `_attachment_meta_columns()` 显式列元信息，并用 `data IS NOT NULL` 在**库侧**算
+  `has_original`——列表路径再也不读 `data` 列。回归由
+  `tests/unit/test_attachment_readback_columns.py` 编译语句后断言选中列里没有
+  `data` / `text_content` 钉住。
 
 ## 备选方案
 

@@ -47,7 +47,11 @@ from app.orchestration.pipeline import (
     start,
 )
 from app.orchestration.pipeline_graph import role_for_stage, run_role_stage
-from app.orchestration.tools import ToolRegistry, default_tool_registry
+from app.orchestration.tools import (
+    ToolRegistry,
+    default_tool_registry,
+    session_scoped_registry,
+)
 from app.observability.metrics import flush_metrics, record_workflow_terminal
 from app.workflows.state import save_step_result
 
@@ -147,8 +151,14 @@ def advance_pipeline_stage(
     workflow_run_id: str | None = None,
     tool_registry: ToolRegistry | None = None,
     attachments: Sequence[AttachmentPayload] = (),
+    session_id: str | None = None,
 ) -> dict[str, Any]:
-    """推进一个阶段，审计工具调用并保留 Workflow 行为日志关联。"""
+    """推进一个阶段，审计工具调用并保留 Workflow 行为日志关联。
+
+    ``session_id`` 用来给本次执行挂上「读本次会话附件」的工具（成员 C 的
+    `app/tools/session_files.py`）：附件正文只注入接收原始任务的那一步，下游阶段
+    想回头看原始文件就得自己按需读——这正是这个参数存在的理由。
+    """
 
     stage = _to_stage(step)
     if stage != state.current_step:
@@ -165,6 +175,9 @@ def advance_pipeline_stage(
         result = fake_stage_result(stage.value, task, previous=previous)
     else:
         registry = tool_registry if tool_registry is not None else default_tool_registry()
+        # 会话文件工具先挂、审计后包：这样读文件也算一次被审计的工具调用
+        # （谁读了哪份附件，`tool_calls` 表里查得到）。
+        registry = session_scoped_registry(registry, session_id)
         if registry is not None and run_id:
             registry = AuditedToolRegistry(
                 registry,
@@ -222,6 +235,7 @@ def _run_stage_activity(
         run_id=task.get("agent_run_id"),
         workflow_run_id=workflow_id,
         attachments=attachments,
+        session_id=str(task["session_id"]) if task.get("session_id") else None,
     )
     _record_checkpoint(
         workflow_id,

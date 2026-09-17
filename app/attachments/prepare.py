@@ -103,4 +103,45 @@ def load_payloads(attachment_ids: list[str]) -> list[AttachmentPayload]:
     return [to_payload(row) for row in checkpoint.load_attachment_payloads(attachment_ids)]
 
 
-__all__ = ["AttachmentRejected", "load_payloads", "prepare_upload", "to_payload"]
+def list_session_attachments(session_id: str) -> list[dict[str, Any]]:
+    """会话内全部附件的元数据（不含字节与正文），按上传时间。
+
+    供 Agent 的「自己读文件」工具使用：它们要能先看看这次会话里有哪些文件，
+    再决定读哪一份，而不是只能读提示词里已经塞进来的那一份。
+    """
+
+    return checkpoint.list_attachments_for_session(session_id)
+
+
+def read_attachment_text(attachment_id: str) -> dict[str, Any] | None:
+    """取一份附件的可读正文（含状态与失败原因）；不存在时返回 None。
+
+    只服务「以文本方式读一份附件」这一个用途，因此**不返回 `data`**：
+    一次工具调用的输出会回填给模型，把 5 MB 原件塞进去只会顶爆上下文。
+    原件下载走接口层 `GET /attachments/{id}/content`（ADR-024）。
+    """
+
+    row = checkpoint.get_attachment_content(attachment_id)
+    if row is None:
+        return None
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "kind": row["kind"],
+        "status": row["status"],
+        "mime": row["mime"],
+        "size_bytes": row["size_bytes"],
+        "has_original": bool(row.get("has_original")),
+        "text": row.get("text_content"),
+        "error": row.get("error"),
+    }
+
+
+__all__ = [
+    "AttachmentRejected",
+    "list_session_attachments",
+    "load_payloads",
+    "prepare_upload",
+    "read_attachment_text",
+    "to_payload",
+]
