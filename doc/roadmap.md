@@ -252,6 +252,17 @@ Token 采样按阶段记录（total 1020 / 1344 / 3051）。踩坑与决策见�
     ——这批用例 monkeypatch 了 `AgentSettings` / `list_agent_configs`，却没有屏蔽库里的
     *活的* Provider 覆盖。显式 `PUT` 全 `null` 清除覆盖后 8 条立即恢复通过（38 passed），
     全量回到 **371 passed / 7 skipped**。
+- 2026-09-17（动态编排与执行边界落地）：`uv run pytest -q -p no:cacheprovider` →
+  **618 passed / 7 skipped / 0 failed**（7 skipped 为需要 compose 的 `tests/e2e/test_live_e2e.py`；
+  隔离存储：`DATABASE_URL=…localhost:5433/macp_test REDIS_URL=redis://localhost:6380/15`，
+  避免被库里的活 Provider 覆盖污染，见 `doc/testing.md` §1）。
+  新增 `tests/unit/test_dynamic_pipeline.py`（43 例）、`tests/unit/test_workflow_dynamic.py`（13 例）、
+  `tests/integration/test_api.py` 增 4 例（编排模式透传与 422、沙箱状态只读与 405、探测失败原因）。
+  前端：`npm run build` 通过；`config-smoke` **69/69**、`workspace-smoke` **44/44**、
+  `ui-preview.html` 的 jsdom 自检 **30/30**（含「切到执行边界 → 拉到状态并渲染限额」与
+  「分区内可编辑控件数为 0」）。
+  **本轮的验证边界**：动态编排只有单元级证据，未接真实模型跑过端到端；
+  「动态是否比静态好」没有任何度量（`doc/orchestration.md` §3.3 列为档 3 前置条件）。
 - 注意事项：数据库读取用例使用 SQLite 内存表与注入目录数据，MCP 用例走内存协议往返而非
   跨进程 stdio，因此不代表真实 PostgreSQL、真实 MCP Server 或浏览器端到端验收。
   E-04/E-05 的 Web 侧与部署脚本已在本轮补上实跑证据（见上两条），
@@ -263,3 +274,25 @@ Token 采样按阶段记录（total 1020 / 1344 / 3051）。踩坑与决策见�
 ### 范围说明
 
 - D3-D4 不含动态并行分派、依赖 DAG 与人工介入（HITL），后续版本单独评估。
+
+### 后续演进：动态编排已落地（2026-09-17）
+
+「按任务动态分配 Agent」已从文档变成代码，**并列新增、默认关闭**（ADR-019）：
+
+| 项 | 状态 |
+| --- | --- |
+| 规划节点（LLM 出计划 + 非法计划整份回退固定三步） | 已落地 `app/orchestration/dynamic_graph.py` |
+| 按依赖就绪度调度、失败只连坐下游（含传递闭包） | 已落地 |
+| Dapr 侧规划活动 + 按步骤拆子 Workflow（`{wf}:dyn:{step_id}`） | 已落地 `app/workflows/dynamic.py` |
+| 模式开关 `AGENT_ORCHESTRATION_MODE` + 单次请求覆盖（§4.4） | 已落地 |
+| 波内并行（fan-out / fan-in）、结果聚合 | **未做**，属档 3 |
+| 反思循环、记忆注入、HITL 审批 | **未做**，属档 3 |
+| 动态 vs 静态的评测数据（完成率 / 时延 / Token / 净收益） | **未做**，是档 3 的前置条件 |
+
+档 3（真·多智能体自主协作）的目标形态、需动的模块与边界、前置条件与不建议现在做的事，
+见 `doc/orchestration.md` §3。一句话概括优先级：**先有评测集，再谈并行与反思**——
+没有「动态相对静态的净收益」这组数，后面每一层都是在猜。
+
+顺带落地的一项可观测性缺口：「代码执行沙箱在部署环境不可用」此前只能翻容器日志，
+现在有只读的 `GET /api/v1/config/sandbox`（§5.15）与「工具与配置 → 执行边界」分区
+（ADR-020）。**沙箱本身仍不可用**——`deploy/compose.yaml` 没挂 docker.sock，未修。

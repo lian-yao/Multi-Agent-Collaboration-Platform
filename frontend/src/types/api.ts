@@ -515,3 +515,30 @@ export interface ProviderPresetCatalog {
   items: ProviderPreset[];
   categories: ProviderPresetCategory[];
 }
+
+/* -------------------------------------------------------------------------- */
+/* §5.15 执行边界（沙箱状态，只读）                                            */
+/* -------------------------------------------------------------------------- */
+
+export interface SandboxLimits {
+  timeout_seconds: number;
+  memory_limit: string;
+  cpu_limit: number;
+  pids_limit: number;
+  network_enabled: boolean;
+  output_limit_chars: number;
+  max_code_chars: number;
+}
+
+/**
+ * 敏感工具执行边界。**只读**：限额属部署期安全边界，后端没有写接口，
+ * 前端也不提供编辑入口。
+ */
+export interface SandboxStatus {
+  backend: string;
+  image: string;
+  available: boolean;
+  /** 不可用时的可读原因；可用时为 `null`。 */
+  reason: string | null;
+  limits: SandboxLimits;
+}

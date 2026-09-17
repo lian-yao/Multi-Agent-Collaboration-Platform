@@ -119,18 +119,29 @@
 
 1. 服务端校验 Session 状态。
 2. 持久化 Message、AgentRun、WorkflowRun。
-3. 调度 Dapr Workflow，返回 `202 Accepted`。
+3. 按编排模式调度 Dapr Workflow，返回 `202 Accepted`。
 4. 客户端轮询 Workflow，并重新读取消息列表获取最终回复。
 
-当前请求体只有 `content`：
+### 3.1 编排模式
+
+请求体字段：`content`（必填）与 `orchestration_mode`（可选）：
 
 ```json
-{ "content": "分析一篇技术文章的核心要点" }
+{ "content": "分析一篇技术文章的核心要点", "orchestration_mode": "dynamic" }
 ```
 
-当前不接受 `decision_agent_id`、Agent 列表、工具列表等字段。前端**不再提供**主决策 Agent
+| 模式 | 工作流 | 流程 |
+| --- | --- | --- |
+| `static`（默认） | `agent_pipeline` | 固定三步 `collect → analyze → report` |
+| `dynamic` | `agent_dynamic` | 规划节点按任务产出计划，再按依赖就绪度逐步执行 |
+
+`orchestration_mode` 只覆盖**这一次**执行；省略时用服务端 `AGENT_ORCHESTRATION_MODE`。
+细节见 `doc/orchestration.md`，决策见 ADR-019。
+
+当前仍不接受 `decision_agent_id`、Agent 列表、工具列表等字段。前端**不再提供**主决策 Agent
 选择器：它只改前端 state、后端不接受该字段，属于「选了也不生效」的假选择，已于 ADR-018 移除。
-参与哪些 Agent 由编排层决定，不由用户指定。
+参与哪些 Agent 由编排层决定，不由用户指定——`orchestration_mode` 选的是**编排方式**，
+不是「参与哪些 Agent」。
 
 ## 4. 已实现接口
 
@@ -172,6 +183,23 @@
 
 `POST /api/v1/sessions/{session_id}/messages`
 
+请求体：
+
+```json
+{
+  "content": "对比两种方案的实测数据并生成报告",
+  "orchestration_mode": "dynamic"
+}
+```
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `content` | 是 | 用户任务，长度 ≥ 1 |
+| `orchestration_mode` | 否 | 单次执行的编排模式覆盖，`static` / `dynamic`；省略时用服务端 `AGENT_ORCHESTRATION_MODE`（默认 `static`）。见 §3.1 与 `doc/orchestration.md` |
+
+非法取值（如 `"autonomous"`）由 `Literal` 校验拦成 `422`，**不静默退回 `static`**——
+「选了动态却悄悄变成固定流程」比直接报错更难排查。
+
 响应 `202`：
 
 ```json
@@ -185,6 +213,10 @@
 ```
 
 接口内部在调度前会将持久化 Workflow 和 AgentRun 更新为 `running`；返回体保留 `pending` 作为接收状态。会话暂停时返回 `409 SESSION_PAUSED`。
+
+调度到哪个工作流由编排模式决定（ADR-019）：`static` → `agent_pipeline`，
+`dynamic` → `agent_dynamic`；非法值一律退回 `static`。响应体不返回本次使用的模式，
+前端要展示请从 `GET /workflows/{id}` 的 `checkpoint` 读（动态模式带 `"mode": "dynamic"`）。
 
 ### 4.5 查询会话消息
 
@@ -902,6 +934,44 @@ item 字段为 metric_name、value（有限数值）、labels（JSON 对象）�
 的会话。两处入口都必须在**删除请求成功后**重新拉取 §5.13 的列表再渲染，否则会出现
 「删掉了但列表里还在」的假象（侧栏下拉原先只在展开时拉一次；记录页原先与删除并发拉取，
 存在竞态）。
+
+### 5.15 查询执行边界（沙箱状态，只读）
+
+`GET /api/v1/config/sandbox`
+
+响应 `200`：
+
+```json
+{
+  "backend": "docker",
+  "image": "python:3.12-slim",
+  "available": false,
+  "reason": "Docker 守护进程不可达；常见原因是 backend 容器未挂载 /var/run/docker.sock 或当前用户无权访问该套接字",
+  "limits": {
+    "timeout_seconds": 15,
+    "memory_limit": "256m",
+    "cpu_limit": 0.5,
+    "pids_limit": 64,
+    "network_enabled": false,
+    "output_limit_chars": 4000,
+    "max_code_chars": 20000
+  }
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `backend` | `docker`（容器隔离）或 `denied`（显式拒绝执行） |
+| `image` | 容器隔离使用的镜像 |
+| `available` | 运行期探测结果；`false` 时工具调用会以 `SandboxUnavailable` 失败 |
+| `reason` | 不可用原因；可用时为 `null` |
+| `limits` | 当前生效限额，逐项对应 `SandboxSettings` |
+
+**只读，没有写接口**（`PUT`/`POST` 返回 `405`）。这些参数是部署期安全边界——做成运行时可改的
+界面等于让 Web 操作者放宽自己容器的隔离；且当前 `available=false` 的原因是缺 docker.sock，
+改限额不会让它变可用，那样的开关必然是个假开关。决策与理由见 ADR-020。
+
+前端入口：「工具与配置 → 执行边界」，只展示不编辑。
 
 ## 6. 规划接口（当前未实现）
 

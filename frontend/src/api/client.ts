@@ -29,6 +29,7 @@ import type {
   ProviderRegistryDetail,
   ProviderRegistryList,
   ProviderRegistryUpdate,
+  SandboxStatus,
   Session,
   SessionSummary,
   Tool,
@@ -172,6 +173,12 @@ export const api = {
   /* ---------------------------------------------------------------------- */
 
   getProviderPresets: () => json<ProviderPresetCatalog>("/api/v1/config/provider-presets"),
+
+  /* ---------------------------------------------------------------------- */
+  /* §5.15 执行边界（沙箱状态，只读；无写接口）                               */
+  /* ---------------------------------------------------------------------- */
+
+  getSandboxStatus: () => json<SandboxStatus>("/api/v1/config/sandbox"),
 
   /* ---------------------------------------------------------------------- */
   /* §5.9 Provider 注册表                                                    */

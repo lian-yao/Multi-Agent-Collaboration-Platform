@@ -145,6 +145,8 @@ def flatten() -> dict:
         "GET /api/v1/config/provider": S.PROVIDER_CONFIG,
         "PUT /api/v1/config/provider": S.PROVIDER_CONFIG,
         "GET /api/v1/config/provider-presets": S.PRESETS,
+        # 执行边界（§5.15）：只读分区，预览按真实部署给「不可用 + 原因」。
+        "GET /api/v1/config/sandbox": S.SANDBOX_STATUS,
         "GET /api/v1/config/providers": {"items": S.PROVIDERS, "total": len(S.PROVIDERS)},
         "GET /api/v1/config/models": {"items": S.MODELS, "total": len(S.MODELS)},
         "GET /api/v1/config/mcp/servers": {"items": S.MCP_SERVERS, "total": len(S.MCP_SERVERS)},

@@ -60,6 +60,15 @@ flowchart TB
 | REST API | 会话、Agent、工作流、配置 | `app/api` |
 | Web UI | 控制台、会话管理、配置管理 | `frontend` |
 
+编排引擎里有**两条并列链路**（ADR-019，详见 `doc/orchestration.md`）：
+
+| 模式 | 图 | 状态 | Workflow |
+| --- | --- | --- | --- |
+| `static`（默认） | `app/orchestration/pipeline_graph.py` | `PipelineState` | `agent_pipeline` |
+| `dynamic` | `app/orchestration/dynamic_graph.py` | `DynamicPipelineState` | `agent_dynamic` |
+
+两者共用角色定义、工具契约、观测接入点与终态回写活动；差异只在「谁决定参与角色与顺序」。
+
 ## 架构决策
 
 - 编排框架固定为 LangGraph，不引入 CrewAI。
@@ -67,3 +76,5 @@ flowchart TB
 - 从单 Agent 模式起步，再扩展多 Agent 协作。
 - 优先集成持久化执行与状态管理。
 - 敏感工具执行必须沙箱隔离。
+- 动态编排**并列新增**，默认关闭（`AGENT_ORCHESTRATION_MODE=static`），静态链路零改动（ADR-019）。
+- 运行期可改的配置只覆盖业务参数（模型、路由、工具登记）；安全边界（沙箱限额）只读（ADR-020）。

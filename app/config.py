@@ -61,6 +61,18 @@ class AgentSettings(BaseSettings):
     custom_headers: dict[str, str] = Field(default_factory=dict)
     """Provider 级附加请求头，按原样透传给模型客户端。"""
 
+    # ---- 编排模式（ADR-019）----
+    orchestration_mode: Literal["static", "dynamic"] = "static"
+    """编排模式：`static` 为固定三步流水线，`dynamic` 由规划节点按任务决定角色与顺序。
+
+    **默认 static**：动态编排是新链路，默认关闭可保证既有演示链路与 Dapr 断点续跑
+    行为零变化；要启用需显式设 `AGENT_ORCHESTRATION_MODE=dynamic`，或在单次请求上
+    带 `orchestration_mode` 覆盖（`doc/api.md` §4.4）。
+    """
+
+    max_plan_steps: int = 6
+    """动态编排单次执行允许的最大步骤数；既是成本上限，也是回退判据。"""
+
 
 @lru_cache
 def get_settings() -> AgentSettings:

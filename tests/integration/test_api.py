@@ -310,3 +310,102 @@ def test_delete_agent_registry_entry(monkeypatch) -> None:
 
     removed = client.delete("/api/v1/config/agents/summarizer")
     assert removed.status_code == 204
+
+
+def test_send_message_passes_orchestration_mode(monkeypatch) -> None:
+    """单次执行的编排模式覆盖必须原样送到调度器（ADR-019、`doc/api.md` §4.4）。"""
+
+    store = InMemoryApiStore()
+    workflow_service = FakeWorkflowService()
+    monkeypatch.setattr(api_main, "api_store", store)
+    monkeypatch.setattr(api_main, "get_workflow_service", lambda: workflow_service)
+    client = TestClient(app)
+
+    session_id = client.post("/api/v1/sessions", json={"user_id": "demo-user"}).json()["id"]
+
+    default_call = client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"content": "默认模式"},
+    )
+    dynamic_call = client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"content": "动态模式", "orchestration_mode": "dynamic"},
+    )
+    bogus_call = client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"content": "非法模式", "orchestration_mode": "autonomous"},
+    )
+
+    assert default_call.status_code == 202
+    assert dynamic_call.status_code == 202
+    # 未支持的取值由契约拒绝，而不是悄悄退回 static——否则「我选了动态」会静默失效。
+    assert bogus_call.status_code == 422
+    assert [
+        task.orchestration_mode for task in workflow_service.scheduled_tasks
+    ] == [None, "dynamic"]
+
+
+class _AlwaysAvailableSandbox:
+    def available(self) -> bool:
+        return True
+
+
+def test_sandbox_status_reports_denied_backend(monkeypatch) -> None:
+    """沙箱状态是只读诊断：说清当前能不能用、为什么不能用。"""
+
+    from app.sandbox import SandboxSettings
+
+    monkeypatch.setattr(
+        api_main,
+        "get_sandbox_settings",
+        lambda: SandboxSettings(backend="denied", timeout_seconds=7),
+    )
+    client = TestClient(app)
+
+    response = client.get("/api/v1/config/sandbox")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["backend"] == "denied"
+    assert payload["available"] is False
+    assert "denied" in payload["reason"]
+    assert payload["limits"]["timeout_seconds"] == 7
+    # 运行期没有写入口：这些参数属部署期安全边界。
+    assert client.put("/api/v1/config/sandbox", json={"timeout_seconds": 999}).status_code == 405
+
+
+def test_sandbox_status_reports_available_docker_backend(monkeypatch) -> None:
+    from app.sandbox import SandboxSettings
+
+    monkeypatch.setattr(
+        api_main,
+        "get_sandbox_settings",
+        lambda: SandboxSettings(backend="docker", image="python:3.12-slim"),
+    )
+    monkeypatch.setattr(api_main, "build_sandbox", lambda settings: _AlwaysAvailableSandbox())
+    client = TestClient(app)
+
+    payload = client.get("/api/v1/config/sandbox").json()
+
+    assert payload["available"] is True
+    assert payload["reason"] is None
+    assert payload["image"] == "python:3.12-slim"
+
+
+def test_sandbox_status_explains_missing_docker_socket(monkeypatch) -> None:
+    from app.sandbox import SandboxSettings
+
+    class _ProbeFails:
+        def available(self) -> bool:
+            raise FileNotFoundError(2, "No such file or directory")
+
+    monkeypatch.setattr(
+        api_main, "get_sandbox_settings", lambda: SandboxSettings(backend="docker")
+    )
+    monkeypatch.setattr(api_main, "build_sandbox", lambda settings: _ProbeFails())
+    client = TestClient(app)
+
+    payload = client.get("/api/v1/config/sandbox").json()
+
+    assert payload["available"] is False
+    assert "FileNotFoundError" in payload["reason"]

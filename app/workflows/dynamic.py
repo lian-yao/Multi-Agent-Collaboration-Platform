@@ -1,0 +1,290 @@
+"""动态编排的 Dapr 持久化链路（ADR-019）。
+
+与 ``app.workflows.pipeline`` 的固定三步链路**并列**注册，互不影响；由
+``WorkflowService.schedule`` 按生效的编排模式选择工作流名：
+
+- ``static`` → ``agent_pipeline``（既有链路，默认）；
+- ``dynamic`` → ``agent_dynamic``（本模块）。
+
+与静态链路的差异，以及为什么这样拆：
+
+- 静态链路每个阶段一个**固定阶段名**的子 Workflow（``{workflow_id}:{stage}``）；
+  动态链路的步骤名由规划节点在运行期产出，因此子 Workflow 实例 ID 用
+  ``{workflow_id}:dyn:{step_id}``——同样满足「同一次执行重放得到相同实例 ID」，
+  断点续跑语义与静态链路一致。
+- **规划本身也是一个活动**。规划结果随之进入 Dapr 状态存储，重放时不会重新调用
+  规划模型——否则恢复一次就会得到一份新计划，续跑无从谈起。
+- 步骤之间是显式依赖关系，某步失败只把依赖它的步骤记为 ``skipped``，
+  与之无关的步骤照常执行；只有当整次执行没有任何可用交付物时，工作流才以
+  ``failed`` 终止（与业务终态保持一致，见 ADR-016 F-05）。
+- 本档步骤**串行**执行；波内并行（fan-out/聚合）见 `doc/orchestration.md` 档 3。
+
+``use_fake_model=True`` 时使用确定性假计划与假步骤输出，供故障恢复演练与
+无可用模型的环境使用，口径与静态链路的 ``fake_stage_result`` 一致。
+"""
+
+from __future__ import annotations
+
+from datetime import timedelta
+from typing import Any
+
+import dapr.ext.workflow as wf
+
+from app.config import AgentSettings, get_settings
+from app.core.agent_config import resolve_agent_settings
+from app.core.tool_audit import AuditedToolRegistry
+from app.orchestration.dynamic_graph import (
+    PLAN_SOURCE_FALLBACK,
+    DynamicPipelineState,
+    DynamicPlan,
+    PlanStep,
+    PlanStepStatus,
+    StepOutcome,
+    dynamic_checkpoint_summary,
+    fallback_plan,
+    finalize_state,
+    generate_plan,
+    resolve_max_plan_steps,
+    run_plan_step,
+)
+from app.orchestration.llm import build_chat_model
+from app.orchestration.pipeline import PipelineStatus
+from app.orchestration.tools import ToolCaller, default_tool_registry
+from app.workflows.pipeline import finalize_activity
+
+DYNAMIC_WORKFLOW_NAME = "agent_dynamic"
+DYNAMIC_SUBTASK_WORKFLOW_NAME = "agent_dynamic_subtask"
+
+SUBTASK_RETRY_POLICY = wf.RetryPolicy(
+    first_retry_interval=timedelta(seconds=1),
+    max_number_of_attempts=3,
+    backoff_coefficient=2,
+    max_retry_interval=timedelta(seconds=10),
+)
+
+PLANNER_AGENT_ID = "planner"
+"""规划节点的配置解析标识。
+
+`resolve_agent_settings` 按 id 读 `agent_configs`；当前没有 `planner` 行，
+因此解析结果就是 ADR-017 的默认路由（注册表 → legacy 列 → 环境）。
+**这是有意为之**：以后若要让规划用更便宜的模型，只需加一行 `planner` 覆盖，
+不必改代码。
+"""
+
+
+def _planner_settings() -> AgentSettings:
+    """解析规划节点配置；任何解析失败都退回环境配置，规划不该因配置查询而失败。"""
+
+    try:
+        return resolve_agent_settings(PLANNER_AGENT_ID)
+    except Exception:
+        return get_settings()
+
+
+def _role_settings(role: str) -> AgentSettings:
+    try:
+        return resolve_agent_settings(role)
+    except Exception:
+        return get_settings()
+
+
+def fake_step_outcome(step: PlanStep, task: str) -> StepOutcome:
+    """确定性假步骤输出，供恢复演练与无模型环境使用。"""
+
+    return StepOutcome(
+        step_id=step.id,
+        role=step.role,
+        instruction=step.instruction,
+        status=PlanStepStatus.COMPLETED,
+        content=(
+            f"dynamic {step.id} [{step.role.value}] task={task} "
+            f"deps={','.join(step.depends_on) or '-'}"
+        ),
+    )
+
+
+def dynamic_plan_activity(
+    ctx: wf.WorkflowActivityContext,
+    activity_input: dict[str, Any],
+) -> dict[str, Any]:
+    """规划活动：产出协作计划并交给 Dapr 持久化。"""
+
+    task = activity_input["task"]
+    workflow_id = str(
+        activity_input.get("workflow_id") or task.get("workflow_id") or ctx.workflow_id
+    )
+    if task.get("use_fake_model"):
+        plan = fallback_plan("演练模式：使用确定性假模型，直接采用固定三步计划。")
+    else:
+        settings = _planner_settings()
+        plan = generate_plan(
+            task["task"],
+            build_chat_model(settings),
+            resolve_max_plan_steps(settings),
+            workflow_id=workflow_id,
+        )
+    return {"workflow_id": workflow_id, "plan": plan.model_dump(mode="json")}
+
+
+def dynamic_step_activity(
+    ctx: wf.WorkflowActivityContext,
+    activity_input: dict[str, Any],
+) -> dict[str, Any]:
+    """步骤活动：执行一个计划步骤，返回该步结果。"""
+
+    task = activity_input["task"]
+    workflow_id = str(
+        activity_input.get("workflow_id") or task.get("workflow_id") or ctx.workflow_id
+    )
+    step = PlanStep.model_validate(activity_input["step"])
+    results = {
+        step_id: StepOutcome.model_validate(payload)
+        for step_id, payload in (activity_input.get("results") or {}).items()
+    }
+
+    if task.get("use_fake_model"):
+        outcome = fake_step_outcome(step, task["task"])
+    else:
+        registry = default_tool_registry()
+        run_id = task.get("agent_run_id")
+        if registry is not None and run_id:
+            registry = AuditedToolRegistry(
+                registry, run_id=run_id, workflow_run_id=workflow_id
+            )
+        caller = ToolCaller(registry, scope=workflow_id) if registry is not None else None
+        outcome = run_plan_step(
+            step,
+            task["task"],
+            results,
+            build_chat_model(_role_settings(step.role.value)),
+            caller,
+            workflow_id,
+        )
+    return {"workflow_id": workflow_id, "outcome": outcome.model_dump(mode="json")}
+
+
+def _serialized_results(results: dict[str, StepOutcome]) -> dict[str, Any]:
+    return {step_id: outcome.model_dump(mode="json") for step_id, outcome in results.items()}
+
+
+def _skipped(step: PlanStep) -> StepOutcome:
+    return StepOutcome(
+        step_id=step.id,
+        role=step.role,
+        instruction=step.instruction,
+        status=PlanStepStatus.SKIPPED,
+        error="上游步骤未成功完成，已跳过。",
+    )
+
+
+def dynamic_subtask_workflow(
+    ctx: wf.DaprWorkflowContext,
+    activity_input: dict[str, Any],
+) -> dict[str, Any]:
+    """单个可恢复子任务：一个持久化边界内执行一个计划步骤。"""
+
+    step = PlanStep.model_validate(activity_input["step"])
+    ctx.set_custom_status(f"dyn:{step.id}")
+    outcome = yield ctx.call_activity(dynamic_step_activity, input=activity_input)
+    return outcome
+
+
+def agent_dynamic_workflow(
+    ctx: wf.DaprWorkflowContext,
+    task: dict[str, Any],
+) -> dict[str, Any]:
+    """动态编排父工作流：规划一次，然后按计划顺序（跳过依赖失败的步骤）逐步执行。"""
+
+    workflow_id = str(task.get("workflow_id") or ctx.instance_id)
+    terminal_input: dict[str, Any] = {
+        "workflow_id": workflow_id,
+        "session_id": task.get("session_id"),
+        "agent_run_id": task.get("agent_run_id"),
+        "message_id": task.get("message_id"),
+    }
+
+    try:
+        ctx.set_custom_status("plan")
+        planned = yield ctx.call_activity(
+            dynamic_plan_activity,
+            input={"task": task, "workflow_id": workflow_id},
+        )
+        plan = DynamicPlan.model_validate(planned["plan"])
+
+        results: dict[str, StepOutcome] = {}
+        for step in plan.steps:
+            if not all(
+                results.get(dep) is not None
+                and results[dep].status is PlanStepStatus.COMPLETED
+                for dep in step.depends_on
+            ):
+                results[step.id] = _skipped(step)
+                continue
+            ctx.set_custom_status(f"dyn:{step.id}")
+            completed = yield ctx.call_child_workflow(
+                dynamic_subtask_workflow,
+                input={
+                    "workflow_id": workflow_id,
+                    "task": task,
+                    "step": step.model_dump(mode="json"),
+                    "results": _serialized_results(results),
+                },
+                instance_id=f"{workflow_id}:dyn:{step.id}",
+                retry_policy=SUBTASK_RETRY_POLICY,
+            )
+            results[step.id] = StepOutcome.model_validate(completed["outcome"])
+
+        settled = finalize_state(
+            DynamicPipelineState(
+                task=task["task"],
+                status=PipelineStatus.RUNNING,
+                plan=plan.steps,
+                plan_source=plan.source,
+                plan_rationale=plan.rationale,
+                results=results,
+            ),
+            workflow_id,
+        )
+    except Exception as exc:
+        ctx.set_custom_status("failed")
+        yield ctx.call_activity(
+            finalize_activity,
+            input={**terminal_input, "status": "failed", "error": str(exc)},
+        )
+        raise
+
+    ctx.set_custom_status(
+        "completed" if settled.status is PipelineStatus.COMPLETED else "failed"
+    )
+    yield ctx.call_activity(
+        finalize_activity,
+        input={
+            **terminal_input,
+            "status": settled.status.value,
+            "checkpoint": dynamic_checkpoint_summary(settled),
+            "report": settled.final_output,
+            "error": settled.error,
+        },
+    )
+    if settled.status is not PipelineStatus.COMPLETED:
+        # 业务终态与 Dapr 实例终态保持一致（ADR-016 F-05）：没有交付物即视为失败，
+        # 否则会出现「工作流 completed 但消息 failed」的错位。
+        raise RuntimeError(settled.error or "动态编排未产出最终交付物")
+
+    return {
+        "output": settled.final_output,
+        "state": settled.model_dump(mode="json"),
+    }
+
+
+__all__ = [
+    "DYNAMIC_SUBTASK_WORKFLOW_NAME",
+    "DYNAMIC_WORKFLOW_NAME",
+    "PLANNER_AGENT_ID",
+    "PLAN_SOURCE_FALLBACK",
+    "agent_dynamic_workflow",
+    "dynamic_plan_activity",
+    "dynamic_step_activity",
+    "dynamic_subtask_workflow",
+    "fake_step_outcome",
+]

@@ -50,6 +50,7 @@ from app.core.provider_config import (
 from app.mcp.registry import tool_catalog
 from app.observability.logging import get_logger, log_event
 from app.observability.metrics import render_prometheus_metrics
+from app.sandbox import build_sandbox, get_sandbox_settings
 from app.workflows.pipeline import WorkflowTask
 from app.workflows.service import get_workflow_service
 
@@ -116,6 +117,11 @@ class SessionListResponse(BaseModel):
 
 class MessageRequest(BaseModel):
     content: str = Field(min_length=1)
+    orchestration_mode: Literal["static", "dynamic"] | None = None
+    """单次执行的编排模式覆盖（ADR-019）。
+
+    省略时用服务端 `AGENT_ORCHESTRATION_MODE`（默认 `static`）。
+    """
 
 
 class MessageResponse(BaseModel):
@@ -701,6 +707,33 @@ class MetricListResponse(BaseModel):
     availability: str = "not_integrated"
 
 
+class SandboxLimitsResponse(BaseModel):
+    """当前生效的沙箱限额，逐项对应 `SandboxSettings`（`doc/api.md` §5.15）。"""
+
+    timeout_seconds: int
+    memory_limit: str
+    cpu_limit: float
+    pids_limit: int
+    network_enabled: bool
+    output_limit_chars: int
+    max_code_chars: int
+
+
+class SandboxStatusResponse(BaseModel):
+    """敏感工具执行边界的只读视图。
+
+    **只读是刻意的**：这些参数是部署期安全边界（cgroup 限额、网络开关、后端选择）。
+    做成运行时可改的界面等于让 Web 操作者放宽自己容器的隔离——那不是一个功能，
+    是一个缺口。运行期唯一该被看见的信息是「现在到底能不能用、为什么不能用」。
+    """
+
+    backend: str
+    image: str
+    available: bool
+    reason: str | None = None
+    limits: SandboxLimitsResponse
+
+
 app = FastAPI(
     title="Multi-Agent Collaboration Platform",
     version="0.1.0",
@@ -917,6 +950,7 @@ def send_message(session_id: str, payload: MessageRequest) -> MessageAcceptedRes
                 session_id=session_id,
                 agent_run_id=agent_run["id"],
                 message_id=message["id"],
+                orchestration_mode=payload.orchestration_mode,
             )
         )
     except Exception as exc:
@@ -1268,6 +1302,59 @@ def list_tools(
 ) -> ToolListResponse:
     return ToolListResponse.model_validate(
         _inspection_read(inspection_store.tools, page=page, page_size=page_size)
+    )
+
+
+def _sandbox_availability(settings) -> tuple[bool, str | None]:
+    """探测沙箱后端是否真的可用，并给出可读原因。
+
+    `available()` 只返回布尔值（`app/sandbox/docker_runtime.py`），而排障时需要知道
+    **为什么**不可用——「代码完整但部署里没挂 docker.sock」正是靠这层原因才能看出来。
+    """
+
+    if settings.backend == "denied":
+        return False, "已按 SANDBOX_BACKEND=denied 显式关闭执行（无 Docker 环境的显式降级）"
+    try:
+        if build_sandbox(settings).available():
+            return True, None
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+    return False, (
+        "Docker 守护进程不可达；常见原因是 backend 容器未挂载 /var/run/docker.sock "
+        "或当前用户无权访问该套接字"
+    )
+
+
+@app.get("/api/v1/config/sandbox", response_model=SandboxStatusResponse)
+def get_sandbox_status() -> SandboxStatusResponse:
+    """只读：敏感工具执行边界（`doc/api.md` §5.15）。
+
+    没有对应的写接口——沙箱限额属于部署期安全边界，刻意不做运行时可改。
+    """
+
+    settings = get_sandbox_settings()
+    available, reason = _sandbox_availability(settings)
+    log_event(
+        logger,
+        "sandbox.status",
+        backend=settings.backend,
+        available=available,
+        reason=reason,
+    )
+    return SandboxStatusResponse(
+        backend=settings.backend,
+        image=settings.image,
+        available=available,
+        reason=reason,
+        limits=SandboxLimitsResponse(
+            timeout_seconds=settings.timeout_seconds,
+            memory_limit=settings.memory_limit,
+            cpu_limit=settings.cpu_limit,
+            pids_limit=settings.pids_limit,
+            network_enabled=settings.network_enabled,
+            output_limit_chars=settings.output_limit_chars,
+            max_code_chars=settings.max_code_chars,
+        ),
     )
 
 

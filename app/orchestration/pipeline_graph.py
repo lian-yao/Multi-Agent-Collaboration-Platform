@@ -289,6 +289,30 @@ def run_role_stage(
     return _run_role_stage(resolved, task, previous, model, caller, workflow_id=workflow_id)
 
 
+def content_with_tools(content: str | list[Any]) -> str:
+    """把 ``AIMessage.content`` 归一化为纯文本。
+
+    公开别名，供 ``app.orchestration.dynamic_graph`` 复用同一套 content block 归一化，
+    避免动态图另写一份（两份实现迟早会在新的 block 类型上跑偏）。
+    """
+
+    return _content_text(content)
+
+
+def invoke_role_messages(
+    messages: list[Any],
+    llm: BaseChatModel,
+    caller: ToolCaller | None = None,
+) -> str:
+    """公开的单次角色调用入口：执行 ReAct 工具回填循环并返回正文。
+
+    静态图经由 ``_run_role_stage`` 走同一实现（含观测与日志）；动态图只需要
+    「给一段消息、拿回正文」，因此这里暴露一个不含阶段语义的薄封装。
+    """
+
+    return _content_text(_invoke_role(messages, llm, caller).content)
+
+
 def _state_update(state: PipelineState) -> dict[str, Any]:
     """把 PipelineState 的推进结果转成 LangGraph 节点返回的状态更新。"""
     return {

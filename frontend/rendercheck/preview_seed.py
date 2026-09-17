@@ -284,6 +284,27 @@ def metrics_for(workflow_id: str) -> list:
 
 # ------------------------------------------------------------------ routing
 
+# 沙箱状态（§5.15）：按**真实部署**的样子给种子——后端容器没挂 docker.sock，
+# 所以这里是「不可用 + 原因」，而不是一个好看的绿灯。
+SANDBOX_STATUS = {
+    "backend": "docker",
+    "image": "python:3.12-slim",
+    "available": False,
+    "reason": (
+        "Docker 守护进程不可达；常见原因是 backend 容器未挂载 /var/run/docker.sock "
+        "或当前用户无权访问该套接字"
+    ),
+    "limits": {
+        "timeout_seconds": 15,
+        "memory_limit": "256m",
+        "cpu_limit": 0.5,
+        "pids_limit": 64,
+        "network_enabled": False,
+        "output_limit_chars": 4000,
+        "max_code_chars": 20000,
+    },
+}
+
 ROUTES = [
     ("GET", r"^/api/v1/agents$", lambda m, b: {"items": AGENTS}),
     ("GET", r"^/api/v1/sessions$", lambda m, b: list_sessions_summary()),
@@ -306,6 +327,7 @@ ROUTES = [
     ("GET", r"^/api/v1/config/provider$", lambda m, b: PROVIDER_CONFIG),
     ("PUT", r"^/api/v1/config/provider$", lambda m, b: PROVIDER_CONFIG),
     ("GET", r"^/api/v1/config/provider-presets$", lambda m, b: PRESETS),
+    ("GET", r"^/api/v1/config/sandbox$", lambda m, b: SANDBOX_STATUS),
     ("GET", r"^/api/v1/config/providers$", lambda m, b: {"items": PROVIDERS, "total": len(PROVIDERS)}),
     ("GET", r"^/api/v1/config/providers/(?P<pid>[^/]+)$", None),  # handled below
     ("GET", r"^/api/v1/config/models$",

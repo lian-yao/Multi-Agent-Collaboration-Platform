@@ -37,7 +37,8 @@ import { resolveKnownContextTokens } from "../src/config/modelCapabilities";
 import { draftProblem, draftToPayload, parseMcpImport, type McpImportDraft } from "../src/config/mcpConfig";
 import { entriesToRecord, recordToEntries, samePairs } from "../src/config/KeyValueFields";
 import { McpImportModal } from "../src/config/McpImportModal";
-import type { Agent, ProviderRegistryDetail } from "../src/types/api";
+import { SandboxBoundary } from "../src/config/SandboxPanel";
+import type { Agent, ProviderRegistryDetail, SandboxStatus } from "../src/types/api";
 
 (globalThis as Record<string, unknown>).fetch = async () => ({
   ok: true,
@@ -58,7 +59,7 @@ try {
   check("配置页整体可静态渲染", false, cause instanceof Error ? cause.message : String(cause));
 }
 
-check("渲染出 3 个分区入口", ["Provider", "默认路由", "MCP 工具"].every((label) => page.includes(label)), page.slice(0, 300));
+check("渲染出 4 个分区入口", ["Provider", "默认路由", "MCP 工具", "执行边界"].every((label) => page.includes(label)), page.slice(0, 300));
 check(
   "配置页不再携带已迁走的分区",
   !page.includes("运行采样") && !page.includes("Agent 角色"),
@@ -74,7 +75,7 @@ check(
 );
 check(
   "副路由带 aria-selected 与 tab 角色",
-  (page.match(/role="tab"/g) ?? []).length === 3 && page.includes('aria-selected="true"'),
+  (page.match(/role="tab"/g) ?? []).length === 4 && page.includes('aria-selected="true"'),
   String((page.match(/role="tab"/g) ?? []).length),
 );
 check(
@@ -671,6 +672,62 @@ check(
     emptyImportMarkup.includes("cfg-mcp-import-head") &&
     !emptyImportMarkup.includes("cfg-mcp-import-item"),
   `长度 ${emptyImportMarkup.length}`,
+);
+
+// 「执行边界」是只读分区：限额属部署期安全边界，后端没有写接口，前端也不能有编辑控件。
+const sandboxUnavailable: SandboxStatus = {
+  backend: "docker",
+  image: "python:3.12-slim",
+  available: false,
+  reason: "Docker 守护进程不可达；常见原因是 backend 容器未挂载 /var/run/docker.sock。",
+  limits: {
+    timeout_seconds: 15,
+    memory_limit: "256m",
+    cpu_limit: 0.5,
+    pids_limit: 64,
+    network_enabled: false,
+    output_limit_chars: 4000,
+    max_code_chars: 20000,
+  },
+};
+const boundaryMarkup = renderToStaticMarkup(<SandboxBoundary status={sandboxUnavailable} />);
+check(
+  "执行边界：不可用时给出原因与逐项限额",
+  boundaryMarkup.includes("不可用") &&
+    boundaryMarkup.includes("Docker 守护进程不可达") &&
+    boundaryMarkup.includes("python:3.12-slim") &&
+    boundaryMarkup.includes("15 秒") &&
+    boundaryMarkup.includes("0.5 核") &&
+    boundaryMarkup.includes("256m") &&
+    boundaryMarkup.includes("禁用") &&
+    boundaryMarkup.includes("4000 字符"),
+  boundaryMarkup.slice(0, 160),
+);
+
+check(
+  "执行边界：只读——没有任何可编辑控件",
+  !/<input|<select|<textarea/.test(boundaryMarkup),
+  boundaryMarkup.slice(0, 160),
+);
+
+const sandboxAvailable = renderToStaticMarkup(
+  <SandboxBoundary status={{ ...sandboxUnavailable, available: true, reason: null }} />,
+);
+check(
+  "执行边界：可用时不渲染原因行",
+  sandboxAvailable.includes("可用") &&
+    !sandboxAvailable.includes("Docker 守护进程不可达") &&
+    !sandboxAvailable.includes("cfg-alert"),
+  sandboxAvailable.slice(0, 160),
+);
+
+const configPageSource = readFileSync(join(process.cwd(), "src", "config", "ConfigPage.tsx"), "utf8");
+check(
+  "工具与配置：执行边界成为第四个分区",
+  page.includes("执行边界") &&
+    /id:\s*"sandbox"/.test(configPageSource) &&
+    /<SandboxPanel\s*\/>/.test(configPageSource),
+  "",
 );
 
 const passed = results.filter(([ok]) => ok).length;

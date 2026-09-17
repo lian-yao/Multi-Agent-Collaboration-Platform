@@ -74,6 +74,11 @@ class WorkflowTask:
     message_id: str | None = None
     hold_seconds: int = 0
     use_fake_model: bool = False
+    orchestration_mode: str | None = None
+    """单次执行的编排模式覆盖（`static` / `dynamic`）；None 表示用服务端配置。
+
+    `WorkflowService.schedule` 据此选择工作流名，见 ADR-019。
+    """
 
     def asdict(self) -> dict[str, Any]:
         return asdict(self)

@@ -68,6 +68,7 @@ cd deploy; .\start.ps1                     # 起完整环境
 | U-08 | 沙箱边界拒绝越权 | 代码执行工具拒绝网络/危险命令 | M4 |
 | U-09 | 流水线接入 MCP 工具 | 注册表工具被发现，按模型 `tool_calls` 调用并回填观察；失败记为 failed 且不中断；阶段载荷可序列化 | M4 |
 | U-10 | 行为日志事件 | 阶段开始/结束/失败与工具调用输出 `event=... field=value` 结构化日志，含 workflow_id 与耗时 | M4 |
+| U-11 | 动态编排计划与调度 | 计划解析只收合法形态（未知角色 / 重复 id / 自依赖 / 前向依赖 / 超步数一律整份丢弃）；规划模型抛错或返回垃圾文本时回退固定三步；依赖就绪度调度、失败连坐（含传递闭包）与最终交付物取值；Dapr 侧先规划后执行、子工作流实例 ID 稳定、业务终态与实例终态一致（ADR-019） | M5 |
 
 ### 2.2 集成测试（I）
 
@@ -177,11 +178,11 @@ Provider 配置面板的验证步骤（ADR-017 之后：`frontend/src/config/` �
 
 | 页面 | 组件 | 分区 / 验证要点 |
 | --- | --- | --- |
-| 工具与配置 | `config/ConfigPage.tsx` | 只放写配置的三个分区，见下表三行；三个分区用 `components/PageTabs.tsx` 副路由切换，标题与副路由左对齐（**不整页居中**） |
+| 工具与配置 | `config/ConfigPage.tsx` | 放写配置的三个分区 + 一个**只读**的执行边界，见下表；四个分区用 `components/PageTabs.tsx` 副路由切换，标题与副路由左对齐（**不整页居中**） |
 | Agent 团队 | `App.tsx::AgentTeamPage` → `config/AgentPanel.tsx` | 角色路由：一次 `GET /config/agents` 取回角色与 `available_models`；角色**一行多个方块**，方块只显示摘要（名字 / `role · 状态` / 生效模型 / Temperature / 覆盖项数），点击方块在网格下方展开 `AgentTuningPanel` 编辑，再点一次或「收起」关掉；`override_keys` 高亮「已覆盖」字段；「清除全部覆盖」发 6 个 `null`；`activeAgentId` 只做当前阶段高亮 |
 | 任务记录 | `records/RecordsPage.tsx`（容器与行渲染在 `records/Inspection.tsx`） | 四分区副路由：`runs` 运行记录、`calls` 工具调用（§5.5）、`metrics` 指标采样（§5.6）、`sessions` 历史会话（§5.13）。采样有 Workflow 时按 `workflow_id` 取并轮询（终态停），无 Workflow 时退回全局采样；历史会话调 `GET /api/v1/sessions` 分页列出，点选按 `latest_workflow_id` 恢复执行台并回工作台；`Records` 统一「加载中 / 失败 / 未接入 / 无记录 / 有数据」五态，分页仅在多页时出现 |
 
-「工具与配置」页的三个分区：
+「工具与配置」页的分区（前三个可写，第四个只读）：
 
 | 分区 | 组件 | 验证要点 |
 | --- | --- | --- |
@@ -193,6 +194,7 @@ Provider 配置面板的验证步骤（ADR-017 之后：`frontend/src/config/` �
 | MCP 工具 | `McpPanel.tsx` | 工具卡片只显示 `name` / 截断后的 `description` / 开关与可用性；完整 `input_schema` 收进**默认折叠**的 `<details>`，展开时才调 §5.3。工具级选项里**只有 `disabled` 有界面出口**：`allowAutoExecution` 虽然在 `tool_options` 与 `doc/api.md` §5.11 里，但执行链路没有任何地方消费它（见 §3.4 的漂移清单），所以**不给它做界面开关**——否则就是一个点了没效果的假开关 |
 | 同上 · 粘贴导入 | `McpImportModal.tsx` + `mcpConfig.ts` | 粘贴外部客户端的配置 JSON（`mcpServers` 映射/数组、裸映射、单条参数四种形态）后**立即解析并预览**，不自动提交；已登记的 ID 在预览里标黄「会失败」；提交是**前端逐条**调 `POST /config/mcp/servers`（§5.11 只有单条创建接口），一条失败不拖垮其余，成功与失败分别汇报，**全部成功才关闭弹层** |
 | 同上 · Server 表单 | `McpPanel.tsx::ServerFormModal` + `KeyValueFields.tsx` | 传输下拉按**远程 / 本地**分组；环境变量与请求头是**键值对行编辑器**（可增删、逐项校验空键与重复键），不再是「每行 KEY=VALUE」文本域；表单校验与粘贴导入**共用** `mcpConfig.ts::draftProblem`，两处不会各漂一套口径 |
+| 执行边界 | `SandboxPanel.tsx` | **只读**：展示沙箱后端、镜像、可用性探测与不可用原因，以及 7 项生效限额；`available=false` 时原因行必现（`GET /config/sandbox` §5.15）。**没有任何可编辑控件**，后端也没有写接口（`PUT` → `405`）。为什么不给开关：这些是部署期安全边界，且当前 `available=false` 的成因是缺 docker.sock，改限额不会让它变可用（ADR-020） |
 
 浏览器端的自动化用例（Playwright 之类）尚未引入，属后续增量。在此之前，配置页与工作台
 各有一层**无浏览器渲染冒烟**（不引入新依赖，只用项目已有的 react / esbuild）：
@@ -211,7 +213,7 @@ node_modules/.bin/esbuild rendercheck/workspace-smoke.tsx --bundle --platform=no
 > `frontend/` 下造出 `frontend/c/Users/...` 这种路径形状的垃圾目录（已踩过一次，见
 > 2026-09-15 日志）。用 `C:/...` 或 `$TEMP`。
 
-`config-smoke` 用 `react-dom/server` 渲染整棵配置页，断言配置页只剩 3 个分区入口、已迁走
+`config-smoke` 用 `react-dom/server` 渲染整棵配置页，断言配置页只剩 4 个分区入口、已迁走
 的分区不再出现在这里，另外**单独挂载**一次 `AgentPanel`（Agent 团队页）、
 `RuntimeSampling` 与 `RecordsPage`（任务记录页）——它们不在 `RuntimeConfig` 的树里，
 不单独挂就等于换页后无人验证。再加三层用显式 props 驱动、effects 够不到的区块：
@@ -282,6 +284,16 @@ MCP 粘贴导入与键值对编辑（2026-09-17 增加）另有一条纯函数�
    已被「模型批量引入」占用（`ModelSection.tsx` 的 `.cfg-import-block` / `.cfg-import-toolbar`），
    同名复用会让两处布局互相带崩。
 
+执行边界只读（2026-09-17 增加，ADR-020）另有三条断言，都指向同一件事——**这块不能有写入口**：
+
+9. **渲染断言**：`SandboxBoundary` 按显式 props 单独挂一次（面板本体靠 `useEffect` 拉数据，
+   静态渲染够不到）。不可用时必须同时出现原因行与逐项限额（`15 秒`、`0.5 核`、`256m`、
+   `禁用`、`4000 字符`）；可用时**不得**渲染 `cfg-alert`。
+10. **只读断言**：`SandboxBoundary` 的渲染结果里**不得出现** `<input` / `<select` /
+    `<textarea`；`ui-preview.html` 的 jsdom 自检也断言「执行边界分区内可编辑控件数为 0」。
+11. **契约断言**：`tests/integration/test_api.py` 断言 `PUT /api/v1/config/sandbox` 返回
+    **405**。写接口是被显式测掉的——以后要加必须先改这条用例和 ADR-020。
+
 **边界要说清**：它只跑不依赖 `useEffect` 的路径，跑不到「点击 → 请求 → 回填」的交互
 链路；那部分仍是人工浏览器验收（上面两张表就是人工清单），或退到 §3.4 的静态预览。
 为什么需要它：本机 `npm install agent-browser` 长时间无产物（要拉 ~500MB Chromium），
@@ -315,7 +327,7 @@ python frontend/rendercheck/build-preview.py      # 产出 rendercheck/ui-previe
 - 变更类请求（保存 / 删除）预览不模拟落库，统一回空成功体，免得评审版式时被红字带偏。
 - 产物 `ui-preview.html` 与中间产物 `.preview-bundle.*` 已进 `.gitignore`，不入库。
 
-预览产物本身可以离线自检（`jsdom` 挂载 + 点一遍侧栏与副路由，11 项断言）。这条链路
+预览产物本身可以离线自检（`jsdom` 挂载 + 点一遍侧栏与副路由与四个配置分区，30 项断言）。这条链路
 **不进仓库**，因为项目刻意不引前端测试依赖；本机想跑就临时装：
 
 ```bash
@@ -353,6 +365,7 @@ npm i jsdom && node verify_preview.mjs frontend/rendercheck/ui-preview.html
 | U-08 沙箱边界拒绝越权 | 通过 | `tests/unit/test_sandbox_policy.py`：Python/Shell 越权拒绝、策略先于后端、`denied` 后端不降级执行（ADR-012） |
 | U-09 流水线接入 MCP 工具 | 通过（含真实模型验收） | `tests/unit/test_pipeline_tools.py`（15 例全绿，含「阶段活动消费默认注册表」，ADR-009）。真实路径已验收：API 模型下 collector/analyst 两阶段各产生一次 `calculator` 调用（`21*2`、`21+21`，`succeeded`） |
 | U-10 行为日志事件 | 通过 | `tests/unit/test_observability.py`（ADR-010） |
+| U-11 动态编排计划与调度 | 通过（单元级；未接真实模型） | `tests/unit/test_dynamic_pipeline.py`（43 例：计划解析的 12 类非法输入、规划降级、就绪度调度、连坐跳过、交付物取值、`resolve_workflow_name`）与 `tests/unit/test_workflow_dynamic.py`（13 例：规划/步骤活动、父工作流先规划后执行、子工作流实例 ID、终态一致性）。**缺口**：规划质量与「动态相对静态的净收益」没有任何度量，也没有把动态模式纳入真实模型回归（见 `doc/orchestration.md` §3.3） |
 | I-06 MCP 工具发现与调用 | 通过（缺跨进程 stdio） | `tests/unit/test_mcp_tools.py` 走 `mcp.shared.memory` 的**真实 MCP 协议往返**（发现、调用、错误还原、目录）；真实流水线验收（2026-09-15）：Workflow 内 2 次 `calculator` 调用落 `tool_calls` 并读回（`21*2`、`21+21` → `42`）；仍缺跨进程 stdio 传输的端到端用例 |
 | I-07 可观测数据输出 | 通过 | `tests/unit/test_observability_metrics.py`：Span 与属性/异常、指标去重、Prometheus 文本、`metrics` 表写入（SQLite 与表缺失两种路径）、降级不阻塞；`metrics` 表已由 `app/core/checkpoint.py::MetricRecord` 建出，2026-09-15 在真实 PostgreSQL 上跑通采样落库与 `/api/v1/metrics` 读回（16 条采样），真实 Prometheus 上抓到 `backend`/`dapr-sidecar` 两个 `up` target（43 条 `macp_*` 序列），真实 Jaeger 上查到 `stage.run`/`llm.chat` span；Token 按真实模型名归因（F-03 回归，见 §4.2） |
 | I-08 配置热更新 | 通过 | `PATCH /api/v1/config/agents/{agent_id}` 已实现（`doc/api.md` §5.7、ADR-013）：覆盖写 `agent_configs`，阶段活动执行时解析生效配置，无需重启；单元用例 `tests/unit/test_agent_config.py`（合并/校验/回退/表契约），集成用例 `tests/integration/test_config_api.py`（404/422/503/200 与生效值，裸请求可写见 ADR-015）；真实 PostgreSQL 上已跑通写入—读回—新执行生效 |

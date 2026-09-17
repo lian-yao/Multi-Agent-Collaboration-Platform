@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Settings2, Sliders, Route, Plug } from "lucide-react";
+import { Settings2, Sliders, Route, Plug, ShieldCheck } from "lucide-react";
 import { api } from "../api/client";
 import { PageTabs, type PageTab } from "../components/PageTabs";
 import type { ProviderPresetCatalog } from "../types/api";
@@ -7,16 +7,18 @@ import { describeError } from "./shared";
 import { ProviderPanel } from "./ProviderPanel";
 import { DefaultRoutePanel } from "./DefaultRoutePanel";
 import { McpPanel } from "./McpPanel";
+import { SandboxPanel } from "./SandboxPanel";
 import "./config.css";
 
-export type ConfigTabId = "providers" | "defaults" | "mcp";
+export type ConfigTabId = "providers" | "defaults" | "mcp" | "sandbox";
 
 /**
- * 三个分区的职责边界（ADR-017 / doc/api.md §7）：
+ * 四个分区的职责边界（ADR-017 / ADR-018 / doc/api.md §7）：
  * 同一份数据只在一个分区里写，别的页面只读。
  * - providers：多端点登记、批量引入模型、逐条特化调参
  * - defaults：兜底模型与 legacy 五列
  * - mcp：多 Server 与紧凑工具卡片
+ * - sandbox：执行边界，**只读**（限额属部署期安全边界，后端无写接口）
  */
 export const CONFIG_TABS: readonly PageTab<ConfigTabId>[] = [
   {
@@ -27,6 +29,12 @@ export const CONFIG_TABS: readonly PageTab<ConfigTabId>[] = [
   },
   { id: "defaults", label: "默认路由", icon: Route, title: "兜底模型与 legacy 五列" },
   { id: "mcp", label: "MCP 工具", icon: Plug, title: "多 Server 与紧凑工具卡片" },
+  {
+    id: "sandbox",
+    label: "执行边界",
+    icon: ShieldCheck,
+    title: "敏感工具沙箱：当前是否可用、限额是多少（只读）",
+  },
 ];
 
 /**
@@ -86,6 +94,7 @@ export function ConfigPage() {
         {tab === "providers" && <ProviderPanel catalog={catalog} />}
         {tab === "defaults" && <DefaultRoutePanel />}
         {tab === "mcp" && <McpPanel />}
+        {tab === "sandbox" && <SandboxPanel />}
       </div>
     </div>
   );
