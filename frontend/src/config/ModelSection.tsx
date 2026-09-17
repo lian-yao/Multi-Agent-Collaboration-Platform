@@ -2,6 +2,7 @@ import { useCallback, useMemo, useState, type ChangeEvent, type FormEvent } from
 import { ChevronDown } from "lucide-react";
 import { api } from "../api/client";
 import { InlineConfirm } from "../components/InlineConfirm";
+import { formatTokenCount, resolveKnownContextTokens } from "./modelCapabilities";
 import {
   CUSTOM_PARAMETER_TYPES,
   REASONING_TYPES,
@@ -75,6 +76,19 @@ type TextField = {
 }[keyof ModelForm];
 
 const AS_TEXT = (value: number | null): string => (value === null ? "" : String(value));
+
+/**
+ * 「上下文上限」那一栏的提示文案：区分「已按常见模型识别」「用户手填过」「未识别」三态。
+ *
+ * 抽成函数是因为「手动登记模型」与「特化调参」两处要给出**完全一致**的措辞——
+ * 说法不一致时用户会以为两处行为不同。
+ */
+export function describeContextHint(model: string, touched: boolean): string {
+  if (touched) return "已手动设置；清空表示未设置。";
+  const detected = resolveKnownContextTokens(model);
+  if (detected === null) return "整数 ≥1；常见模型会自动带出，未识别时可手填。";
+  return `已按常见模型识别为 ${formatTokenCount(detected)}，可手动修改。`;
+}
 
 function formFromModel(model: ModelRegistry): ModelForm {
   return {
@@ -248,12 +262,33 @@ function ModelTuningForm({
   const [form, setForm] = useState<ModelForm>(() => formFromModel(model));
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState<NoticeState>(null);
+  /** 用户是否亲手改过上下文上限；改过之后不再被模型名的自动识别覆盖。 */
+  const [contextTouched, setContextTouched] = useState(false);
   const problem = formProblem(form);
 
   /** 文本/数字类字段的统一 setter；`enabled` 与 `custom_parameters` 另走各自入口。 */
   const edit = (key: TextField) => (event: ChangeEvent<HTMLInputElement | HTMLSelectElement>) => {
     const value = event.target.value;
     setForm((current) => ({ ...current, [key]: value }) as ModelForm);
+    setNotice(null);
+  };
+
+  /**
+   * 改模型名时顺手带出常见模型的上下文窗口（`modelCapabilities.ts`）。
+   *
+   * 只在**识别到**的时候覆盖：识别不到就保留原值，避免把用户已存的设置悄悄清空。
+   * 用户一旦手改过上下文上限（`contextTouched`）就完全停手。
+   */
+  const editModel = (event: ChangeEvent<HTMLInputElement>) => {
+    const next = event.target.value;
+    setForm((current) => {
+      const updated: ModelForm = { ...current, model: next };
+      if (!contextTouched) {
+        const detected = resolveKnownContextTokens(next);
+        if (detected !== null) updated.max_context_tokens = String(detected);
+      }
+      return updated;
+    });
     setNotice(null);
   };
 
@@ -308,7 +343,7 @@ function ModelTuningForm({
           <input
             id={`m-model-${model.id}`}
             value={form.model}
-            onChange={edit("model")}
+            onChange={editModel}
             autoComplete="off"
             spellCheck={false}
           />
@@ -361,7 +396,7 @@ function ModelTuningForm({
         <Field
           label="上下文上限"
           htmlFor={`m-ctx-${model.id}`}
-          hint="整数，≥1；留空表示未设置。"
+          hint={describeContextHint(form.model, contextTouched)}
           tone={form.max_context_tokens.trim() && parseInteger(form.max_context_tokens) === undefined ? "bad" : undefined}
         >
           <input
@@ -370,7 +405,10 @@ function ModelTuningForm({
             min={1}
             step={1}
             value={form.max_context_tokens}
-            onChange={edit("max_context_tokens")}
+            onChange={(event) => {
+              setContextTouched(true);
+              edit("max_context_tokens")(event);
+            }}
           />
         </Field>
         <Field
@@ -437,10 +475,31 @@ function ModelCreateModal({
   }));
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState<NoticeState>(null);
+  /** 用户是否亲手改过上下文上限；改过之后不再被模型名的自动识别覆盖。 */
+  const [contextTouched, setContextTouched] = useState(false);
   const problem = formProblem(form);
 
   const edit = (key: TextField) => (event: ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
     setForm((current) => ({ ...current, [key]: event.target.value }) as ModelForm);
+
+  /**
+   * 输入模型名时带出常见模型的上下文窗口（`modelCapabilities.ts`）。
+   *
+   * 只覆盖**识别到**的情况；识别不到就留空（新建场景下没有旧值可保），由用户手填。
+   * 用户一旦手改过上下文上限（`contextTouched`）就完全停手。
+   */
+  const editModel = (event: ChangeEvent<HTMLInputElement>) => {
+    const next = event.target.value;
+    setForm((current) => {
+      const updated: ModelForm = { ...current, model: next };
+      if (!contextTouched) {
+        const detected = resolveKnownContextTokens(next);
+        if (detected !== null) updated.max_context_tokens = String(detected);
+      }
+      return updated;
+    });
+    setNotice(null);
+  };
 
   const submit = async () => {
     if (problem) {
@@ -493,7 +552,7 @@ function ModelCreateModal({
           <input
             id="mc-model"
             value={form.model}
-            onChange={edit("model")}
+            onChange={editModel}
             placeholder="例如 gpt-4o-mini"
             autoComplete="off"
             spellCheck={false}
@@ -535,14 +594,17 @@ function ModelCreateModal({
             onChange={edit("max_output_tokens")}
           />
         </Field>
-        <Field label="上下文上限" htmlFor="mc-ctx" hint="整数 ≥1。">
+        <Field label="上下文上限" htmlFor="mc-ctx" hint={describeContextHint(form.model, contextTouched)}>
           <input
             id="mc-ctx"
             type="number"
             min={1}
             step={1}
             value={form.max_context_tokens}
-            onChange={edit("max_context_tokens")}
+            onChange={(event) => {
+              setContextTouched(true);
+              edit("max_context_tokens")(event);
+            }}
           />
         </Field>
       </div>

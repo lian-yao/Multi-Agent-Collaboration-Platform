@@ -110,7 +110,8 @@ function PresetPicker({
 const FALLBACK_PRESET: ProviderPreset = {
   preset_type: "openai-compatible",
   label: "OpenAI 兼容（自定义）",
-  monogram: "自定义",
+  // 图标位由 `ProviderMark` 按 preset_type 画加号，这个 monogram 只是接口字段的非空兜底。
+  monogram: "+",
   tint: "slate",
   category: "gateway",
   default_api_type: "openai-compatible",

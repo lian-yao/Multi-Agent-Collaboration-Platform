@@ -185,11 +185,14 @@ Provider 配置面板的验证步骤（ADR-017 之后：`frontend/src/config/` �
 
 | 分区 | 组件 | 验证要点 |
 | --- | --- | --- |
-| Provider | `ProviderPanel.tsx` + `ModelSection.tsx` | 预设目录预填 `preset_type`/`api_type`/`base_url`；`api_key` 输入框留空 = 不修改；删除仍有启用模型的 Provider 时先用 `409 PROVIDER_IN_USE` 拦一次，再让用户确认 `?force=true` |
+| Provider | `ProviderPanel.tsx` + `ModelSection.tsx` | 预设目录预填 `preset_type`/`api_type`/`base_url`；`api_key` 输入框留空 = 不修改；删除仍有启用模型的 Provider 时先用 `409 PROVIDER_IN_USE` 拦一次，再让用户确认 `?force=true`；`openai-compatible`（自定义）的**图标位渲染加号**（`.cfg-mark-add`），不再把「自定义」当 monogram 文字塞进方块 |
 | 同上 · 批量引入 | `ModelSection.tsx::BatchImportModal` | 「从远端发现」**只在点击时**发起（不在挂载时调用）；已登记模型置灰计入 `existing`；重复提交返回 `skipped` 而不报错 |
-| 同上 · 特化调参 | `ModelSection.tsx::ModelTuningForm` | 只提交被改动字段；清空数字输入 = 显式 `null`（回到未设置）；`PATCH` 不发 `provider_id` |
+| 同上 · 特化调参 | `ModelSection.tsx::ModelTuningForm` | 只提交被改动字段；清空数字输入 = 显式 `null`（回到未设置）；`PATCH` 不发 `provider_id`；改模型名时按 `modelCapabilities.ts` 带出常见模型的**上下文上限**，用户手改过（`contextTouched`）之后不再覆盖 |
+| 同上 · 手动登记 | `ModelSection.tsx::ModelCreateModal` | 与特化调参同一套自动带出与文案（`describeContextHint`）；识别不到常见模型时**留空**由用户手填，不做正则猜测 |
 | 默认路由 | `DefaultRoutePanel.tsx` | `default_llm_model_id` 非空时展示解析出的注册表来源；悬空 id 给出提示而不是报错 |
-| MCP 工具 | `McpPanel.tsx` | 工具卡片只显示 `name` / 截断后的 `description` / 开关与可用性；完整 `input_schema` 收进**默认折叠**的 `<details>`，展开时才调 §5.3 |
+| MCP 工具 | `McpPanel.tsx` | 工具卡片只显示 `name` / 截断后的 `description` / 开关与可用性；完整 `input_schema` 收进**默认折叠**的 `<details>`，展开时才调 §5.3。工具级选项里**只有 `disabled` 有界面出口**：`allowAutoExecution` 虽然在 `tool_options` 与 `doc/api.md` §5.11 里，但执行链路没有任何地方消费它（见 §3.4 的漂移清单），所以**不给它做界面开关**——否则就是一个点了没效果的假开关 |
+| 同上 · 粘贴导入 | `McpImportModal.tsx` + `mcpConfig.ts` | 粘贴外部客户端的配置 JSON（`mcpServers` 映射/数组、裸映射、单条参数四种形态）后**立即解析并预览**，不自动提交；已登记的 ID 在预览里标黄「会失败」；提交是**前端逐条**调 `POST /config/mcp/servers`（§5.11 只有单条创建接口），一条失败不拖垮其余，成功与失败分别汇报，**全部成功才关闭弹层** |
+| 同上 · Server 表单 | `McpPanel.tsx::ServerFormModal` + `KeyValueFields.tsx` | 传输下拉按**远程 / 本地**分组；环境变量与请求头是**键值对行编辑器**（可增删、逐项校验空键与重复键），不再是「每行 KEY=VALUE」文本域；表单校验与粘贴导入**共用** `mcpConfig.ts::draftProblem`，两处不会各漂一套口径 |
 
 浏览器端的自动化用例（Playwright 之类）尚未引入，属后续增量。在此之前，配置页与工作台
 各有一层**无浏览器渲染冒烟**（不引入新依赖，只用项目已有的 react / esbuild）：
@@ -247,6 +250,37 @@ node_modules/.bin/esbuild rendercheck/workspace-smoke.tsx --bundle --platform=no
    `.sidebar-user-item-delete` / `.cfg-quiet` 同款）、`border: 0`（按钮自带的边会和容器边叠成
    「框套框」）、`padding: 2px` 且 `gap: 2px`。用户 2026-09-16 反馈过「外层容器不融洽、间距
    太大」，改确认条样式时别把这条改红。
+
+Provider 图标位与模型上下文识别（2026-09-17 增加）另有三条断言：
+
+3. **渲染断言**：`ProviderMark` 传 `presetType="openai-compatible"` 时必须渲染 `cfg-mark-add`
+   且 HTML 里**不得出现「自定义」文字**（把中文当 monogram 会缩到很小、且与品牌白底方块不同
+   形）；传品牌预设时仍走品牌标、不得带 `cfg-mark-add`。
+4. **读文件断言**：`src/config/modelCapabilities.ts` 必须有 `KNOWN_CONTEXT_TOKENS` 与
+   `resolveKnownContextTokens`；`ModelSection.tsx` 里 `resolveKnownContextTokens(` 至少两处
+   （两个表单入口各一）、`contextTouched` 至少四处（声明 + 判断 + 提示 + 写值），保证「自动带
+   出」与「手改后停手」两个语义都还在。
+5. **纯函数断言**：`resolveKnownContextTokens` 对 `openai/gpt-4o`（带厂商前缀）、
+   `claude-sonnet-4-5-20250929`（带快照日期）、`gemini-2.5-pro` 要命中，对不认识的模型名返回
+   `null`——**宁可留空也不猜**，猜错会让用户以为上限比真实值大，从而攒出必然超限的请求。
+
+MCP 粘贴导入与键值对编辑（2026-09-17 增加）另有一条纯函数断言、一条渲染断言与一条读文件断言：
+
+6. **纯函数断言**（`mcpConfig.ts` 是与后端 `app/core/mcp_registry.py` 同口径的纯函数层）：
+   四种输入形态各测一遍——`mcpServers` 映射 / `mcpServers` 数组 / 裸映射 / 单条参数——外加
+   `type: "streamable-http"` 归一成 `http`、按 `command`/`url` 推断传输、非法条目**逐条给出
+   原因**而不是静默丢弃、JSON 语法错误向上抛出给弹层转文案、请求体按传输裁剪字段（本地不带
+   `url`、远程不带 `command`/`args`/`env`）。`KeyValueFields.tsx` 的取值规则同批覆盖：
+   空行忽略、空键报错、重复键报错、比较按项不看引用。
+7. **渲染断言**：`McpImportModal` 按显式 props 单独挂一次——它平时只在点击后才挂载，静态渲染
+   够不到。有内容时必须出现逐条预览与 `cfg-mcp-import-item dup`（与已有条目撞车的 ID 标黄）；
+   空态必须能渲染且**不出现条目行**。
+8. **读文件断言**：`McpPanel.tsx` 必须调 `draftProblem(`，且**不得再出现** `parsePairs(` /
+   `formatPairs(`——校验只写在 `mcpConfig.ts` 一处，防止「表单」与「粘贴导入」两条入口各漂一套
+   口径；三个入口（`<KeyValueFields`、`TRANSPORT_GROUPS.map`、`<McpImportModal`）都要接在
+   渲染树里。另有一条**类名不串台**断言：导入弹层必须用 `cfg-mcp-import-*`，因为 `cfg-import-*`
+   已被「模型批量引入」占用（`ModelSection.tsx` 的 `.cfg-import-block` / `.cfg-import-toolbar`），
+   同名复用会让两处布局互相带崩。
 
 **边界要说清**：它只跑不依赖 `useEffect` 的路径，跑不到「点击 → 请求 → 回填」的交互
 链路；那部分仍是人工浏览器验收（上面两张表就是人工清单），或退到 §3.4 的静态预览。

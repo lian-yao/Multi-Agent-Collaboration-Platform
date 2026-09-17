@@ -2,7 +2,22 @@ import { useCallback, useEffect, useMemo, useState, type ChangeEvent } from "rea
 import { api } from "../api/client";
 import { InlineConfirm } from "../components/InlineConfirm";
 import {
-  MCP_TRANSPORTS,
+  KeyValueFields,
+  entriesToRecord,
+  recordToEntries,
+  samePairs,
+  type KeyValueEntry,
+} from "./KeyValueFields";
+import { McpImportModal } from "./McpImportModal";
+import {
+  TRANSPORT_GROUPS,
+  TRANSPORT_LABELS,
+  TRANSPORT_TINT,
+  draftProblem,
+  isStdioTransport,
+  type McpImportDraft,
+} from "./mcpConfig";
+import {
   type McpCompactTool,
   type McpCompactToolList,
   type McpServer,
@@ -19,29 +34,15 @@ import {
   NoticeBar,
   Switch,
   describeError,
-  formatPairs,
   formatTime,
   parseLines,
-  parsePairs,
+  sameStrings,
   truncate,
   type NoticeState,
 } from "./shared";
 
-const TRANSPORT_LABELS: Record<string, string> = {
-  stdio: "本地进程（stdio）",
-  http: "HTTP",
-  sse: "SSE",
-  ws: "WebSocket",
-};
-
-const TRANSPORT_TINT: Record<string, string> = {
-  stdio: "indigo",
-  http: "blue",
-  sse: "teal",
-  ws: "purple",
-};
-
-const isStdio = (transport: string) => transport === "stdio";
+/** 传输方式的展示与取值口径统一在 `mcpConfig.ts`，本文件不再各自维护一份。 */
+const isStdio = isStdioTransport;
 
 /* -------------------------------------------------------------------------- */
 /* 工具卡片（L3 行：无独立边框，靠分隔线与 hover 底色）                          */
@@ -137,10 +138,10 @@ type ServerForm = {
   transport: string;
   command: string;
   args: string;
-  env: string;
+  env: KeyValueEntry[];
   cwd: string;
   url: string;
-  headers: string;
+  headers: KeyValueEntry[];
   enabled: boolean;
 };
 
@@ -151,35 +152,45 @@ function formFromServer(server: McpServer | null): ServerForm {
     transport: server?.transport ?? "stdio",
     command: server?.command ?? "",
     args: (server?.args ?? []).join("\n"),
-    env: formatPairs(server?.env),
+    env: recordToEntries(server?.env, "sf-env"),
     cwd: server?.cwd ?? "",
     url: server?.url ?? "",
-    headers: formatPairs(server?.headers),
+    headers: recordToEntries(server?.headers, "sf-headers"),
     enabled: server?.enabled ?? true,
+  };
+}
+
+const DRAFT_PAIR_PROBLEM = "环境变量或请求头里有空的键，或重复的键。";
+
+/**
+ * 表单 → 草稿；返回 `null` 表示环境变量/请求头里有空的键或重复的键。
+ *
+ * 草稿是「表单」与「粘贴导入」的公共形状：校验只写在 `mcpConfig.ts::draftProblem`
+ * 一处，两条入口不会各自漂移。
+ */
+function toDraft(form: ServerForm): McpImportDraft | null {
+  const env = entriesToRecord(form.env);
+  const headers = entriesToRecord(form.headers);
+  if (env === null || headers === null) return null;
+  return {
+    id: form.id.trim(),
+    name: form.name.trim(),
+    transport: form.transport as McpTransport,
+    command: form.command.trim(),
+    args: parseLines(form.args),
+    env,
+    cwd: form.cwd.trim(),
+    url: form.url.trim(),
+    headers,
   };
 }
 
 /** 与后端 `McpServerCreateRequest` / `UpdateRequest` 的校验口径一致，先本地拦一道。 */
 function serverProblem(form: ServerForm, editing: boolean): string {
-  if (!editing) {
-    if (!form.id.trim()) return "ID 不能为空。";
-    if (form.id.length > 50) return "ID 不能超过 50 个字符。";
-    if (!/^[A-Za-z0-9._-]+$/.test(form.id)) return "ID 只允许字母、数字与 . _ - 。";
-  }
-  if (!form.name.trim()) return "名称不能为空。";
-  if (form.name.length > 100) return "名称不能超过 100 个字符。";
-  if (isStdio(form.transport)) {
-    if (!form.command.trim()) return "stdio 传输必须填写启动命令。";
-    if (form.command.length > 500) return "启动命令不能超过 500 个字符。";
-    if (parseLines(form.args).length > 64) return "参数最多 64 项。";
-    if (form.env.trim() && parsePairs(form.env) === null) return "环境变量每行需为 KEY=VALUE。";
-  } else {
-    if (!form.url.trim()) return "远程传输必须填写地址。";
-    if (!/^(https?|wss?):\/\//.test(form.url.trim())) return "地址需以 http(s):// 或 ws(s):// 开头。";
-    if (form.url.length > 500) return "地址不能超过 500 个字符。";
-    if (form.headers.trim() && parsePairs(form.headers) === null) return "请求头每行需为 KEY=VALUE。";
-  }
-  return "";
+  const draft = toDraft(form);
+  if (draft === null) return DRAFT_PAIR_PROBLEM;
+  // 编辑态下 ID 创建后不可修改，跳过它的校验；其余字段与粘贴导入同一份口径。
+  return draftProblem(editing ? { ...draft, id: "placeholder" } : draft);
 }
 
 function ServerFormModal({
@@ -196,14 +207,15 @@ function ServerFormModal({
   const [notice, setNotice] = useState<NoticeState>(null);
   const problem = serverProblem(form, Boolean(editing));
   const stdio = isStdio(form.transport);
-  /** `enabled` 是布尔开关，不走这里。 */
-  const edit = (key: Exclude<keyof ServerForm, "enabled">) =>
+  /** `enabled` 是布尔开关，`env`/`headers` 走键值对编辑器，都不走这里。 */
+  const edit = (key: Exclude<keyof ServerForm, "enabled" | "env" | "headers">) =>
     (event: ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) =>
       setForm((current) => ({ ...current, [key]: event.target.value }) as ServerForm);
 
   const submit = async () => {
-    if (problem) {
-      setNotice({ tone: "bad", text: problem });
+    const draft = toDraft(form);
+    if (problem || draft === null) {
+      setNotice({ tone: "bad", text: problem || DRAFT_PAIR_PROBLEM });
       return;
     }
     setSaving(true);
@@ -211,20 +223,20 @@ function ServerFormModal({
       if (editing) {
         // 只提交真正改动的字段：省略 = 不改动，显式 null = 清除（doc/api.md §5.11）。
         const patch: McpServerUpdate = {};
-        if (form.name.trim() !== editing.name) patch.name = form.name.trim();
-        if (form.transport !== editing.transport) patch.transport = form.transport as McpTransport;
-        const nextCommand = stdio ? form.command.trim() || null : null;
+        if (draft.name !== editing.name) patch.name = draft.name;
+        if (draft.transport !== editing.transport) patch.transport = draft.transport;
+        const nextCommand = stdio ? draft.command || null : null;
         if (nextCommand !== editing.command) patch.command = nextCommand;
-        const nextArgs = stdio ? parseLines(form.args) : [];
-        if (nextArgs.join("\n") !== editing.args.join("\n")) patch.args = nextArgs;
-        const nextEnv = stdio ? parsePairs(form.env) ?? {} : {};
-        if (formatPairs(nextEnv) !== formatPairs(editing.env)) patch.env = nextEnv;
-        const nextCwd = stdio ? form.cwd.trim() || null : null;
+        const nextArgs = stdio ? draft.args : [];
+        if (!sameStrings(nextArgs, editing.args)) patch.args = nextArgs;
+        const nextEnv = stdio ? draft.env : {};
+        if (!samePairs(nextEnv, editing.env)) patch.env = nextEnv;
+        const nextCwd = stdio ? draft.cwd || null : null;
         if (nextCwd !== editing.cwd) patch.cwd = nextCwd;
-        const nextUrl = stdio ? null : form.url.trim() || null;
+        const nextUrl = stdio ? null : draft.url || null;
         if (nextUrl !== editing.url) patch.url = nextUrl;
-        const nextHeaders = stdio ? {} : parsePairs(form.headers) ?? {};
-        if (formatPairs(nextHeaders) !== formatPairs(editing.headers)) patch.headers = nextHeaders;
+        const nextHeaders = stdio ? {} : draft.headers;
+        if (!samePairs(nextHeaders, editing.headers)) patch.headers = nextHeaders;
         if (form.enabled !== editing.enabled) patch.enabled = form.enabled;
         if (!Object.keys(patch).length) {
           setNotice({ tone: "bad", text: "没有需要保存的改动。" });
@@ -234,22 +246,15 @@ function ServerFormModal({
         await api.patchMcpServer(editing.id, patch);
         await onSaved(`已更新 MCP Server ${editing.id}。`);
       } else {
-        const payload: McpServerCreate = {
-          id: form.id.trim(),
-          name: form.name.trim(),
-          transport: form.transport as McpTransport,
+        const created = await api.createMcpServer({
+          id: draft.id,
+          name: draft.name,
+          transport: draft.transport,
+          ...(stdio
+            ? { command: draft.command, args: draft.args, env: draft.env, cwd: draft.cwd || null }
+            : { url: draft.url, headers: draft.headers }),
           enabled: form.enabled,
-        };
-        if (stdio) {
-          payload.command = form.command.trim();
-          payload.args = parseLines(form.args);
-          payload.env = parsePairs(form.env) ?? {};
-          payload.cwd = form.cwd.trim() || null;
-        } else {
-          payload.url = form.url.trim();
-          payload.headers = parsePairs(form.headers) ?? {};
-        }
-        const created = await api.createMcpServer(payload);
+        } satisfies McpServerCreate);
         await onSaved(`已登记 MCP Server ${created.id}。`);
       }
       onClose();
@@ -300,10 +305,14 @@ function ServerFormModal({
         </Field>
         <Field label="传输方式" htmlFor="sf-transport" hint="切换后另一组字段会被清空。">
           <select id="sf-transport" value={form.transport} onChange={edit("transport")}>
-            {MCP_TRANSPORTS.map((transport) => (
-              <option value={transport} key={transport}>
-                {TRANSPORT_LABELS[transport] ?? transport}
-              </option>
+            {TRANSPORT_GROUPS.map((group) => (
+              <optgroup label={group.label} key={group.label}>
+                {group.options.map((transport) => (
+                  <option value={transport} key={transport}>
+                    {TRANSPORT_LABELS[transport] ?? transport}
+                  </option>
+                ))}
+              </optgroup>
             ))}
           </select>
         </Field>
@@ -344,16 +353,15 @@ function ServerFormModal({
               placeholder={"-y\n@modelcontextprotocol/server-filesystem\n/data"}
             />
           </Field>
-          <Field label="环境变量" htmlFor="sf-env" hint="每行 KEY=VALUE；# 开头为注释。" wide>
-            <textarea
-              id="sf-env"
-              rows={3}
-              value={form.env}
-              onChange={edit("env")}
-              spellCheck={false}
-              placeholder="API_TOKEN=..."
-            />
-          </Field>
+          <KeyValueFields
+            title="环境变量"
+            hint="逐项填写，值会原样传给本地进程；留空则不注入任何变量。"
+            entries={form.env}
+            onChange={(env) => setForm((current) => ({ ...current, env }))}
+            addLabel="添加变量"
+            keyPlaceholder="变量名"
+            valuePlaceholder="值"
+          />
         </div>
       ) : (
         <div className="cfg-form-grid">
@@ -367,16 +375,15 @@ function ServerFormModal({
               spellCheck={false}
             />
           </Field>
-          <Field label="请求头" htmlFor="sf-headers" hint="每行 KEY=VALUE；凭据只写入、不回读。" wide>
-            <textarea
-              id="sf-headers"
-              rows={3}
-              value={form.headers}
-              onChange={edit("headers")}
-              spellCheck={false}
-              placeholder="Authorization=Bearer ..."
-            />
-          </Field>
+          <KeyValueFields
+            title="请求头"
+            hint="逐项填写，用于远程服务的鉴权或路由。"
+            entries={form.headers}
+            onChange={(headers) => setForm((current) => ({ ...current, headers }))}
+            addLabel="添加请求头"
+            keyPlaceholder="请求头名"
+            valuePlaceholder="值"
+          />
         </div>
       )}
     </Modal>
@@ -396,6 +403,7 @@ export function McpPanel() {
   const [busy, setBusy] = useState<string | null>(null);
   const [editing, setEditing] = useState<McpServer | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
   const [catalog, setCatalog] = useState<Record<string, Tool> | null>(null);
   const [catalogError, setCatalogError] = useState("");
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({});
@@ -512,13 +520,20 @@ export function McpPanel() {
                 ` · 最近发现 ${tools.servers.filter((item) => item.discovered_at).length} 个`}
             </p>
           </div>
-          <button type="button" className="cfg-primary" onClick={() => setCreateOpen(true)}>
-            新建 Server
-          </button>
+          <div className="cfg-row-actions">
+            <button type="button" className="cfg-quiet" onClick={() => setImportOpen(true)}>
+              粘贴导入
+            </button>
+            <button type="button" className="cfg-primary" onClick={() => setCreateOpen(true)}>
+              新建 Server
+            </button>
+          </div>
         </div>
 
         <p className="cfg-hint">
           「发现工具」会按条目配置建立连接并缓存工具清单，由你显式触发，不会随页面加载自动执行。
+          这里登记的是<b>配置与目录</b>：Agent 实际能调到什么，取决于编排层的 MCP 接入方式
+          （后端 <code>MCP_TRANSPORT</code>），与「哪些工具被停用」是两件事。
         </p>
         {loadError && (
           <p role="alert" className="cfg-alert">
@@ -702,6 +717,13 @@ export function McpPanel() {
       )}
       {editing && (
         <ServerFormModal editing={editing} onClose={() => setEditing(null)} onSaved={afterSave} />
+      )}
+      {importOpen && (
+        <McpImportModal
+          existingIds={servers.map((server) => server.id)}
+          onClose={() => setImportOpen(false)}
+          onSaved={afterSave}
+        />
       )}
     </div>
   );

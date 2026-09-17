@@ -161,6 +161,15 @@
   color:var(--cfg-ink, #33505d)
 }
 
+/* 「自定义端点」占位（providerIcons.tsx 的 ProviderMark）：没有品牌可画，
+ * 用加号表达「自己填一个」，同时把描边改虚线，和品牌白底方块区分开。 */
+.cfg-mark-add {
+  border-style:dashed;
+  border-color:var(--cfg-accent-soft, #b9d4dd);
+  background:var(--cfg-surface-hover, #f4f9fa);
+  color:var(--cfg-accent, #4a7d8c)
+}
+
 
 
 .cfg-stack {
@@ -1838,5 +1847,308 @@
   }
   .cfg-preset-toolbar input {
     width:100%
+  }
+}
+
+
+
+/* -------------------------------------------------------------------------- */
+/* MCP Server（doc/api.md §5.11）：键值对编辑器与粘贴导入                       */
+/*                                                                            */
+/* 弹层前缀用 `cfg-mcp-import-` 而不是 `cfg-import-`：后者已被「模型批量引入」   */
+/* 占用（ModelSection.tsx 的 .cfg-import-block / .cfg-import-toolbar），        */
+/* 复用同名类会让两处布局互相串台。                                            */
+/* -------------------------------------------------------------------------- */
+
+/* 键值对编辑器在 .cfg-form-grid 里独占整行，与 .cfg-field-wide 同法。 */
+.cfg-kv {
+  display:grid;
+  gap:6px;
+  grid-column:1 / -1
+}
+
+
+
+.cfg-kv-head {
+  display:flex;
+  align-items:flex-start;
+  justify-content:space-between;
+  gap:12px
+}
+
+
+
+.cfg-kv-title {
+  display:inline-flex;
+  align-items:center;
+  gap:6px;
+  color:#8499a2;
+  font-size:10px
+}
+
+
+
+.cfg-kv-required {
+  padding:0 5px;
+  border-radius:99px;
+  background:#fdf3e2;
+  color:#8f6a29;
+  font-size:9.5px
+}
+
+
+
+.cfg-kv-hint {
+  margin:3px 0 0;
+  color:#99a9af;
+  font-size:10px;
+  line-height:1.7
+}
+
+
+
+.cfg-kv-empty {
+  margin:0;
+  color:#a9b8bd;
+  font-size:10px
+}
+
+
+
+.cfg-kv-row {
+  display:grid;
+  grid-template-columns:minmax(0,1fr) auto minmax(0,1.6fr) 26px;
+  gap:7px;
+  align-items:center
+}
+
+
+
+.cfg-kv-row input {
+  width:100%;
+  min-width:0;
+  padding:8px 10px;
+  border:1px solid #e1eaed;
+  border-radius:7px;
+  background:#f8fafb;
+  color:#55707d;
+  font:inherit;
+  font-size:11px
+}
+
+
+
+.cfg-kv-row input:focus-visible {
+  outline:2px solid #39839c;
+  outline-offset:1px;
+  border-color:#a8c6d1
+}
+
+
+
+.cfg-kv-eq {
+  color:#a9b8bd;
+  font-size:11px
+}
+
+
+
+.cfg-kv-remove {
+  width:26px;
+  height:26px;
+  padding:0;
+  border:1px solid transparent;
+  border-radius:6px;
+  background:transparent;
+  color:#a9b8bd;
+  font-size:11px;
+  line-height:1;
+  cursor:pointer;
+  transition:background-color var(--cfg-ease),color var(--cfg-ease)
+}
+
+
+
+.cfg-kv-remove:hover,
+.cfg-kv-remove:focus-visible {
+  background:#fdf5f3;
+  color:#9c3a2e
+}
+
+
+
+/* --- 粘贴导入弹层 ---------------------------------------------------------- */
+
+.cfg-mcp-import-head {
+  display:flex;
+  align-items:flex-start;
+  justify-content:space-between;
+  gap:12px
+}
+
+
+
+.cfg-mcp-import-head .cfg-hint {
+  margin:0
+}
+
+
+
+.cfg-mcp-import-status {
+  display:flex;
+  align-items:center;
+  flex-wrap:wrap;
+  gap:8px;
+  margin-top:12px;
+  padding:8px 10px;
+  border:1px solid var(--cfg-line-soft);
+  border-radius:7px;
+  background:var(--cfg-surface-soft);
+  color:#55707d;
+  font-size:10.5px
+}
+
+
+
+.cfg-mcp-import-section {
+  margin:14px 0 6px;
+  color:#8499a2;
+  font-size:10px;
+  font-weight:600;
+  letter-spacing:.04em
+}
+
+
+
+.cfg-mcp-import-list {
+  border-top:1px solid var(--cfg-line-faint)
+}
+
+
+
+.cfg-mcp-import-item {
+  display:grid;
+  gap:3px;
+  padding:9px 10px;
+  border-bottom:1px solid var(--cfg-line-faint);
+  transition:background-color var(--cfg-ease)
+}
+
+
+
+.cfg-mcp-import-item:hover {
+  background:var(--cfg-surface-hover)
+}
+
+
+
+/* 与已有条目的 ID 撞车：提交会失败，用淡黄底提前标出来。 */
+.cfg-mcp-import-item.dup {
+  background:#fdf7ec
+}
+
+
+
+.cfg-mcp-import-item-head {
+  display:flex;
+  align-items:center;
+  flex-wrap:wrap;
+  gap:7px
+}
+
+
+
+.cfg-mcp-import-item-head code {
+  color:var(--cfg-ink);
+  font-size:11px;
+  font-weight:600
+}
+
+
+
+.cfg-mcp-import-item-meta {
+  margin:0;
+  color:#456572;
+  font-size:10.5px;
+  line-height:1.6;
+  overflow-wrap:anywhere
+}
+
+
+
+.cfg-mcp-import-item-facts {
+  margin:0;
+  color:#a9b8bd;
+  font-size:9.5px
+}
+
+
+
+.cfg-mcp-import-issues {
+  display:grid;
+  gap:4px;
+  margin:0;
+  padding:0;
+  list-style:none
+}
+
+
+
+.cfg-mcp-import-issues li {
+  display:flex;
+  align-items:baseline;
+  gap:8px;
+  color:#55707d;
+  font-size:10.5px
+}
+
+
+
+.cfg-mcp-import-issues code {
+  flex:0 0 auto;
+  padding:1px 5px;
+  border:1px solid var(--cfg-line-soft);
+  border-radius:5px;
+  background:var(--cfg-surface-soft);
+  font-size:9.5px
+}
+
+
+
+.cfg-mcp-import-outcome {
+  margin-top:14px;
+  padding:10px 11px;
+  border:1px solid #e6cfc8;
+  border-radius:7px;
+  background:#fdf5f3
+}
+
+
+
+.cfg-mcp-import-outcome p {
+  margin:0;
+  color:#93564c;
+  font-size:10.5px;
+  line-height:1.7
+}
+
+
+
+.cfg-mcp-import-outcome .cfg-hint {
+  margin-top:6px;
+  color:#b08379
+}
+
+
+
+.cfg-mcp-import-outcome .cfg-mcp-import-issues {
+  margin:6px 0 0
+}
+
+
+
+@media(max-width:760px) {
+  .cfg-kv-row {
+    grid-template-columns:minmax(0,1fr) auto minmax(0,1fr) 26px
   }
 }
