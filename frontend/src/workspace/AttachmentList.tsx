@@ -75,24 +75,45 @@ export function MessageAttachmentList({ items }: { items: readonly Attachment[] 
   return (
     <div className="message-attachments">
       {items.map((item) => {
-        const openable = item.kind === "image" && item.status === "ready";
         const link = api.attachmentContentUrl(item.id);
+        const thumb =
+          item.kind === "image" && item.status === "ready" ? (
+            <img src={link} alt={item.name} loading="lazy" />
+          ) : (
+            <KindIcon kind={item.kind} />
+          );
+        const body = (
+          <span className="message-attachment-body">
+            <b>{shortenName(item.name, 34)}</b>
+            <small>{describeAttachment(item)}</small>
+          </span>
+        );
+
+        // 原件留档之后（ADR-024）每种附件都能拿回原件：图片点开看原图、其余点开下载。
+        // 没有字节的行（该策略之前落库的）不给任何入口——界面上不该出现一个必然 404 的链接。
+        if (!item.has_original) {
+          return (
+            <div key={item.id} className={`message-attachment ${item.status}`} data-kind={item.kind}>
+              <span className="message-attachment-thumb">{thumb}</span>
+              {body}
+            </div>
+          );
+        }
         return (
-          <div key={item.id} className={`message-attachment ${item.status}`} data-kind={item.kind}>
-            {openable ? (
-              <a href={link} target="_blank" rel="noreferrer" className="message-attachment-thumb">
-                <img src={link} alt={item.name} loading="lazy" />
-              </a>
-            ) : (
-              <span className="message-attachment-thumb">
-                <KindIcon kind={item.kind} />
-              </span>
-            )}
-            <span className="message-attachment-body">
-              <b>{shortenName(item.name, 34)}</b>
-              <small>{describeAttachment(item)}</small>
-            </span>
-          </div>
+          <a
+            key={item.id}
+            className={`message-attachment ${item.status}`}
+            data-kind={item.kind}
+            href={link}
+            target="_blank"
+            rel="noreferrer"
+            // 图片是「看一眼」，不要触发下载；其它类型设成下载，文件名沿用上传时的名字。
+            download={item.kind === "image" ? undefined : item.name}
+            title={`打开原件：${item.name}`}
+          >
+            <span className="message-attachment-thumb">{thumb}</span>
+            {body}
+          </a>
         );
       })}
     </div>

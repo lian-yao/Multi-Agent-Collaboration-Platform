@@ -61,7 +61,10 @@
   `ui-preview.html` 的断言（含「分区内不得出现任何 `input`/`select`/`textarea`」）。
 - 集成测试断言 `PUT /api/v1/config/sandbox` 返回 `405`——**写接口是被显式测掉的**，
   以后要加必须先改这条用例和本 ADR。
-- **未解决**：`deploy/compose.yaml` 未挂 docker.sock 的问题本 ADR **不解决**。要真正跑通代码
-  执行，需要给 backend 挂 `/var/run/docker.sock`（等于把宿主 Docker 控制权交给容器，安全代价
-  不小）或改用无 Docker 的隔离后端（如 Wasm/`nsjail`）。这属成员 C 的 `app/sandbox` 与成员 B 的
-  `deploy/` 边界，本 ADR 只保证这件事**是可见的**。
+- **已解决（2026-09-17）**：`deploy/compose.yaml` 未挂 docker.sock 的问题由 **ADR-023** 处理——
+  backend 挂上宿主机套接字，沙箱容器成为兄弟容器，`SANDBOX_IMAGE` 指到本项目自建镜像。
+  本 ADR 的「只读」结论不变；同时按 ADR-023 把 `available` 的探测从「只 `ping`」升级为
+  「`ping` + 查镜像」，`reason` 改为由后端给出具体原因而不是接口层猜。原措辞保留如下：
+  <sub>要真正跑通代码执行，需要给 backend 挂 `/var/run/docker.sock`（等于把宿主 Docker 控制权
+  交给容器，安全代价不小）或改用无 Docker 的隔离后端（如 Wasm/`nsjail`）。这属成员 C 的
+  `app/sandbox` 与成员 B 的 `deploy/` 边界，本 ADR 只保证这件事**是可见的**。</sub>

@@ -339,7 +339,7 @@ Prompt 时需同步 roles.py 与 `BUILTIN_AGENT_SEED`，避免目录与 Prompt �
 | size_bytes | INTEGER | `0` | **原始文件字节数**，不是抽取出的文本长度 |
 | kind | VARCHAR(20) | NOT NULL | `image` / `text` / `document` |
 | status | VARCHAR(20) | NOT NULL | `ready` / `failed`（登记成功但正文取不出来，`error` 说明原因） |
-| data | BYTEA（LargeBinary） | NULL | **仅图片**保留原始字节；其余为 NULL |
+| data | BYTEA（LargeBinary） | NULL | **所有类型都留档原件**（ADR-024）：图片要转 base64 进模型请求，文本/文档供「下载原件」。旧策略落库的行可能为 NULL |
 | text_content | TEXT | NULL | 抽取出的正文，执行阶段读进提示词 |
 | error | TEXT | NULL | `status='failed'` 时的原因 |
 | created_at | TIMESTAMPTZ | `now()` | 创建时间 |

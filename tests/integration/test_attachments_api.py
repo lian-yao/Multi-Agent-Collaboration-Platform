@@ -194,11 +194,32 @@ def test_attachment_content_download(monkeypatch) -> None:
     assert downloaded.headers["content-type"].startswith("image/png")
     # 文件名含中文时用 RFC 5987，否则响应头按 latin-1 编码会直接抛错。
     assert "filename*=UTF-8" in downloaded.headers["content-disposition"]
+    # 图片要能被气泡里的 <img> 直接渲染，所以是 inline。
+    assert downloaded.headers["content-disposition"].startswith("inline")
 
-    # 解析失败的附件没有可回的内容，回 404 而不是空 200。
+
+def test_originals_of_other_kinds_are_downloadable(monkeypatch) -> None:
+    """原件对**所有类型**留档（ADR-024）；文档用 attachment 而不是 inline。"""
+
+    client, _, _ = _setup(monkeypatch)
+
+    body = "第一行\n第二行\n".encode()
+    text_id = _upload(client, "笔记.txt", body).json()["id"]
+
+    downloaded = client.get(f"/api/v1/attachments/{text_id}/content")
+    assert downloaded.status_code == 200
+    assert downloaded.content == body
+    # txt/docx/xlsx 在浏览器里没有渲染器，inline 只会开出一个空白页。
+    assert downloaded.headers["content-disposition"].startswith("attachment")
+
+    # 解析失败的附件同样留存原件：读不出正文不代表不该能把它下载回去。
     failed = _upload(client, "scan.pdf", b"%PDF-1.4\n1 0 obj\n<< >>\nendobj\n").json()
     assert failed["status"] == "failed"
-    assert client.get(f"/api/v1/attachments/{failed['id']}/content").status_code == 404
+    assert failed["has_original"] is True
+
+    original = client.get(f"/api/v1/attachments/{failed['id']}/content")
+    assert original.status_code == 200
+    assert original.content.startswith(b"%PDF-1.4")
 
 
 def test_deleting_session_removes_its_attachments(monkeypatch) -> None:

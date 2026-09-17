@@ -311,6 +311,7 @@ const sentAttachment = (over: Partial<Attachment>): Attachment => ({
   kind: "image",
   status: "ready",
   error: null,
+  has_original: true,
   created_at: "2026-09-16T10:00:00Z",
   ...over,
 });
@@ -327,6 +328,8 @@ const sent = renderToStaticMarkup(
         status: "failed",
         error: "未能解析出正文，已跳过内容。",
       }),
+      // 原件留档策略（ADR-024）之前落库的行：没有字节，不该给打开原件的入口。
+      sentAttachment({ id: "legacy-1", name: "会议速记.txt", kind: "text", has_original: false }),
     ]}
   />,
 );
@@ -346,6 +349,23 @@ check(
   describeAttachment(sentAttachment({ status: "failed", error: null })).includes("已跳过内容"),
 );
 check("没有附件时不渲染空容器", renderToStaticMarkup(<MessageAttachmentList items={[]} />) === "");
+// 原件留档（ADR-024）：所有类型都能拿回原件，且图片与文档的语义要分开。
+check(
+  "非图片附件也能打开原件，并带下载文件名",
+  sent.includes('href="/api/v1/attachments/doc-1/content"') &&
+    sent.includes('download="季度报告.docx"'),
+  sent.slice(0, 700),
+);
+check(
+  "图片是「看一眼」不带 download 属性",
+  !/download="[^"]*现场\.png"/.test(sent),
+  sent.slice(0, 700),
+);
+check(
+  "没有原件的历史行不给任何入口",
+  sent.includes("会议速记.txt") && !sent.includes('href="/api/v1/attachments/legacy-1/content"'),
+  sent.slice(-600),
+);
 
 /* -------------------------------------------------------------------------- */
 /* 静态断言：假选择已删除、职责边界已写进注释                                   */
@@ -451,6 +471,8 @@ try {
     ".composer-mode button.active",
     ".message-attachments",
     ".message-attachment-thumb",
+    // 原件留档后条目主体是 <a>（ADR-024）：没有这条规则会退化成蓝字下划线。
+    "a.message-attachment",
   ];
   const missingClasses = requiredClasses.filter((sel) => !styles.includes(sel));
   check(

@@ -17,7 +17,7 @@ export type AttachmentKind = "image" | "text" | "document" | "unsupported";
  */
 export type AttachmentStatus = "ready" | "failed" | "unsupported";
 
-/** 已登记的附件（`doc/api.md` §5.16，ADR-021）。 */
+/** 已登记的附件（`doc/api.md` §5.16，ADR-021 / ADR-024）。 */
 export interface Attachment {
   id: string;
   session_id: string | null;
@@ -28,6 +28,9 @@ export interface Attachment {
   kind: AttachmentKind;
   status: AttachmentStatus;
   error: string | null;
+  /** 原件字节是否还在库里（ADR-024）。`false` 只出现在该策略之前落库的附件上，
+   *  此时不给「打开原件」入口——界面上不该出现必然 404 的链接。 */
+  has_original: boolean;
   created_at: string;
 }
 

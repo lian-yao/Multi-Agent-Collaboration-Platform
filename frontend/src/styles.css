@@ -939,6 +939,22 @@ svg {
 
 
 
+/* 原件留档后（ADR-024）条目本身是链接：作为 <a> 必须显式继承颜色、去掉下划线，
+ * 否则会退化成默认的蓝字下划线，和卡片样式打架。 */
+a.message-attachment {
+  color:inherit;
+  text-decoration:none
+}
+
+
+
+a.message-attachment:hover {
+  border-color:#aac6d0;
+  background:#f2f8fa
+}
+
+
+
 .message-attachment-thumb {
   display:grid;
   place-items:center;

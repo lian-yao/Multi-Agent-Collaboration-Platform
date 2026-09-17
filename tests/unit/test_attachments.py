@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import zipfile
+import zlib
 
 import pytest
 
@@ -187,17 +188,39 @@ def test_xlsx_rejects_non_zip() -> None:
 # --------------------------------------------------------------------------------------
 
 
-def _pdf_bytes(text: str) -> bytes:
-    """构造一个未压缩、单内容流的极简 PDF，用于验证文本运算符提取。"""
+def _pdf_bytes(*texts: str, compress: bool = False) -> bytes:
+    """构造极简 PDF：**每个入参一个内容流**（真实 PDF 就是每页一个内容流）。
 
-    body = f"BT /F1 12 Tf 20 100 Td ({text}) Tj ET"
-    stream = body.encode("latin-1")
+    `compress=True` 时用 `FlateDecode` 并照实写上 `/Filter`——真实 PDF 的内容流几乎都是
+    压缩的，只留未压缩样本等于没测到 `extract_pdf` 里的 `zlib.decompress` 分支。
+    """
+
+    streams: list[bytes] = []
+    for text in texts:
+        body = f"BT /F1 12 Tf 20 100 Td ({text}) Tj ET".encode("latin-1")
+        streams.append(zlib.compress(body) if compress else body)
+
+    first_page, first_content = 3, 3 + len(streams)
     objects = [
         b"<< /Type /Catalog /Pages 2 0 R >>",
-        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Contents 4 0 R >>",
-        b"<< /Length " + str(len(stream)).encode() + b" >>\nstream\n" + stream + b"\nendstream",
+        b"<< /Type /Pages /Kids ["
+        + b" ".join(f"{first_page + i} 0 R".encode() for i in range(len(streams)))
+        + b"] /Count "
+        + str(len(streams)).encode()
+        + b" >>",
     ]
+    objects += [
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Contents "
+        + str(first_content + i).encode()
+        + b" 0 R >>"
+        for i in range(len(streams))
+    ]
+    for stream in streams:
+        dictionary = f"<< /Length {len(stream)}".encode()
+        if compress:
+            dictionary += b" /Filter /FlateDecode"
+        objects.append(dictionary + b" >>\nstream\n" + stream + b"\nendstream")
+
     out = bytearray(b"%PDF-1.4\n")
     for index, obj in enumerate(objects, start=1):
         out += str(index).encode() + b" 0 obj\n" + obj + b"\nendobj\n"
@@ -210,6 +233,24 @@ def test_pdf_extracts_literal_text() -> None:
     result = extract_pdf(_pdf_bytes(sentence))
     assert result.status is AttachmentStatus.READY
     assert "revenue" in (result.text or "")
+
+
+def test_pdf_with_flate_compressed_stream_is_extracted() -> None:
+    sentence = "Compressed content streams are the normal case in real documents."
+    result = extract_pdf(_pdf_bytes(sentence, compress=True))
+    assert result.status is AttachmentStatus.READY
+    assert "Compressed" in (result.text or "")
+
+
+def test_pdf_with_multiple_page_streams_joins_them() -> None:
+    """多页 PDF 有多个内容流；只看第一个会让模型读到半份文档。"""
+
+    first = "Overview of the quarterly results for the platform."
+    second = "Second page carries the detailed breakdown by team."
+    result = extract_pdf(_pdf_bytes(first, second))
+    assert result.status is AttachmentStatus.READY
+    assert "Overview" in (result.text or "")
+    assert "Second page" in (result.text or "")
 
 
 def test_pdf_without_header_is_rejected() -> None:
@@ -269,13 +310,15 @@ def test_prepare_upload_rejects_empty_and_oversize_and_unknown() -> None:
     assert unknown.value.code == "ATTACHMENT_TYPE_UNSUPPORTED"
 
 
-def test_prepare_upload_drops_document_bytes_but_keeps_text() -> None:
+def test_prepare_upload_keeps_document_bytes_alongside_text() -> None:
+    """原件留档（ADR-024）：正文进提示词，字节留着给「下载原件」。"""
+
     prepared = prepare_upload("notes.md", "正文".encode())
     assert prepared["kind"] == "text"
     assert prepared["status"] == "ready"
     assert prepared["text_content"] == "正文"
-    # 文档正文已抽出，原始字节不再保留——省库体积，也让执行阶段不必再解析一次。
-    assert prepared["data"] is None
+    # 抽出正文不等于可以丢掉原件：历史消息里点开附件要拿到用户当初传的那份文件。
+    assert prepared["data"] == "正文".encode()
 
 
 def test_prepare_upload_keeps_image_bytes() -> None:
@@ -293,6 +336,8 @@ def test_prepare_upload_records_parse_failure_without_rejecting() -> None:
     assert prepared["status"] == "failed"
     assert prepared["error"]
     assert prepared["text_content"] is None
+    # 读不出正文不等于不留下原件：用户仍然能把它下载回去（ADR-024）。
+    assert prepared["data"]
 
 
 # --------------------------------------------------------------------------------------

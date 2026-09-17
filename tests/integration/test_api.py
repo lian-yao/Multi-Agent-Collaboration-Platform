@@ -346,8 +346,18 @@ def test_send_message_passes_orchestration_mode(monkeypatch) -> None:
 
 
 class _AlwaysAvailableSandbox:
+    """可用后端的最小替身。
+
+    `unavailable_reason()` 与 `available()` 必须自洽——接口层只用前者判可用
+    （`app/api/main.py::_sandbox_availability`），只实现 `available()` 的替身
+    会让这条用例测的是替身自己的缺方法。
+    """
+
     def available(self) -> bool:
         return True
+
+    def unavailable_reason(self) -> str | None:
+        return None
 
 
 def test_sandbox_status_reports_denied_backend(monkeypatch) -> None:
@@ -392,12 +402,23 @@ def test_sandbox_status_reports_available_docker_backend(monkeypatch) -> None:
     assert payload["image"] == "python:3.12-slim"
 
 
-def test_sandbox_status_explains_missing_docker_socket(monkeypatch) -> None:
+def test_sandbox_status_surfaces_backend_reason_verbatim(monkeypatch) -> None:
+    """不可用原因由后端给出，接口层原样透传、不概括成兜底文案。
+
+    这条是「套接字没挂」能被用户看见的唯一保证：以前接口层只把 `available()` 的 False
+    翻译成一句猜测的话，真实原因（`FileNotFoundError`）只能去翻容器日志。
+    """
+
     from app.sandbox import SandboxSettings
+
+    detail = "Docker 守护进程不可达: FileNotFoundError: 套接字不存在"
 
     class _ProbeFails:
         def available(self) -> bool:
-            raise FileNotFoundError(2, "No such file or directory")
+            return False
+
+        def unavailable_reason(self) -> str:
+            return detail
 
     monkeypatch.setattr(
         api_main, "get_sandbox_settings", lambda: SandboxSettings(backend="docker")
@@ -408,4 +429,26 @@ def test_sandbox_status_explains_missing_docker_socket(monkeypatch) -> None:
     payload = client.get("/api/v1/config/sandbox").json()
 
     assert payload["available"] is False
-    assert "FileNotFoundError" in payload["reason"]
+    assert payload["reason"] == detail
+
+
+def test_sandbox_status_survives_a_crashing_probe(monkeypatch) -> None:
+    """探测自己抛异常时也要回 200 与原因：这是诊断接口，它 500 就没人能诊断了。"""
+
+    from app.sandbox import SandboxSettings
+
+    def explode(settings):
+        raise ImportError("No module named 'docker'")
+
+    monkeypatch.setattr(
+        api_main, "get_sandbox_settings", lambda: SandboxSettings(backend="docker")
+    )
+    monkeypatch.setattr(api_main, "build_sandbox", explode)
+    client = TestClient(app)
+
+    response = client.get("/api/v1/config/sandbox")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["available"] is False
+    assert "ImportError" in payload["reason"]

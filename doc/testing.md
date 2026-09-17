@@ -69,7 +69,8 @@ cd deploy; .\start.ps1                     # 起完整环境
 | U-09 | 流水线接入 MCP 工具 | 注册表工具被发现，按模型 `tool_calls` 调用并回填观察；失败记为 failed 且不中断；阶段载荷可序列化 | M4 |
 | U-10 | 行为日志事件 | 阶段开始/结束/失败与工具调用输出 `event=... field=value` 结构化日志，含 workflow_id 与耗时 | M4 |
 | U-11 | 动态编排计划与调度 | 计划解析只收合法形态（未知角色 / 重复 id / 自依赖 / 前向依赖 / 超步数一律整份丢弃）；规划模型抛错或返回垃圾文本时回退固定三步；依赖就绪度调度、失败连坐（含传递闭包）与最终交付物取值；Dapr 侧先规划后执行、子工作流实例 ID 稳定、业务终态与实例终态一致（ADR-019） | M5 |
-| U-12 | 多模态附件：分类 / 限额 / 解析 / 提示词 | 类型白名单（图片、文本与代码、pdf/docx/xlsx）与三类拒绝理由（空文件 / 超限 / 格式不支持）**都指名到具体文件**；文本解码的 `gb18030` 回退与可打印率闸门能挡住二进制；docx/xlsx 用标准库抽出段落与单元格；PDF 质量闸门把扫描件与 CID 字体判为 `failed`；`build_human_content` 无图片时返回**纯字符串**（不改变既有链路），有图片时升级为 content block；失败项必须出现在附件清单里（ADR-021） | M5 |
+| U-12 | 多模态附件：分类 / 限额 / 解析 / 提示词 | 类型白名单（图片、文本与代码、pdf/docx/xlsx）与三类拒绝理由（空文件 / 超限 / 格式不支持）**都指名到具体文件**；文本解码的 `gb18030` 回退与可打印率闸门能挡住二进制；docx/xlsx 用标准库抽出段落与单元格；PDF 质量闸门把扫描件与 CID 字体判为 `failed`，且吃得下真实形态的 **FlateDecode 压缩流**与多页内容流；`build_human_content` 无图片时返回**纯字符串**（不改变既有链路），有图片时升级为 content block；失败项必须出现在附件清单里；**原件对所有类型留档**（ADR-021 / ADR-024） | M5 |
+| U-13 | 沙箱可用性探测与容器硬化 | 套接字连不上时原因要点到 `/var/run/docker.sock` 并给出可照做的动作；**只 `ping` 通不算可用**（镜像不在宿主机同样报不可用）；`SANDBOX_AUTO_PULL_IMAGE` 打开时自拉一次并重试、拉取失败还原为 `SandboxUnavailable`；探测自身抛异常时仍返回原因而不冒泡；容器参数逐条钉住（`cap_drop=['ALL']`、`read_only`、`network_disabled`、`user=nobody`、`security_opt=['no-new-privileges']`、`/app` 与 `/tmp` 的 tmpfs、`macp.role` 标签）（ADR-023） | M5 |
 
 ### 2.2 集成测试（I）
 
@@ -85,7 +86,8 @@ cd deploy; .\start.ps1                     # 起完整环境
 | I-08 | 配置热更新 | PATCH agent 后新执行使用新配置 | M4 |
 | I-09 | D7-D8 只读巡检接口 | Provider/Agent/工具/调用/指标接口的分页、`availability` 区分「未接入」与「零条记录」、404/422/503 契约 | M4 |
 | I-10 | Provider 配置读写 | `GET/PUT /api/v1/config/provider`：200 生效值与回退、422 校验、503 写失败、裸请求可写（不鉴权，ADR-015）；覆盖值落 `provider_configs` 并镜像 Redis，响应与日志不含密钥（ADR-014） | M4 |
-| I-11 | 多模态附件接口契约 | `POST /api/v1/attachments` 的 201、四类 400（非法 base64 / 空 / 超限 / 格式不支持）；发消息带上 `attachment_ids` 后附件归属回填且**只挂一次**（重复提交进 `unattached_attachment_ids`）；「只带图不带文字」可发送；`GET .../content` 对图片回字节、对文本与文档与失败项回 404；`DELETE` 未归属 204 / 已发出 409；删会话级联清附件（ADR-021） | M5 |
+| I-11 | 多模态附件接口契约 | `POST /api/v1/attachments` 的 201、四类 400（非法 base64 / 空 / 超限 / 格式不支持）；发消息带上 `attachment_ids` 后附件归属回填且**只挂一次**（重复提交进 `unattached_attachment_ids`）；「只带图不带文字」可发送；`GET .../content` 对图片回 `inline`、对文本与文档（**含解析失败项**）回 `attachment` 原件、对无字节的旧行回 404；`DELETE` 未归属 204 / 已发出 409；删会话级联清附件（ADR-021 / ADR-024） | M5 |
+| I-12 | 执行边界诊断接口 | `GET /api/v1/config/sandbox`：200 时 `available` / `reason` 的语义；原因**原样透传**后端给出的文案（不再由接口层编兜底话术）；探测自身抛异常时仍回 200 + 原因；`PUT` / `POST` 一律 405（ADR-020 / ADR-023） | M5 |
 
 ### 2.3 端到端测试（E）
 
@@ -371,15 +373,22 @@ python frontend/rendercheck/build-preview.py      # 产出 rendercheck/ui-previe
   ```bash
   cd frontend && npx tsc --noEmit --jsx react-jsx --module esnext \
     --moduleResolution bundler --target es2022 --lib es2022,dom,dom.iterable \
-    --strict --skipLibCheck --esModuleInterop --isolatedModules rendercheck/preview.tsx
+    --strict --skipLibCheck --esModuleInterop --isolatedModules \
+    rendercheck/preview.tsx rendercheck/workspace-smoke.tsx rendercheck/config-smoke.tsx
   ```
 
-  （会剩下 `node:fs` / `process` 找不到声明的报错，那是项目没依赖 `@types/node`，不是代码问题。）
+  （会剩下 `node:fs` / `process` 找不到声明的报错，那是项目没依赖 `@types/node`，不是代码问题；
+  把这几类报错滤掉，剩下的才是真的。）
+  **这条命令比「`npm run build` 通过」更有意义**：`Attachment` / `Agent` 这类类型的必填字段一改，
+  `rendercheck` 里的夹具不会在构建时报错。2026-09-17 给 `Attachment` 加 `has_original` 时，就是靠
+  这条命令才发现 `preview.tsx` 的夹具漏了它（漏了会让预览里新上传的附件全部退化成「没有下载
+  入口」的形态，而这恰恰是要评审的东西）。
 - 产物 `ui-preview.html` 与中间产物 `.preview-bundle.*` 已进 `.gitignore`，不入库。
 
 预览产物本身可以离线自检（`jsdom` 挂载 + 点一遍侧栏、副路由、四个配置分区、会话生命周期，
 以及 2026-09-17 新增的欢迎卡与附件：三张卡在且竖排居中、**先手动切「固定三步」再点卡片**
-验证模式被切回「自动编排」、切开会话后气泡里的三种附件形态，共 42 项断言）。
+验证模式被切回「自动编排」、切开会话后气泡里的**四种**附件形态（图片 / 文档 / 解析失败 /
+无原件的历史行）与「有原件的才是链接」，共 45 项断言）。
 这条链路**不进仓库**，因为项目刻意不引前端测试依赖；本机想跑就临时装：
 
 ```bash
@@ -590,46 +599,56 @@ I-06 `/workflows/{id}/tool-calls` 返回 `availability=available`；E-04 API 侧
    接口，属新增能力，本轮未做；因此**不据此宣称** `分工.md` §7 的「Web UI 可展示任务历史」
    已闭环。
 
-### 4.4 多模态附件与欢迎区引导卡（2026-09-17，成员 D）
+### 4.4 多模态附件、欢迎区引导卡与沙箱可用性（2026-09-17，成员 D）
 
-对应 ADR-021 / ADR-022。新增与改动：`app/attachments/`、`attachments` 表、三个附件接口、
-发送消息契约加 `attachment_ids` 与 `orchestration_mode`、编排侧四处 `attachments` 透传、
-前端附件交互与欢迎区重做。
+对应 ADR-021 / ADR-022 / ADR-023 / ADR-024。新增与改动：`app/attachments/`、`attachments` 表、
+三个附件接口、发送消息契约加 `attachment_ids` 与 `orchestration_mode`、编排侧四处 `attachments`
+透传、前端附件交互与欢迎区重做；同一天第二轮把沙箱在部署里真正启用（`deploy/compose.yaml`
+挂宿主机套接字）并把附件原件改为**全类型留档**。
 
 **1. 后端（隔离存储，跑法与 §1 一致）**
 
 ```bash
 DATABASE_URL="postgresql+psycopg://postgres:postgres@localhost:5433/macp_test" \
 REDIS_URL="redis://localhost:6380/15" ./.venv/Scripts/python.exe -m pytest -q
-# 669 passed, 7 skipped, 6 warnings in 11.06s
+# 682 passed, 7 skipped, 6 warnings in 10.50s
 
 DATABASE_URL="..." REDIS_URL="..." ./.venv/Scripts/python.exe -m pytest -q \
   tests/unit/test_attachments.py tests/integration/test_attachments_api.py \
   tests/unit/test_dynamic_pipeline.py
-# 94 passed in 2.22s
+# 97 passed in 1.88s
 ```
 
-新增 48 例附件用例（39 单元 + 9 集成）与 3 例「附件只进根步骤」的动态编排用例。
+两轮合计新增 61 例：附件 48 例（39 单元 + 9 集成）、「附件只进根步骤」的动态编排 3 例、
+`tests/unit/test_sandbox_docker_runtime.py` 10 例（探测与容器硬化，用假 client）。
 `7 skipped` 与 `6 warnings` 均为既有状态（需真实模型 / Starlette 弃用告警），本轮未新增跳过项。
 
-`test_attachments_api.py` 覆盖：上传 201、四类 400、挂消息后归属回填、**重复提交只挂一次**
-（第二次进 `unattached_attachment_ids`）、只带图不带文字可发送、`GET .../content` 的分支、
-`DELETE` 的 204/409、删会话级联清附件。`test_dynamic_pipeline.py` 新增：附件只进
-`depends_on` 为空的根步骤、每个根步骤都拿到、静态 `collect` 收到附件。
+- `test_attachments_api.py` 覆盖：上传 201、四类 400、挂消息后归属回填、**重复提交只挂一次**
+  （第二次进 `unattached_attachment_ids`）、只带图不带文字可发送、`GET .../content` 的三类分支
+  （图片 `inline` / 文档 `attachment` / 无字节 `404`）、`DELETE` 的 204/409、删会话级联清附件。
+- `test_dynamic_pipeline.py` 新增：附件只进 `depends_on` 为空的根步骤、每个根步骤都拿到、
+  静态 `collect` 收到附件。
+- `test_sandbox_docker_runtime.py`：套接字连不上时原因里必须点到 `/var/run/docker.sock`；
+  **只 `ping` 通不算可用**（镜像不在宿主机也要报出来）；镜像缺失给可行动的错误；
+  `SANDBOX_AUTO_PULL_IMAGE` 打开时自拉一次并重试；容器参数逐条钉住（`cap_drop=['ALL']`、
+  `read_only`、`network_disabled`、`user=nobody`、`security_opt`、`/app` 被 tmpfs 遮住）。
+- `test_attachments.py`：PDF 样本升级为「每个入参一个内容流」，新增 **FlateDecode 压缩流**与
+  **多页合并**两条——真实 PDF 的内容流几乎都是压缩的，只留未压缩样本测不到 `zlib.decompress`
+  分支。
 
 **2. 前端（无测试框架，仍按「构建 + 无浏览器冒烟 + 预览自检」三步）**
 
 ```bash
 npm --prefix frontend run build
-# 通过：tsc --noEmit && vite build，3163 modules，
-# 产物 index-CuZF9lSI.css 78.39 kB / index-Br57znTm.js 402.67 kB
+# 通过：tsc --noEmit && vite build，
+# 产物 index-xd77pDwS.css 78.51 kB / index-BRyVa_SR.js 402.86 kB
 ```
 
-- `rendercheck/workspace-smoke.tsx` → **75/75**（原 44 项 + 本次 31 项：附件纯函数与两类渲染、
-  4 条读文件断言、选择器口径断言）
+- `rendercheck/workspace-smoke.tsx` → **78/78**（本轮 +3：非图片条目也能打开原件并带下载文件名、
+  图片不带 `download`、无原件的历史行不给任何入口）
 - `rendercheck/config-smoke.tsx` → **69/69**（无回归）
-- `rendercheck/ui-preview.html` 的 jsdom 自检 → **42/42**（原 30 项 + 本次 12 项：
-  三张引导卡与竖排居中、卡片点选切模式、气泡里三种附件形态）
+- `rendercheck/ui-preview.html` 的 jsdom 自检 → **45/45**（本轮 +3：有原件的条目是 `<a>`、
+  无原件的历史行是 `<div>` 且没有 `href`、图片不带 `download`）
 
 **3. 构建产物核对（防止样式被静默丢弃）**
 
@@ -639,16 +658,34 @@ npm --prefix frontend run build
 `[data-kind=text]`，用带引号的形式去 `grep` 会得到 0 命中，误判成规则被丢
 （初版就误判过一次）。查的时候用去引号形式。
 
-**4. 未做 / 未验（不隐瞒）**
+**4. 真实环境验收（第二轮补齐）**
 
-1. **容器未重建**：本轮只跑到源码与构建产物，`docker compose up -d --build frontend backend`
-   与真实后端联调（拖文件 → chip → 发送 → 气泡）**未做**，因此不宣称 E-04 已覆盖附件路径。
-2. **图片理解未接真实模型**：`build_human_content` 在单测里断言了 content block 的身份与形状，
-   但没有向真实视觉模型发过一次图。「所选模型是否真能看图」仍取决于提供方。
-3. **PDF 只测了「可读」与「读不出」两类**：没有覆盖真实扫描件样本（用例里的 PDF 是构造的
-   极简字节）。
-4. **附件在动态编排下未做真实模型回归**：与 §4.2 里 U-11 的缺口同源（动态模式本身就没有
-   真实模型回归）。
+第一轮欠下的四件事，第二轮逐条做了：
+
+1. **容器已重建 + 真机全链路**（`docker compose up -d --build frontend backend`）：
+   - 上传真实 PNG（31220 字节）→ 动态模式发消息 → 25.2 s 完成，`checkpoint.mode=dynamic`、
+     `plan_source=llm`；模型**读到了图**：答出「执行边界」与「docker 不可用」——图片块确实进了
+     根步骤的提示词。
+   - 静态链路：上传一份含代号「青鸢-7」的 `现场记录.md`，报告里原样写出该代号，证明文档正文
+     进了 `collect` 步骤。
+   - 原件下载（ADR-024）：文本附件 44 字节与上传**逐字节一致**、`text/markdown` +
+     `attachment`；解析失败的 PDF 同样能取回 `%PDF-1.4` 开头的原件；图片为 `inline`。
+2. **图片理解已接真实视觉模型**：见上，当前 Provider（`openai-compatible` → 本机 3000，
+   `gpt-5.5`）确实能看图。**这只证明这条通路是通的**，不构成对模型视觉能力的评测。
+3. **沙箱在部署里真正可用**（ADR-023）：`GET /config/sandbox` → `available=true`、`reason=null`；
+   容器内探针实测真实执行 `print(sum(range(1,101)))` → `exit=0, stdout=5050, 317 ms`；
+   `import os` → `SandboxViolation`（在起容器**之前**被拒）；超时用例 → `timed_out=true,
+   exit=124`、3.4 s 后容器被终止；工具层 `CodeExecutionTool.invoke` 同样返回 `docker/exit 0`；
+   运行后 `docker ps -a --filter label=macp.role=tool-sandbox` 无残留。
+
+**5. 仍未做 / 仍未验（不隐瞒）**
+
+1. **PDF 仍只有构造样本**：本轮补了 FlateDecode 压缩流与多页合并，但**没有真实扫描件或真实
+   排版 PDF**（本机无 PDF 生成库、也无公网样本），「生产 PDF 的抽取成功率」没有数据。
+2. **视觉能力没有评测集**：只证明通路可用（上面第 2 条），没有「多少张图能读对」的度量。
+3. **`list_attachments_for_messages` 会把 `data` 列读出来再丢掉**：ADR-024 记录的既有低效，
+   本轮只加了纯内存判断（没有变差，也没修好）。会话内附件多时这条查询会变重。
+4. **动态编排的净收益仍无度量**：与 §4.2 里 U-11 的缺口同源。
 
 ## 5. 失败处理约定
 

@@ -165,6 +165,13 @@ class AttachmentResponse(BaseModel):
     附件仍然在，但正文取不出来，前端要显式标注，不能让用户以为它被用上了。"""
 
     error: str | None = None
+    has_original: bool = False
+    """原件字节是否还在库里（ADR-024）。
+
+    `False` 只出现在 ADR-024 之前落库的文本/文档附件上（那时字节用完即弃）。
+    界面据此决定要不要给「下载原件」入口——不显示一个必然 404 的链接。
+    """
+
     created_at: datetime
 
 
@@ -1019,34 +1026,38 @@ def upload_attachment(payload: AttachmentUploadRequest) -> AttachmentResponse:
 
 @app.get(
     "/api/v1/attachments/{attachment_id}/content",
-    summary="下载附件原始内容（仅图片保留字节，doc/api.md §5.16）",
+    summary="下载附件原件（doc/api.md §5.16，ADR-024）",
     response_class=Response,
 )
 def download_attachment(attachment_id: str) -> Response:
-    """回附件字节，供消息气泡里的图片缩略图与查看原图使用。
+    """回附件**原始字节**，供气泡里的缩略图、查看原图与下载原件使用。
 
-    **只有图片能回字节**：文本与文档在上传时就抽出了正文，原始字节按设计丢掉
-    （省库体积，执行阶段也不必再解析一遍，见 `app/attachments/prepare.py`）；
-    解析失败的附件（如扫描版 PDF）同样没有可回的内容。
+    原件对**所有类型**都留档（ADR-024）：用户在历史消息里点开附件，期望拿到的是他当初
+    传的那份文件，而不是我们抽取出来的纯文本。解析失败的附件（扫描版 PDF）同样有原件——
+    读不出正文不代表它不该能下载。
 
-    这两种情况一律回 404 而不是空响应：空响应会被前端当成一份有效内容渲染出来，
-    「没内容」和「内容是空的」在这里是两件事。
+    图片用 `inline`（缩略图与 `<img>` 要能直接渲染），其余用 `attachment`
+    （docx/xlsx 在浏览器里没有渲染器，`inline` 只会开出一个空白页）。
+
+    没有字节时（ADR-024 之前落库的文本/文档行）回 404 而不是空响应：空响应会被前端
+    当成一份有效内容渲染出来，「没内容」和「内容是空的」在这里是两件事。
     """
 
     row = api_store.get_attachment_content(attachment_id)
     if row is None or row.get("data") is None:
         raise ApiError(
             "ATTACHMENT_CONTENT_UNAVAILABLE",
-            "该附件没有可下载的原始内容（仅图片保留字节）。",
+            "该附件没有可下载的原件（早于原件留档策略落库的附件不含字节）。",
             status.HTTP_404_NOT_FOUND,
         )
     name = str(row.get("name") or "attachment")
+    disposition = "inline" if str(row.get("kind") or "") == "image" else "attachment"
     return Response(
         content=row["data"],
         media_type=row.get("mime") or "application/octet-stream",
         headers={
             # 文件名含中文时用 RFC 5987 形式，避免头部按 latin-1 编码报错。
-            "Content-Disposition": "inline; filename*=UTF-8''" + quote(name, safe="")
+            "Content-Disposition": f"{disposition}; filename*=UTF-8''" + quote(name, safe="")
         },
     )
 
@@ -1486,23 +1497,17 @@ def list_tools(
 
 
 def _sandbox_availability(settings) -> tuple[bool, str | None]:
-    """探测沙箱后端是否真的可用，并给出可读原因。
+    """探测沙箱后端是否真的可用，并给出**具体**原因。
 
-    `available()` 只返回布尔值（`app/sandbox/docker_runtime.py`），而排障时需要知道
-    **为什么**不可用——「代码完整但部署里没挂 docker.sock」正是靠这层原因才能看出来。
+    原因由后端自己给出（`Sandbox.unavailable_reason()`），不在这里猜：套接字没挂、
+    镜像不在宿主机、Docker SDK 没装上，是三件需要三种不同处理的事，界面上要分得开。
     """
 
-    if settings.backend == "denied":
-        return False, "已按 SANDBOX_BACKEND=denied 显式关闭执行（无 Docker 环境的显式降级）"
     try:
-        if build_sandbox(settings).available():
-            return True, None
-    except Exception as exc:
-        return False, f"{type(exc).__name__}: {exc}"
-    return False, (
-        "Docker 守护进程不可达；常见原因是 backend 容器未挂载 /var/run/docker.sock "
-        "或当前用户无权访问该套接字"
-    )
+        detail = build_sandbox(settings).unavailable_reason()
+    except Exception as exc:  # 构建后端自身失败（例如没装 docker 包）
+        return False, f"探测沙箱时出错：{type(exc).__name__}: {exc}"
+    return (True, None) if detail is None else (False, detail)
 
 
 @app.get("/api/v1/config/sandbox", response_model=SandboxStatusResponse)

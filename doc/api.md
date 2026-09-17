@@ -975,9 +975,9 @@ item 字段为 metric_name、value（有限数值）、labels（JSON 对象）�
 ```json
 {
   "backend": "docker",
-  "image": "python:3.12-slim",
-  "available": false,
-  "reason": "Docker 守护进程不可达；常见原因是 backend 容器未挂载 /var/run/docker.sock 或当前用户无权访问该套接字",
+  "image": "multi-agent-collaboration-platform-backend:latest",
+  "available": true,
+  "reason": null,
   "limits": {
     "timeout_seconds": 15,
     "memory_limit": "256m",
@@ -994,13 +994,27 @@ item 字段为 metric_name、value（有限数值）、labels（JSON 对象）�
 | --- | --- |
 | `backend` | `docker`（容器隔离）或 `denied`（显式拒绝执行） |
 | `image` | 容器隔离使用的镜像 |
-| `available` | 运行期探测结果；`false` 时工具调用会以 `SandboxUnavailable` 失败 |
-| `reason` | 不可用原因；可用时为 `null` |
+| `available` | 探测结果：守护进程可达**且**镜像已在宿主机 |
+| `reason` | 不可用时的**具体原因**；可用时为 `null` |
 | `limits` | 当前生效限额，逐项对应 `SandboxSettings` |
 
+`reason` 由后端自己给出（`Sandbox.unavailable_reason()`），不是接口层的兜底文案——**套接字没挂、
+镜像不在宿主机、没装 Docker SDK 是三件需要三种不同处理的事**，界面上要分得开。探测本身炸了也
+回 `200` 加原因：这是诊断接口，它自己 500 就没人能诊断了。
+
+探测是**两件事**，缺一不可：
+
+1. 守护进程可达（`ping`）；
+2. 沙箱镜像已在**宿主机**上。沙箱容器是 backend 通过宿主机套接字创建的**兄弟容器**（ADR-023），
+   镜像不在宿主机时只 `ping` 会得到「绿灯、但第一次执行代码就失败」的假象。
+
+镜像缺失时 `reason` 会给出三条可执行的路：宿主机 `docker pull`、把 `SANDBOX_IMAGE` 指到本地
+已有镜像、或开 `SANDBOX_AUTO_PULL_IMAGE`（默认**关**——拉取可能长时间阻塞，安全边界组件应当
+失败得快、原因得准）。
+
 **只读，没有写接口**（`PUT`/`POST` 返回 `405`）。这些参数是部署期安全边界——做成运行时可改的
-界面等于让 Web 操作者放宽自己容器的隔离；且当前 `available=false` 的原因是缺 docker.sock，
-改限额不会让它变可用，那样的开关必然是个假开关。决策与理由见 ADR-020。
+界面等于让 Web 操作者放宽自己容器的隔离，那样的开关必然是个假开关。决策与理由见 ADR-020；
+「沙箱在部署里真正可用」是 ADR-023。
 
 前端入口：「工具与配置 → 执行边界」，只展示不编辑。
 
@@ -1038,7 +1052,8 @@ item 字段为 metric_name、value（有限数值）、labels（JSON 对象）�
 | `kind` | `image` / `text` / `document` |
 | `status` | `ready`（正文已抽出）/ `failed`（登记成功但正文取不出来，`error` 说明原因） |
 | `size_bytes` | 原始字节数。**注意是原文件大小**，不是抽取出来的文本长度 |
-| `text_content` | **不在响应里回传**。它只在执行阶段被读进提示词（§5.16.2 对文本/文档也不提供下载） |
+| `has_original` | 原件字节是否还在库里（ADR-024）。`false` 只出现在旧策略之前落库的附件上——界面据此决定要不要给「打开原件」入口，不给必然 404 的链接 |
+| `text_content` | **不在响应里回传**。它只在执行阶段被读进提示词；原件另由 §5.16.2 提供下载 |
 
 `failed` **仍然是登记成功的附件**（有 id、可挂消息、会出现在气泡里）。它只是没进模型上下文——
 这一点必须如实显示，否则用户会以为那份扫描件被读进去了。
@@ -1060,21 +1075,27 @@ item 字段为 metric_name、value（有限数值）、labels（JSON 对象）�
 单文件 5 MB / 单条消息 4 个 / 单文件 2 万字符 / 单条消息合计 4 万字符。前端那份**只做即时反馈**，
 准入判据始终在服务端。
 
-#### 5.16.2 读取附件原始内容
+#### 5.16.2 读取附件原件
 
 `GET /api/v1/attachments/{attachment_id}/content`
 
-**只有图片能取到字节。**
+回**原件字节**（ADR-024），按类型选处置方式：
 
-- 图片：返回原始字节，`Content-Type` 为登记的 `mime`；前端用它渲染气泡里的缩略图与「查看原图」；
-- 文本 / 文档：**`404 ATTACHMENT_CONTENT_UNAVAILABLE`**。它们在 `POST` 时就已经把正文抽进
-  `text_content`，原始字节按设计丢弃（省库体积，执行阶段也不必再解析一遍）；
-- 解析失败的附件、不存在的 id：同样 `404`。
+- 图片：`Content-Type` 为登记的 `mime`，`Content-Disposition: inline`——气泡里的缩略图与
+  「查看原图」要能直接渲染；
+- 文本 / 文档（**含解析失败的附件**）：同一份原件，`Content-Disposition: attachment`——
+  txt/docx/xlsx 在浏览器里没有渲染器，`inline` 只会开出一个空白页；
+- id 不存在，或该行早于原件留档策略落库（`has_original=false`）：`404
+  ATTACHMENT_CONTENT_UNAVAILABLE`。
 
 回 `404` 而不是空响应：空响应会被前端当成一份有效内容渲染出来，「没内容」和「内容是空的」是两件事。
 
 响应头带 RFC 5987 的 `Content-Disposition`（中文文件名用 `filename*=UTF-8''...`，避免头部按
 latin-1 编码报错）。
+
+前端用法：气泡里的条目在 `has_original=true` 时**本身就是这个地址的链接**——图片新窗口看原图，
+其余带 `download` 属性直接存成上传时的文件名。`has_original=false` 的旧行不给入口，因为那会是
+一个必然 404 的链接。
 
 #### 5.16.3 删除附件
 

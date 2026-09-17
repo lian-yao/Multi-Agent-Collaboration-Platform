@@ -61,16 +61,18 @@ def prepare_upload(name: str, data: bytes, mime: str = "") -> dict[str, Any]:
         )
 
     result = extract(safe_name, data)
-    is_image = result.kind is AttachmentKind.IMAGE
     return {
         "name": safe_name,
         "mime": (mime or "").strip() or (result.image_mime or ""),
         "kind": result.kind.value,
         "status": result.status.value,
         "size_bytes": len(data),
-        # 只有图片留字节（要转 base64 进模型请求）；文本与文档在上传时已抽出正文，
-        # 原始字节不再需要——省库体积，也让执行阶段不必再解析一遍。
-        "data": data if is_image else None,
+        # 原始字节**一律留档**（ADR-024）。图片要转 base64 进模型请求；文本与文档除了
+        # 提示词里用的正文（`text_content`）之外，原件本身也要能下载回来——用户在历史
+        # 消息里点开附件，期望拿到的是他当初传的那份文件，而不是我们抽取出的纯文本。
+        # 解析失败的附件（扫描版 PDF）同样留档：读不出正文不代表不该能下载它。
+        # 代价是库体积，已由 `spec.py` 的单文件 5 MB / 单条消息 4 个硬上限约束。
+        "data": data,
         "text_content": result.text,
         "error": result.error,
     }

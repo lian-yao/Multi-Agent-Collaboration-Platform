@@ -73,9 +73,11 @@ def flatten() -> dict:
          "created_at": S.iso(-10), "updated_at": S.iso(-10)},
     ]
 
-    # 附件（ADR-021）：第一条用户消息带三种形态，好让气泡里的
-    # 「图片缩略图 / 文档条目 / 解析失败」三种样式一次看全。
+    # 附件（ADR-021 / ADR-024）：第一条用户消息带四种形态，好让气泡里的
+    # 「图片缩略图 / 文档条目 / 解析失败 / 无原件的历史行」一次看全。
     # 图片的正文地址在 `preview.tsx` 里被换成内联 SVG（预览页取不到真的字节）。
+    # `has_original` 为 False 的那条代表原件留档策略（ADR-024）之前落库的行：
+    # 它**不该**有打开原件的入口，正好和另外三条形成对照。
     messages = [
         {"id": "m-1", "session_id": SESSION_ID, "role": "user",
          "content": "帮我调研 2026 年多智能体协作平台的开源方案，并输出一份对比报告。",
@@ -83,16 +85,20 @@ def flatten() -> dict:
          "attachments": [
              {"id": "att-preview-image", "session_id": SESSION_ID, "message_id": "m-1",
               "name": "架构草图.png", "mime": "image/png", "size_bytes": 184320,
-              "kind": "image", "status": "ready", "error": None,
+              "kind": "image", "status": "ready", "error": None, "has_original": True,
               "created_at": S.iso(-320)},
              {"id": "att-preview-doc", "session_id": SESSION_ID, "message_id": "m-1",
               "name": "竞品功能对照表.xlsx", "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
               "size_bytes": 47104, "kind": "document", "status": "ready", "error": None,
-              "created_at": S.iso(-320)},
+              "has_original": True, "created_at": S.iso(-320)},
              {"id": "att-preview-failed", "session_id": SESSION_ID, "message_id": "m-1",
               "name": "现场访谈扫描件.pdf", "mime": "application/pdf", "size_bytes": 2400256,
               "kind": "document", "status": "failed",
               "error": "未能从 PDF 中可靠提取文本（可能是扫描件）。",
+              "has_original": True, "created_at": S.iso(-320)},
+             {"id": "att-preview-legacy", "session_id": SESSION_ID, "message_id": "m-1",
+              "name": "会议速记.txt", "mime": "text/plain", "size_bytes": 1840,
+              "kind": "text", "status": "ready", "error": None, "has_original": False,
               "created_at": S.iso(-320)},
          ]},
         {"id": "m-2", "session_id": SESSION_ID, "role": "assistant",

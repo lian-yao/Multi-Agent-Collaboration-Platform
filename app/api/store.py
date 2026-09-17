@@ -250,9 +250,15 @@ class InMemoryApiStore:
 
     @staticmethod
     def _attachment_view(row: dict[str, Any]) -> dict[str, Any]:
-        """与 SQL 实现同口径：元数据不含字节与正文。"""
+        """与 SQL 实现同口径：元数据不含字节与正文，只带一个「原件还在不在」。"""
 
-        return {key: value for key, value in row.items() if key not in {"data", "text_content"}}
+        view = {
+            key: value
+            for key, value in row.items()
+            if key not in {"data", "text_content"}
+        }
+        view["has_original"] = row.get("data") is not None
+        return view
 
     def get_attachment(self, attachment_id: str) -> dict[str, Any] | None:
         row = self.attachments.get(attachment_id)

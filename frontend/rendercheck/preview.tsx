@@ -124,6 +124,9 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       kind: kind === "unsupported" ? "text" : kind,
       status: scanned ? "failed" : "ready",
       error: scanned ? "未能从 PDF 中可靠提取文本（可能是扫描件）。" : null,
+      // 预览里刚上传的附件当然有原件（ADR-024）——少了这个字段，气泡里的条目
+      // 会退化成「没有下载入口」的形态，评审时看不出真实行为。
+      has_original: true,
       created_at: new Date().toISOString(),
     };
     registry.set(id, created);

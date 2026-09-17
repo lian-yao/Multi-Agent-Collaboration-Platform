@@ -127,8 +127,9 @@ class AttachmentRecord(Base):
     size_bytes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     kind: Mapped[str] = mapped_column(String(20), nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False)
-    # 只有图片保留原始字节（要转 base64 进模型请求）；文本与文档在上传时就把
-    # 正文抽出来存 `text_content`，原始字节用完即弃——省库体积，也让执行阶段不必再解析一次。
+    # 原始字节，**所有类型都留档**（ADR-024）：图片要转 base64 进模型请求；文本与文档
+    # 除了提示词里用的正文（`text_content`）之外，原件本身也要能下载回来。
+    # 代价是库体积，由 `app/attachments/spec.py` 的单文件 / 单消息硬上限约束。
     data: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     text_content: Mapped[str | None] = mapped_column(Text, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -1493,7 +1494,11 @@ def list_messages(
 
 def _attachment_meta(row: AttachmentRecord) -> dict[str, Any]:
     """附件的展示字段。**不含** `data` / `text_content`：列表与消息回读都走这里，
-    正文只在执行阶段按 id 单独取。"""
+    字节只在下载与执行阶段按 id 单独取。
+
+    `has_original` 是给界面用的：没有字节的行（ADR-024 之前落库的文本/文档附件）
+    不该显示一个必然 404 的下载入口。
+    """
 
     return {
         "id": str(row.id),
@@ -1505,6 +1510,7 @@ def _attachment_meta(row: AttachmentRecord) -> dict[str, Any]:
         "kind": row.kind,
         "status": row.status,
         "error": row.error,
+        "has_original": row.data is not None,
         "created_at": row.created_at,
     }
 
