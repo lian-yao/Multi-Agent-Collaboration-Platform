@@ -335,6 +335,11 @@ item 字段为 name、description、input_schema（JSON 对象）、status。数
 
 API 进程默认按 `MCP_TRANSPORT` 注入该目录（`InspectionStore(tool_catalog=tool_catalog)`）。注册表构建或读取失败返回 `503 DATA_SOURCE_UNAVAILABLE`，不吞掉错误伪装成空目录；只有显式构造为「未注入目录」的读取器才返回 availability=not_integrated。该接口只列目录，不探测每个工具的运行期可用性（例如沙箱后端是否可连）。
 
+**用户登记的 MCP Server 的工具现在也会出现在这里**（ADR-026，2026-09-19 起）。`RegistryServersToolRegistry`（`app/mcp/registry.py`）会把启用 Server 的**已发现**工具合成进来，所以目录的实际内容是「内置工具 + 已发现的登记工具」。两点需要注意：
+
+- **没「发现」过的 Server 不出现在目录里**：目录取自已发现的缓存（与 §5.11 同一条语义——「目录是配置的函数」），用户要在配置页点一次「发现」。读取发生在**每次执行**的工具枚举上，因此这条路径上不做任何 IO（进程内快照，配置变更时由配置面刷新）。
+- **重名时内置优先**：与内置工具同名的登记工具不进目录，服务端另记一条 `mcp.registry_tool_name_clash` 日志；`tool_options.disabled` 为真的工具同样不进目录。
+
 **会话级工具不在这个目录里，这是有意的**（ADR-025）。`list_session_files` / `read_session_file` 的作用域是**一次执行**（绑定当时的 `session_id`），它们由 `session_scoped_registry()` 在阶段执行前临时拼进注册表，因此不进进程级目录、也不会出现在本接口的返回里。把它们算进来会让「工具与配置」页出现两个既关不掉、又在无会话执行里不存在的开关——不给假开关是本项目反复在修的毛病。要看它们是否真的被调用，读 §5.4 的工具调用记录（会出现在 `tool_calls` 里）。调用方需要知道的唯一一件事是：**任何依赖本目录来判断「Agent 有哪些工具」的逻辑都不完整**，运行期的工具集合是「本目录 + 本次会话的会话级工具」。
 
 ### 5.4 查询 Workflow 工具调用
@@ -813,8 +818,11 @@ item 字段为 metric_name、value（有限数值）、labels（JSON 对象）�
   `env` 为 `{key: value}`，`cwd` 可选；此时 `url` 必须为空。
 - `transport` 为 `http`/`sse`/`ws` 时必填 `url`（`http(s)` / `ws(s)`），可选 `headers`；
   此时 `command`/`args`/`env`/`cwd` 必须为空。
-- `tool_options`：`{toolName: {disabled?: bool, allowAutoExecution?: bool}}`，
-  用于按工具开关与自动执行策略。
+- `tool_options`：`{toolName: {disabled?: bool, allowAutoExecution?: bool}}`。
+  `disabled` **真的生效**（ADR-026）：为真的工具不进 §5.3 的工具目录，因而不会绑给模型。
+  `allowAutoExecution` 仍然**不消费**——它要表达的是「调用前需要人工确认」，而 HITL 还没做；
+  没有审批环节就无法正确表达这个语义，硬解释成「不暴露给模型」会让用户以为自己设的是
+  「需要审批」而实际是「工具消失」。因此也不给它做界面开关（ADR-020 同一取向）。
 - `tool_count` / `discovered_at` / `server_info` 来自 `discovered` 缓存；
   从未发现过时 `tool_count` 为 `0`、后两者为 `null`。
 
@@ -836,6 +844,10 @@ item 字段为 metric_name、value（有限数值）、labels（JSON 对象）�
 失败（连接不上、握手失败、列工具报错、超时 15 秒）返回 `502 MCP_DISCOVERY_FAILED`，
 `message` 为归一化后的错误原因，不含凭据与命令全文中的敏感值。发现结果**只**写
 `discovered` 缓存，不改 `enabled`。
+
+发现结果**立即**对 Agent 生效（ADR-026）：服务端在写完缓存后会刷新编排层的工具快照，
+下一次执行就能看到这批工具，**不需要重启进程**。Server 的新增 / 修改 / 删除同理
+（`app/core/mcp_registry.py::_sync_orchestration_tools`）。
 
 `GET /api/v1/config/mcp/tools`：按 Server 分组的**紧凑**工具目录，供配置页渲染卡片。
 **不**内联 `input_schema`——Schema 体积大且多数时候不影响「这个工具要不要开」的判断：

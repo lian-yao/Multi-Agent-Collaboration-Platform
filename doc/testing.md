@@ -198,7 +198,7 @@ Provider 配置面板的验证步骤（ADR-017 之后：`frontend/src/config/` �
 | 同上 · 特化调参 | `ModelSection.tsx::ModelTuningForm` | 只提交被改动字段；清空数字输入 = 显式 `null`（回到未设置）；`PATCH` 不发 `provider_id`；改模型名时按 `modelCapabilities.ts` 带出常见模型的**上下文上限**，用户手改过（`contextTouched`）之后不再覆盖 |
 | 同上 · 手动登记 | `ModelSection.tsx::ModelCreateModal` | 与特化调参同一套自动带出与文案（`describeContextHint`）；识别不到常见模型时**留空**由用户手填，不做正则猜测 |
 | 默认路由 | `DefaultRoutePanel.tsx` | `default_llm_model_id` 非空时展示解析出的注册表来源；悬空 id 给出提示而不是报错 |
-| MCP 工具 | `McpPanel.tsx` | 工具卡片只显示 `name` / 截断后的 `description` / 开关与可用性；完整 `input_schema` 收进**默认折叠**的 `<details>`，展开时才调 §5.3。工具级选项里**只有 `disabled` 有界面出口**：`allowAutoExecution` 虽然在 `tool_options` 与 `doc/api.md` §5.11 里，但执行链路没有任何地方消费它（见 §3.4 的漂移清单），所以**不给它做界面开关**——否则就是一个点了没效果的假开关 |
+| MCP 工具 | `McpPanel.tsx` | 工具卡片只显示 `name` / 截断后的 `description` / 开关与可用性；完整 `input_schema` 收进**默认折叠**的 `<details>`，展开时才调 §5.3。工具级选项里**只有 `disabled` 有界面出口**：`disabled` 现在真的会把工具从 Agent 的工具集里摘掉（ADR-026），`allowAutoExecution` 则**仍然不消费**——它要表达的是「需要人工确认」，而 HITL 还没做，所以**不给它做界面开关**，否则就是一个点了没效果的假开关 |
 | 同上 · 粘贴导入 | `McpImportModal.tsx` + `mcpConfig.ts` | 粘贴外部客户端的配置 JSON（`mcpServers` 映射/数组、裸映射、单条参数四种形态）后**立即解析并预览**，不自动提交；已登记的 ID 在预览里标黄「会失败」；提交是**前端逐条**调 `POST /config/mcp/servers`（§5.11 只有单条创建接口），一条失败不拖垮其余，成功与失败分别汇报，**全部成功才关闭弹层** |
 | 同上 · Server 表单 | `McpPanel.tsx::ServerFormModal` + `KeyValueFields.tsx` | 传输下拉按**远程 / 本地**分组；环境变量与请求头是**键值对行编辑器**（可增删、逐项校验空键与重复键），不再是「每行 KEY=VALUE」文本域；表单校验与粘贴导入**共用** `mcpConfig.ts::draftProblem`，两处不会各漂一套口径 |
 | 执行边界 | `SandboxPanel.tsx` | **只读**：展示沙箱后端、镜像、可用性探测与不可用原因，以及 7 项生效限额；`available=false` 时原因行必现（`GET /config/sandbox` §5.15）。**没有任何可编辑控件**，后端也没有写接口（`PUT` → `405`）。为什么不给开关：这些是部署期安全边界，且当前 `available=false` 的成因是缺 docker.sock，改限额不会让它变可用（ADR-020） |
@@ -601,6 +601,11 @@ I-06 `/workflows/{id}/tool-calls` 返回 `availability=available`；E-04 API 侧
    「完整历史查询尚未接入」）。做完整历史需要新增 `GET /api/v1/workflows` 一类的列表
    接口，属新增能力，本轮未做；因此**不据此宣称** `分工.md` §7 的「Web UI 可展示任务历史」
    已闭环。
+   - **后续状态（2026-09-16 起，此处更正）**：**会话级**历史已接入——`GET /api/v1/sessions`
+     （`doc/api.md` §5.13）+ 记录页「历史会话」副路由 + 侧栏「历史会话」下拉，可浏览并恢复任一
+     历史任务。上面这段说的是**workflow 级跨会话列表**，它到 D9-10 收尾时**仍然没有**，
+     所以「当前会话最近一次执行」的运行记录区口径未变。`doc/deployment.md` §E-04 的核对清单
+     已按这个区分改写。
 
 ### 4.4 多模态附件、欢迎区引导卡与沙箱可用性（2026-09-17，成员 D）
 
@@ -864,6 +869,73 @@ D 用的是新客户端却同样失败 → **不是连接复用**，是网关侧
    但「同一份文档里正文与页眉用不同字体」的场景目前读不了。
 5. **视觉评测只测 10 例、单轮采样**：够当闸门，不够当准确率；`--repeat` 与更大用例集是
    后续的事。
+
+### 4.6 MCP 注册表接入编排层（2026-09-19，成员 D）
+
+新增决策 [ADR-026](decisions/026-registry-servers-in-orchestration.md)。§4.5 结束时留下的
+唯一硬缺口是：**配置页登记并「发现」的 MCP Server 对 Agent 完全无效**
+（`mcp_server_registry` 的引用者只有 API 层 CRUD）。本轮把它接上了。
+
+**1. 改动**
+
+| 文件 | 变化 |
+| --- | --- |
+| `app/mcp/registry.py` | 新增 `RegistryServersToolRegistry`（合成层）、`registry_server_entries()`、`refresh_registry_server_entries()`、`_entry_tools()`；`build_tool_registry()` 在基础后端上叠合成层 |
+| `app/core/mcp_registry.py` | 新增 `_sync_orchestration_tools()`，在增删改 / 发现 / 列配置之后刷新快照 |
+| `app/mcp/__init__.py` | 转出新增的公开名 |
+| `tests/unit/conftest.py` | 新增 `memory_mcp_registry`（autouse），理由见下 |
+
+**2. 验证**
+
+```bash
+./.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider \
+  tests/unit/test_registry_servers.py
+# 13 passed in 0.63s
+
+./.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider \
+  tests/unit/test_mcp_tools.py tests/unit/test_pipeline_tools.py \
+  tests/unit/test_session_files_tools.py tests/unit/test_dynamic_pipeline.py
+# 95 passed in 1.67s
+```
+
+13 例覆盖：与内置工具合成、目录只取**已发现的缓存**（用 `transport="ws"` 证明没去连接）、
+`disabled` 摘除且给出原因、重名时内置优先、调用路由到真 Server（走真实 MCP 协议往返）、
+未知名字回退基础注册表、传输不支持不抛、读表失败**只尝试一次**、刷新后目录跟随、
+`close` 释放 Server 与基础后端。
+
+**3. 本轮实测踩到的坑（已写进 ADR 的「决策 3」）**
+
+第一版让 `list_tools()` **每次现读** `mcp_server_registry`。这在存储正常时看不出问题，
+存储不可达时是灾难性的：`docker ps` 显示 Docker Desktop 已停，此时到 `5433` 的连接
+失效形态是 **`TimeoutError`（包被丢弃）而不是 `ConnectionRefused`**，于是**每次**工具枚举
+都要卡满一个 TCP 超时——4 个文件共 95 例从「几十秒」变成 **15 分钟都跑不完**。
+
+「读不到配置」的正确含义是「没有额外工具」，不是「整条流水线停摆」。所以改成
+**进程内快照 + 配置面主动刷新**：只加载一次、失败不重试，热路径纯内存。
+
+**4. 单测必须隔离这条读取**
+
+`tests/unit/conftest.py` 新增 autouse 的 `memory_mcp_registry`，把快照固定为空。
+它与既有的 `memory_redis`、`MemoryMetricSink` 是同一条约定——**单元测试不连真实
+PostgreSQL**（§1）。把它当作"测试环境特殊处理"就错了：它同时也是**生产语义**的一部分，
+即工具枚举路径上不能有 IO。
+
+**5. 本轮验证边界（如实记录）**
+
+- **全量回归未跑**：本机 Docker Desktop 已停（PostgreSQL 5433 / Redis 6380 / 网关 3000
+  全部不可达），而全量用例依赖真实 PG。上面两组数字是**不依赖存储**的那部分，
+  不是本轮的完整证据。启动 Docker 后需要补跑：
+  `DATABASE_URL="postgresql+psycopg://postgres:postgres@localhost:5433/macp_test" REDIS_URL="redis://localhost:6380/15" ./.venv/Scripts/python.exe -m pytest -q`
+- **`tests/unit/test_mcp_registry.py`（Server CRUD）未验证**：它是本轮改到
+  `app/core/mcp_registry.py` 的直接对象，且需要真实 PG。改动本身只新增了一个
+  「记日志 + 通知编排层」的调用，不改返回值，但**这是未验证的部分**。
+- **动态模式的 compose 端到端回归仍未做**（承接 §4.5 的缺口）。
+
+**6. 顺手修掉的文档缺陷**
+
+`doc/testing.md` 第 201 行原写「见 §3.4 的漂移清单」，但**全文没有这一节**——
+§3.4 是「UI 评审预览」。悬空引用已删除，该行同时更新为准确表述：
+`disabled` 现在真的会摘掉工具（ADR-026），`allowAutoExecution` 仍然不消费（HITL 未做）。
 
 ## 5. 失败处理约定
 - 任一用例失败：先复现，再定位，修复后将失败模式固化为新的测试或本文档约束；
