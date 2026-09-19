@@ -5,14 +5,14 @@
 `tests/fixtures/attachments/` 里**由 fpdf2 / python-docx / openpyxl 真实生成**的文件来跑，
 夹具生成脚本是 `scripts/make_attachment_fixtures.py`（测试不依赖它，也不需要那几个库）。
 
-四类 PDF 形态都被钉住：
+四类 PDF 形态都被钉住（ADR-021 / ADR-027）：
 
 | 夹具 | 形态 | 期望 |
 | --- | --- | --- |
 | `quarterly-report.pdf` | 核心字体 + 压缩内容流 + 多页 | 读出正文 |
 | `embedded-subset-font.pdf` | 内嵌 TTF 子集，CID 写成**字面量串** | 读出正文（靠 `/ToUnicode`） |
-| `two-font-heading.pdf` | 两种内嵌字体的码冲突 | 明确失败，**不填乱码** |
-| `scanned-invoice.pdf` | 整页位图，没有文本层 | 明确失败 |
+| `two-font-heading.pdf` | 两种内嵌字体的码冲突 | 不填正文（**不填乱码**），改走页面图像 |
+| `scanned-invoice.pdf` | 整页位图，没有文本层 | 不填正文，改走页面图像 |
 
 外加 docx / xlsx 各一份真实文件。
 """
@@ -76,29 +76,38 @@ def test_real_embedded_subset_font_pdf_is_readable_via_tounicode() -> None:
 
 
 def test_real_two_font_pdf_refuses_instead_of_emitting_garbage() -> None:
-    """两种内嵌字体码冲突时**安全拒绝**，并把原因指向可操作的方向。
+    """两种内嵌字体码冲突时**安全拒绝正文**，改走页面图像。
 
     子集字体的字符码各自从 0 起编，同一个码在两个字体下指向不同的字。合并 CMap 会让
     这些码变成冲突码；按"能解出来就用"的策略会产出通顺但完全错误的句子——比读不出来
-    更糟，因为模型会当真。这里断言：报失败、说清是码冲突、且**一个字的正文都没有**。
+    更糟，因为模型会当真。这里断言：**一个字的正文都没有**、原因说得清是码冲突、
+    并且给出替代出路（ADR-027：页面渲染成图，交给视觉模型）。
+
+    这条夹具恰好证明「渲染不是 OCR 的降级品」：它渲染出来完全可读
+    （`Two Font Heading` / `The body uses a second embedded font subset.`），
+    而文本通路出于正确性**刻意**不给。
     """
 
     result = extract_fixture("two-font-heading.pdf")
 
-    assert result.status is AttachmentStatus.FAILED
+    assert result.status is AttachmentStatus.READY
     assert result.text is None
     assert "字符码" in (result.error or "")
-    assert "乱码" in (result.error or "")
+    # 要说出「为什么不用这份正文」，而不只是「读出不来」：按错表解码出来的句子
+    # 是通顺的、看不出问题的，所以原因必须写清是**还原不了**。
+    assert "无法安全还原文字" in (result.error or "")
+    assert "页面图像" in (result.error or "")
 
 
-def test_real_scanned_pdf_fails_because_there_is_no_text_layer() -> None:
-    """整页位图：PDF 结构合法但一个字都不是文本。"""
+def test_real_scanned_pdf_yields_page_images_instead_of_text() -> None:
+    """整页位图：PDF 结构合法但一个字都不是文本 → 正文为空，改走页面图像。"""
 
     result = extract_fixture("scanned-invoice.pdf")
 
-    assert result.status is AttachmentStatus.FAILED
+    assert result.status is AttachmentStatus.READY
     assert result.text is None
     assert "文本层" in (result.error or "")
+    assert "页面图像" in (result.error or "")
 
 
 # --------------------------------------------------------------------------------------
@@ -134,21 +143,26 @@ def test_real_xlsx_extracts_sheets_and_admits_formula_cells_are_empty() -> None:
 
 
 @pytest.mark.parametrize(
-    "name",
+    ("name", "has_text"),
     [
-        "quarterly-report.pdf",
-        "embedded-subset-font.pdf",
-        "two-font-heading.pdf",
-        "scanned-invoice.pdf",
-        "meeting-notes.docx",
-        "budget-plan.xlsx",
+        ("quarterly-report.pdf", True),
+        ("embedded-subset-font.pdf", True),
+        ("two-font-heading.pdf", False),
+        ("scanned-invoice.pdf", False),
+        ("meeting-notes.docx", True),
+        ("budget-plan.xlsx", True),
     ],
 )
-def test_every_real_fixture_is_validated_and_kept_byte_for_byte(name: str) -> None:
-    """上传校验后的 `data` 必须与磁盘上的原件逐字节相同——包括解析失败的那些。
+def test_every_real_fixture_is_validated_and_kept_byte_for_byte(
+    name: str, has_text: bool
+) -> None:
+    """上传校验后的 `data` 必须与磁盘上的原件逐字节相同——包括读不出正文的那些。
 
-    失败的那几份（扫描件、字体码冲突）恰恰是用户最需要拿回原件的：我们读不出正文，
+    读不出正文的两份（扫描件、字体码冲突）恰恰是用户最需要拿回原件的：我们给不出正文字，
     但用户点下载时期望拿到的是他当初传的那份文件。
+
+    `has_text=False` 的两份现在**也是 `ready`**（ADR-027：页面渲染成图交给视觉模型），
+    所以「有没有正文」不能再拿来推「成不成功」——这两件事从这个版本起就是分开的。
     """
 
     data = fixture_bytes(name)
@@ -157,8 +171,10 @@ def test_every_real_fixture_is_validated_and_kept_byte_for_byte(name: str) -> No
     assert prepared["data"] == data
     assert prepared["size_bytes"] == len(data)
     assert prepared["kind"] == AttachmentKind.DOCUMENT.value
-    ready = prepared["status"] == AttachmentStatus.READY.value
-    assert (prepared["text_content"] is not None) is ready
+    assert prepared["status"] == AttachmentStatus.READY.value
+    assert (prepared["text_content"] is not None) is has_text
+    if not has_text:
+        assert "页面图像" in (prepared["error"] or "")
 
 
 def test_fixture_directory_is_fully_covered() -> None:

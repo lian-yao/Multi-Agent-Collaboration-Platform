@@ -97,10 +97,20 @@ export function shortenName(name: string, limit = 28): string {
   return `${name.slice(0, limit - 1)}…`;
 }
 
-/** 已发送附件的说明文案；`failed` 必须显式说清「没读出来」。 */
+/**
+ * 已发送附件的说明文案。
+ *
+ * `failed` 必须显式说清「没读出来」；`ready` 也可能带一句**降级说明**——服务端把这个
+ * 字段当「解析成功但有话要说」用（纯文本按替换字符解码、扫描版 PDF 改走页面图像，
+ * ADR-027）。这行说明比「文档 · 9.7 KB」重要得多：用户要能看出自己传的 PDF
+ * 是按图片读的，而不是以为正文被正常提取了。
+ */
 export function describeAttachment(attachment: Attachment): string {
   if (attachment.status === "failed") {
     return attachment.error || "未能解析出正文，已跳过内容。";
+  }
+  if (attachment.error) {
+    return attachment.error;
   }
   const labels: Record<string, string> = {
     image: "图片",

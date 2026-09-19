@@ -71,9 +71,11 @@ cd deploy; .\start.ps1                     # 起完整环境
 | U-11 | 动态编排计划与调度 | 计划解析只收合法形态（未知角色 / 重复 id / 自依赖 / 前向依赖 / 超步数一律整份丢弃）；规划模型抛错或返回垃圾文本时回退固定三步；依赖就绪度调度、失败连坐（含传递闭包）与最终交付物取值；Dapr 侧先规划后执行、子工作流实例 ID 稳定、业务终态与实例终态一致（ADR-019） | M5 |
 | U-12 | 多模态附件：分类 / 限额 / 解析 / 提示词 | 类型白名单（图片、文本与代码、pdf/docx/xlsx）与三类拒绝理由（空文件 / 超限 / 格式不支持）**都指名到具体文件**；文本解码的 `gb18030` 回退与可打印率闸门能挡住二进制；docx/xlsx 用标准库抽出段落与单元格；PDF 质量闸门把扫描件判为 `failed`，吃得下真实形态的 **FlateDecode 压缩流**与多页内容流；**内嵌子集字体靠 `/ToUnicode` 解回文字**（十六进制 CID 与字面量 CID 两种写法），**字体码冲突时安全拒绝**而不是产出通顺的乱码；`build_human_content` 无图片时返回**纯字符串**（不改变既有链路），有图片时升级为 content block；失败项必须出现在附件清单里；**原件对所有类型留档**（ADR-021 / ADR-024） | M5 |
 | U-13 | 沙箱可用性探测与容器硬化 | 套接字连不上时原因要点到 `/var/run/docker.sock` 并给出可照做的动作；**只 `ping` 通不算可用**（镜像不在宿主机同样报不可用）；`SANDBOX_AUTO_PULL_IMAGE` 打开时自拉一次并重试、拉取失败还原为 `SandboxUnavailable`；探测自身抛异常时仍返回原因而不冒泡；容器参数逐条钉住（`cap_drop=['ALL']`、`read_only`、`network_disabled`、`user=nobody`、`security_opt=['no-new-privileges']`、`/app` 与 `/tmp` 的 tmpfs、`macp.role` 标签）（ADR-023） | M5 |
-| U-14 | 真实二进制附件夹具 | 6 份**真实库产出**的文件（fpdf2 / python-docx / openpyxl）逐份跑过抽取：多页 PDF 读到第三页附录、内嵌子集字体靠 `/ToUnicode` 读到正文、两字体冲突**明确失败且一个字正文都没有**、扫描件失败原因点到「文本层」、docx 表格单元格出来、xlsx 声明「公式未求值」；每份都断言 `prepare_upload` 后的 `data` 与磁盘原件**逐字节相同**；夹具目录不允许有没人测的文件 | M5（§4.5） |
+| U-14 | 真实二进制附件夹具 | 6 份**真实库产出**的文件（fpdf2 / python-docx / openpyxl）逐份跑过抽取：多页 PDF 读到第三页附录、内嵌子集字体靠 `/ToUnicode` 读到正文、两字体冲突**一个字正文都不给**（改走页面图像，ADR-027）、扫描件不填正文且原因点到「文本层」、docx 表格单元格出来、xlsx 声明「公式未求值」；每份都断言 `prepare_upload` 后的 `data` 与磁盘原件**逐字节相同**；夹具目录不允许有没人测的文件 | M5（§4.5） |
 | U-15 | 会话级文件工具（Agent 读回附件） | 清单返回可读性（图片按类型算，不只看 `status`）；按 id / 完整名 / **唯一**子串解析附件，歧义时拒绝并列出候选；超 `session_file_max_chars` 截断并标注 `truncated`；图片与解析失败各给可行动提示；`SessionFileRegistry` 按会话追加且 `GET /tools` 静态目录不变；`session_scoped_registry` 在无会话/无条目时空转；**接线到 `advance_pipeline_stage` 后模型确实拿到这两个工具且调用被审计记录**（ADR-025） | M5（§4.5） |
 | U-16 | 附件回读的列契约 | 编译 `list_attachments_for_messages` 用的语句，断言选中列里**没有** `data` / `text_content`，`has_original` 是库侧 `data IS NOT NULL`，且 filter / order 仍在（ADR-024 遗留低效的回归）（§4.5） | M5（§4.5） |
+| U-17 | 编排层工具枚举不产生 IO（ADR-026） | 注册表 Server 的工具与内置合成、目录只取已发现的缓存（不重新握手）、`disabled` 摘除、重名内置优先、调用路由到真 Server（走真实 MCP 协议往返）、读表失败**只尝试一次**、刷新后目录跟随 | M5（§4.6） |
+| U-18 | 扫描版 PDF 的页面渲染（ADR-027） | 真实夹具渲出**结构自校验的 PNG**（签名 + 逐块 CRC + IHDR + 解压行长 + filter 字节全 0），多页按文档序；页数上限生效且**如实报告**少带了几页；单页超体积先重渲再丢页、合计到顶提前停；畸形 / 截断 / 渲染组件缺失一律降级而不抛；展开成逐页图片载荷（名字带「第k页/共N页」、id 沿用父附件）后附件计数**不虚高**；执行时渲染失败 → **这一次执行**降级为 `failed` 而不沿用上传时的说明 | M5（§4.7） |
 
 ### 2.2 集成测试（I）
 
@@ -865,8 +867,12 @@ D 用的是新客户端却同样失败 → **不是连接复用**，是网关侧
    也没有「动态的计划比固定三步更贴任务」的机器判据。
 3. **扫描件 OCR**：`scanned-invoice.pdf` 这类没有文本层的 PDF 只做到「明确失败 + 保留原件」，
    不做 OCR。这是范围选择，不是缺陷。
+   → **已由 §4.7 / [ADR-027](decisions/027-scanned-pdf-page-images.md) 推进**：仍然不做 OCR，
+   但页面会渲成图片走视觉通路，模型不再看到零内容。
 4. **多字体 PDF**：两种以上内嵌字体且码冲突时拒绝解析（第 2 条）。单字体覆盖了主流导出，
    但「同一份文档里正文与页眉用不同字体」的场景目前读不了。
+   → **已由 §4.7 / [ADR-027](decisions/027-scanned-pdf-page-images.md) 兜住**：文本通路仍然拒绝
+   （正确性优先），但这类 PDF 会走页面图像，实际可读。
 5. **视觉评测只测 10 例、单轮采样**：够当闸门，不够当准确率；`--repeat` 与更大用例集是
    后续的事。
 
@@ -936,6 +942,76 @@ PostgreSQL**（§1）。把它当作"测试环境特殊处理"就错了：它同
 `doc/testing.md` 第 201 行原写「见 §3.4 的漂移清单」，但**全文没有这一节**——
 §3.4 是「UI 评审预览」。悬空引用已删除，该行同时更新为准确表述：
 `disabled` 现在真的会摘掉工具（ADR-026），`allowAutoExecution` 仍然不消费（HITL 未做）。
+
+### 4.7 扫描版 PDF 走页面图像，不引 OCR 引擎（2026-09-20，成员 D）
+
+新增决策 [ADR-027](decisions/027-scanned-pdf-page-images.md)。§4.5 留下的边界是
+「扫描件只**明确失败** + 留原件」——原件留住了，但模型看到的是**零内容**。本轮把这个洞补上：
+抽不出正文的 PDF 把页面渲成 PNG，当普通图片附件走**已经付过成本的**视觉通路
+（`doc/evals/vision.md` 的 10 例实测 10/10）。仍然**不做 OCR**：识别错一个字产出的是一句
+通顺但错误的话，而页面图里模型自己会做视觉判断。
+
+**1. 改动**
+
+| 文件 | 变化 |
+| --- | --- |
+| `app/attachments/render.py` | **新增**：`render_pdf_pages()` / `encode_png()` / `RenderedPages` + 五个上限常量 |
+| `app/attachments/extract.py` | `extract_pdf()` 抽不到正文时先**探测渲染第 1 页**；新增 `_pdf_render_note()`；`_pdf_failure_reason()` 带上「转图也失败」的原因 |
+| `app/attachments/prepare.py` | 新增 `_expand_scanned_pdf()`，`load_payloads()` 把这类 PDF 展开成逐页图片载荷（**执行阶段**才渲） |
+| `app/attachments/prompt.py` | 附件数按 id 去重计；「没有可用正文」与「超出长度上限」拆成两句不同的说明；清单带上 `ready` 项的降级说明 |
+| `pyproject.toml` / `uv.lock` | `pypdfium2==5.13.0`（BSD-3 / Apache-2.0，wheel 自带 pdfium） |
+| `frontend/src/workspace/attachments.ts` | `describeAttachment` 显示 `ready` 项自带的降级说明（原来被静默丢掉） |
+
+**2. 验证**
+
+```bash
+./.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider tests/unit/test_pdf_render.py
+# 13 passed in 1.02s
+
+./.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider \
+  tests/unit/test_mcp_tools.py tests/unit/test_pipeline_tools.py \
+  tests/unit/test_session_files_tools.py tests/unit/test_dynamic_pipeline.py \
+  tests/unit/test_attachments.py tests/unit/test_attachment_fixtures.py \
+  tests/unit/test_pdf_render.py
+# 173 passed in 3.13s
+
+./.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider tests/integration/test_attachments_api.py
+# 10 passed in 2.09s
+
+cd frontend && npm run build                      # tsc --noEmit + vite build 通过
+node_modules/.bin/esbuild rendercheck/workspace-smoke.tsx ... && node "$TEMP/workspace-smoke.cjs"
+# 80/80 checks passed（+2 条本轮新增的文案断言）
+```
+
+`test_pdf_render.py` 的 13 例刻意**自带一个最小 PNG 解析器**（逐块校验 CRC、核对解压行长、
+检查每行 filter 字节）：编码器是自己手写的，用另一个库来"相信"它等于没测。
+另外两处实测数字值得记一笔：一页 A4 渲染 **0.02–0.3 秒**、PNG **17–52 KB**；
+两份原本读不出正文的夹具（`scanned-invoice.pdf`、`two-font-heading.pdf`）渲出来的图
+**肉眼完全可读**（发票金额与标题文字都清楚），这正是"渲染不是 OCR 的降级品"的证据。
+
+**3. 边界（如实记录）**
+
+- **超过 5 页只带前 5 页**：硬上限，靠载荷名字里的「第k页/共N页」与 `error` 里的说明如实报告，
+  也不做长图拼接——视觉模型会把长边缩到 1.5k 像素，拼起来每页只剩约 300px 高，文字全糊。
+- **不做空白页检测**：可靠的空白判断要逐像素统计（没有 numpy 时是慢路径），误判代价是
+  **丢掉真实内容**；宁可让模型自己说"这一页是空白的"。
+- **`read_session_file` 工具读不到扫描件正文**：工具结果只能是文本，无法回传图片；
+  它会看到 `status=ready` + `text=null` + 那句降级说明。
+- **镜像必须重建**：`uv sync --frozen` 从 `uv.lock` 装 pypdfium2，compose 里的 backend
+  不重建就还是老镜像；组件缺失时降级为 `failed` 并**点明 `pypdfium2`**，不是含混的"读不出来"。
+
+**4. 本轮验证边界（承接 §4.6）**
+
+本机 Docker Desktop **仍未启动**（PostgreSQL 5433 / Redis 6380 / 网关 3000 不可达），
+所以上面四组数字依旧是**不依赖存储**的那部分。全量回归（基线 724 passed / 7 skipped）
+与依赖真实 PG 的用例需要在 Docker 起来后补跑，命令见 §4.6。
+
+**5. 顺带修正的旧断言**
+
+两份夹具的期望从「明确失败」改成「`ready` + 页面图像」，这是 ADR-027 改的就是这条边界；
+但**核心不变量一条没松**：任何情况下都不许产出"像正文的垃圾"。
+`_assert_no_readable_text()` 把它固化成一个共用断言——`text` 必须是 `None` 或有真内容，
+且 `error` 必须交代清楚（能渲染就写"改走页面图像"，不能就报 `failed` + 原因）。
 
 ## 5. 失败处理约定
 - 任一用例失败：先复现，再定位，修复后将失败模式固化为新的测试或本文档约束；

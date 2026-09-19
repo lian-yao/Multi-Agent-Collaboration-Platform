@@ -19,6 +19,7 @@ import zlib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
+from app.attachments.render import PDF_RENDER_MAX_PAGES, RenderedPages, render_pdf_pages
 from app.attachments.spec import (
     MAX_TEXT_CHARS_PER_FILE,
     AttachmentKind,
@@ -481,9 +482,13 @@ def extract_pdf(data: bytes) -> ExtractionResult:
     2. 内嵌 TTF 子集字体写出的**十六进制串** `<hex> Tj`（`/Encoding /Identity-H`）：
        靠文档自带的 `/ToUnicode` 还原，这是真实生成器的主流形态。
 
-    失败出口是明确的：扫描件没有文本层、CMap 缺失或冲突、抽出的正文过短或可读字符
-    占比过低，都报 `FAILED` 并在 `error` 里说明原因。与其让模型读一段乱码后自信地
-    编出结论，不如让它知道这份附件没有可用正文。
+    抽不出正文时**不直接判失败**，先探一次「能不能把页面渲成图」（ADR-027）：能，就以
+    `status=ready` + `text=None` + 降级说明返回，让执行阶段把页面图像交给视觉模型；不能，
+    才报 `FAILED`。
+
+    三条出口都必须是明确的：有正文就给正文；没正文但有页面图就**说清这一点**；两样都
+    没有才失败，并在 `error` 里说明原因。与其让模型读一段乱码后自信地编出结论，不如让它
+    知道这份附件到底能给到什么。
     """
 
     if not data.startswith(b"%PDF"):
@@ -504,10 +509,20 @@ def extract_pdf(data: bytes) -> ExtractionResult:
     joined = re.sub(r"\n{3,}", "\n\n", joined)
 
     if len(joined) < 40 or _pdf_meaningful_ratio(joined) < 0.7:
+        # 只渲第一页做**探测**（几十毫秒）：要的是「这份文件在这台机器上能不能渲出来」，
+        # 真正的整份渲染留给执行阶段——那份页面图只在真的要送进模型时才有价值，
+        # 上传时就整份渲掉会把没人看的位图白算一遍。
+        probe = render_pdf_pages(data, max_pages=1)
+        if probe.usable():
+            return ExtractionResult(
+                status=AttachmentStatus.READY,
+                kind=AttachmentKind.DOCUMENT,
+                error=_pdf_render_note(conflicted, probe),
+            )
         return ExtractionResult(
             status=AttachmentStatus.FAILED,
             kind=AttachmentKind.DOCUMENT,
-            error=_pdf_failure_reason(conflicted),
+            error=_pdf_failure_reason(conflicted, probe),
         )
     return ExtractionResult(
         status=AttachmentStatus.READY,
@@ -516,23 +531,49 @@ def extract_pdf(data: bytes) -> ExtractionResult:
     )
 
 
-def _pdf_failure_reason(conflicted: bool) -> str:
+def _pdf_render_note(conflicted: bool, rendered: RenderedPages) -> str:
+    """「正文没抽出来，但页面图能用」的降级说明（ADR-027）。
+
+    这条说明走 `error` 字段，与纯文本编码降级（`extract_plain_text`）同一语义：
+    **解析成功但有话要说**。用户要能看出这份 PDF 为什么是「按图片读的」。
+
+    刻意写短：它同时会出现在消息气泡的附件条目上（`describeAttachment`），
+    一段话的解释在那里会挤成三行。详细的「为什么不用文本层」留在 ADR-027 里。
+    """
+
+    if conflicted:
+        head = "文档内多种字体子集共用了相同的字符码，无法安全还原文字"
+    else:
+        head = "这份 PDF 没有文本层（扫描件）"
+    note = head + "，已改用页面图像提供正文"
+    if rendered.total_pages > PDF_RENDER_MAX_PAGES:
+        note += f"（全 {rendered.total_pages} 页，只带前 {PDF_RENDER_MAX_PAGES} 页）"
+    return note + "。"
+
+
+def _pdf_failure_reason(conflicted: bool, rendered: RenderedPages | None = None) -> str:
     """失败原因要能指向下一步动作，而不是一句「读不出来」。
 
     「字体码冲突」与「扫描件」对用户是两件完全不同的事：前者换个导出方式（嵌出字体
     子集之外的写法、或改用文本/图片）就能解决，后者只能换成图片或补文本层。
+    ADR-027 之后，两条路都会**先试页面转图**；这里出现的失败，说明转图也没成——
+    所以要把转图失败的原因一并带上，否则运维看到的只是一句「读不出来」。
     """
 
     if conflicted:
-        return (
+        base = (
             "未能从 PDF 提取出可读正文：文档内多个内嵌字体子集使用了相同的字符码"
             "（Identity-H 子集字体各自从 0 起编号），无法安全还原文字，已跳过正文以避免"
             "填入乱码。可改用文本或图片形式提供，或导出为只使用一种字体的 PDF。"
         )
-    return (
-        "未能从 PDF 提取出可读正文（常见原因：扫描件没有文本层，"
-        "或字体子集缺少可用的 ToUnicode 映射）。已跳过正文，请改用文本或图片形式提供。"
-    )
+    else:
+        base = (
+            "未能从 PDF 提取出可读正文（常见原因：扫描件没有文本层，"
+            "或字体子集缺少可用的 ToUnicode 映射）。已跳过正文，请改用文本或图片形式提供。"
+        )
+    if rendered is not None and rendered.reason:
+        base += f"页面转图也未能完成：{rendered.reason}"
+    return base
 
 
 # --------------------------------------------------------------------------------------

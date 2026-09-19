@@ -9,6 +9,7 @@ from __future__ import annotations
 import io
 import zipfile
 import zlib
+from pathlib import Path
 
 import pytest
 
@@ -22,9 +23,11 @@ from app.attachments import (
     build_human_content,
     classify,
     describe_limits,
+    load_payloads,
     prepare_upload,
 )
 from app.attachments.extract import (
+    ExtractionResult,
     extract,
     extract_docx,
     extract_pdf,
@@ -33,6 +36,8 @@ from app.attachments.extract import (
 )
 from app.attachments.prompt import attachment_manifest
 from app.attachments.spec import sanitize_name
+
+FIXTURE_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "attachments"
 
 
 # --------------------------------------------------------------------------------------
@@ -259,12 +264,30 @@ def test_pdf_without_header_is_rejected() -> None:
     assert "%PDF" in (result.error or "")
 
 
+def _assert_no_readable_text(result: ExtractionResult) -> None:
+    """核心不变量：正文要么是真读出来的，要么就没有——**绝不允许「像正文的垃圾」**。
+
+    ADR-027 之后「抽不出正文」有两种收场，两种都算通过：
+
+    - 页面能渲成图 → `ready` + `text=None` + 降级说明里写明改走页面图像；
+    - 页面也渲不出来 → `failed` + 原因。
+
+    被否掉的只有第三种：报 `ready`、正文却是一串乱码，或者没有任何交代。
+    """
+
+    assert result.text is None
+    assert result.error
+    if result.status is AttachmentStatus.READY:
+        assert "页面图像" in result.error
+    else:
+        assert result.status is AttachmentStatus.FAILED
+
+
 def test_pdf_with_garbage_text_layer_is_rejected() -> None:
     # 模拟 CID 子集字体：字面量串解出来是控制字符，可读比例极低。
     payload = "".join(chr(1 + (index % 6)) for index in range(200))
     result = extract_pdf(_pdf_bytes(payload))
-    assert result.status is AttachmentStatus.FAILED
-    assert "未能从 PDF 提取出可读正文" in (result.error or "")
+    _assert_no_readable_text(result)
 
 
 def test_pdf_with_no_text_layer_is_rejected() -> None:
@@ -369,8 +392,7 @@ def test_pdf_without_tounicode_does_not_guess_hex_strings() -> None:
 
     data = _cid_pdf(_cid_content(CID_SENTENCE, hex_form=True), cmap=None)
     result = extract_pdf(data)
-    assert result.status is AttachmentStatus.FAILED
-    assert result.text is None
+    _assert_no_readable_text(result)
 
 
 def test_conflicting_tounicode_maps_refuse_instead_of_mixing_alphabets() -> None:
@@ -385,8 +407,10 @@ def test_conflicting_tounicode_maps_refuse_instead_of_mixing_alphabets() -> None
         cmap=_bfchar_cmap(real) + _bfchar_cmap(wrong),
     )
     result = extract_pdf(data)
-    assert result.status is AttachmentStatus.FAILED
-    assert result.text is None
+    _assert_no_readable_text(result)
+    # 码冲突这条要说得出「为什么不用这份正文」：ADR-027 之后它改走页面图像，
+    # 但绝不能补一句「按错表解码也行」。
+    assert "字符码" in (result.error or "")
     assert "字符码" in (result.error or "")
 
 
@@ -557,3 +581,129 @@ def test_image_without_bytes_is_not_emitted_as_block() -> None:
         "看图", [_payload(kind="image", mime="image/png", data=None, text=None)]
     )
     assert isinstance(content, str)
+
+
+def test_document_without_text_is_not_reported_as_over_limit() -> None:
+    """「没有可用正文」与「超出长度上限」是两件事，不能合成一句话。
+
+    前者是解析能力的结果（用户只能换格式），后者是截断策略的结果（用户拆小就能解决）。
+    把前者说成后者，等于让用户去做一件没用的事。
+    """
+
+    content = build_human_content(
+        "看附件",
+        [_payload(kind="document", name="scan.pdf", text=None, error=None)],
+    )
+    text = str(content)
+    assert "没有可用正文" in text
+    assert "超出长度上限" not in text
+
+
+# --------------------------------------------------------------------------------------
+# 扫描版 PDF → 页面图像载荷（ADR-027）
+# --------------------------------------------------------------------------------------
+
+
+def _patch_stored_row(monkeypatch: pytest.MonkeyPatch, name: str, payload_id: str = "s1") -> None:
+    """把执行阶段的取数换成内存里的一行：`load_payloads` 唯一的 IO 就是这一次查询。"""
+
+    row = prepare_upload(name, (FIXTURE_DIR / name).read_bytes(), "")
+    row["id"] = payload_id
+    monkeypatch.setattr(
+        "app.core.checkpoint.load_attachment_payloads", lambda ids: [row]
+    )
+
+
+def test_scan_pdf_expands_into_page_images_with_the_parent_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """扫描件在执行侧变成图片载荷：走的是**既有的** image_url 通路，不是新通路。"""
+
+    _patch_stored_row(monkeypatch, "scanned-invoice.pdf")
+
+    payloads = load_payloads(["s1"])
+
+    assert len(payloads) == 1
+    page = payloads[0]
+    assert page.kind == AttachmentKind.IMAGE
+    assert page.mime == "image/png"
+    assert page.data is not None and page.data.startswith(b"\x89PNG")
+    assert "第1页/共1页" in page.name
+    # id 沿用父附件：界面上是 1 个附件，内部拆成几页不该改变这个事实。
+    assert page.id == "s1"
+
+
+def test_scan_expansion_keeps_page_order_and_total_page_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """页码要能读出「看全了没有」：取名带「第 k 页/共 N 页」，且顺序即文档顺序。"""
+
+    from app.attachments import prepare as prepare_module
+    from app.attachments.render import RenderedPages
+
+    _patch_stored_row(monkeypatch, "scanned-invoice.pdf")
+    monkeypatch.setattr(
+        prepare_module,
+        "render_pdf_pages",
+        lambda data, **kwargs: RenderedPages(
+            pages=(b"\x89PNG-1", b"\x89PNG-2"), total_pages=9, skipped_pages=7
+        ),
+    )
+
+    payloads = load_payloads(["s1"])
+
+    assert [payload.name for payload in payloads] == [
+        "scanned-invoice.pdf · 第1页/共9页",
+        "scanned-invoice.pdf · 第2页/共9页",
+    ]
+    assert [payload.id for payload in payloads] == ["s1", "s1"]
+
+
+def test_render_failure_this_run_is_reported_as_failed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """上传时探测成功、执行时渲染失败 → 这一次执行必须说自己**什么都没拿到**。
+
+    沿用上传那句「已改以页面图像提供」就是撒谎：界面上一切正常、模型却两手空空，
+    正是本项目反复要避免的假信号。
+    """
+
+    from app.attachments import prepare as prepare_module
+    from app.attachments.render import RenderedPages
+
+    _patch_stored_row(monkeypatch, "scanned-invoice.pdf")
+    monkeypatch.setattr(
+        prepare_module,
+        "render_pdf_pages",
+        lambda data, **kwargs: RenderedPages(reason="模拟：渲染组件不可用"),
+    )
+
+    payloads = load_payloads(["s1"])
+
+    assert len(payloads) == 1
+    assert payloads[0].status == AttachmentStatus.FAILED
+    assert "页面转图失败" in (payloads[0].error or "")
+    # 附件仍然占一行：读不出内容不代表可以当它没传。
+    assert "未能解析" in str(build_human_content("看附件", payloads))
+
+
+def test_attachment_count_is_by_uploaded_file_not_by_page() -> None:
+    """展开成 N 张图之后，「上传了 N 个附件」仍要按**文件**数报。"""
+
+    pages = [
+        _payload(
+            id="s1",
+            name=f"scan.pdf · 第{index}页/共2页",
+            kind="image",
+            mime="image/png",
+            data=b"\x89PNG",
+            text=None,
+        )
+        for index in (1, 2)
+    ]
+
+    content = build_human_content("看看这份扫描件", pages)
+
+    assert isinstance(content, list)
+    assert "上传了 1 个附件" in str(content[0]["text"])
+    assert len([item for item in content if item["type"] == "image_url"]) == 2

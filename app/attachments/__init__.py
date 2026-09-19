@@ -4,6 +4,7 @@
 
 - `spec`：类型白名单、大小与数量限额、按「怎么被模型消费」分类；
 - `extract`：把字节解析成正文（文本类 / docx / xlsx / pdf）或图片载荷；
+- `render`：抽不出正文的 PDF 渲成页面 PNG（ADR-027，**不是 OCR**）；
 - `prompt`：把附件拼进 `HumanMessage` 的 content（文本内联 + 图片内容块）；
 - `prepare`：校验 + 解析 + 行 ↔ 载荷转换（**不含持久化**，持久化走 `api_store` 接缝）。
 
@@ -24,6 +25,11 @@ from app.attachments.prompt import (
     attachment_manifest,
     build_human_content,
 )
+from app.attachments.render import (
+    PDF_RENDER_MAX_PAGES,
+    RenderedPages,
+    render_pdf_pages,
+)
 from app.attachments.spec import (
     MAX_FILES_PER_MESSAGE,
     MAX_FILE_BYTES,
@@ -42,11 +48,13 @@ __all__ = [
     "MAX_FILE_BYTES",
     "MAX_TEXT_CHARS_PER_FILE",
     "MAX_TEXT_CHARS_TOTAL",
+    "PDF_RENDER_MAX_PAGES",
     "SUPPORTED_EXTENSIONS",
     "AttachmentKind",
     "AttachmentPayload",
     "AttachmentRejected",
     "AttachmentStatus",
+    "RenderedPages",
     "accept_attribute",
     "attachment_manifest",
     "build_human_content",
@@ -56,5 +64,6 @@ __all__ = [
     "load_payloads",
     "prepare_upload",
     "read_attachment_text",
+    "render_pdf_pages",
     "to_payload",
 ]

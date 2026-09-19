@@ -107,6 +107,9 @@
   静态 `collect` 收到附件），前端 `workspace-smoke` 增附件断言并纳入 `ui-preview.html`。
 - **未解决**：PDF 是「尽力而为」——扫描件与 CID 字体编码的 PDF 会被质量闸门判为 `failed`；
   图片理解依赖所选模型支持视觉（前端提示文案已写明这一点，不做臆测）。
+  → **已解决（2026-09-20）**：由 **[ADR-027](027-scanned-pdf-page-images.md)** 处理——
+  抽不出正文的 PDF 把页面渲成图片走本条 ADR 定下的 `image_url` 通路（`status` 由 `failed`
+  改为 `ready` + 一句降级说明），模型不再看到零内容。仍然不做 OCR。
 - **已解决（2026-09-17）**：下面这条代价由 **ADR-024** 处理——原件改为所有类型一律留档，
   `/content` 对所有类型可下载（图片 `inline`、其余 `attachment`），并新增 `has_original`
   让界面不给必然 404 的链接。原措辞保留如下：

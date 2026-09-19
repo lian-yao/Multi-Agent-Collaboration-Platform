@@ -277,6 +277,15 @@ Token 采样按阶段记录（total 1020 / 1344 / 3051）。踩坑与决策见�
   （`doc/evals/orchestration-ab.md`）。**本轮的验证边界**：两次评测都是单轮小样本；
   动态链路仍没有走 compose 的端到端回归；多字体 PDF 与扫描件 OCR 仍未做。
   详见 `doc/testing.md` §4.5。
+- 2026-09-20（登记 MCP Server 接入编排层 ADR-026 + 扫描版 PDF 走页面图像 ADR-027）：
+  **全量回归未跑**——本机 Docker Desktop 处于停止状态（PostgreSQL 5433 / Redis 6380 /
+  网关 3000 全不可达，且失败形态是 `TimeoutError` 而不是 `ConnectionRefused`，硬跑会把
+  用例卡满 TCP 超时）。只跑了**不依赖存储**的那部分：附件与编排相关 **173 例**
+  （含本轮新增的渲染 13 例）、附件接口契约 **10 例**，全绿。前端 `npm run build` 通过；
+  `config-smoke` **69/69**、`workspace-smoke` **80/80**（78 → 80，新增两条降级说明文案断言）。
+  **本轮的验证边界**：依赖真实 PG 的 `tests/unit/test_mcp_registry.py`（Server CRUD）与
+  全量基线（724 passed / 7 skipped）都要等 Docker 起来补跑；**backend 镜像未重建**，
+  pypdfium2 只有在重建后才进容器。详见 `doc/testing.md` §4.6、§4.7。
 - 注意事项：数据库读取用例使用 SQLite 内存表与注入目录数据，MCP 用例走内存协议往返而非
   跨进程 stdio，因此不代表真实 PostgreSQL、真实 MCP Server 或浏览器端到端验收。
   E-04/E-05 的 Web 侧与部署脚本已在本轮补上实跑证据（见上两条），
@@ -382,4 +391,29 @@ MCP Server 并点「发现」，`mcp_server_registry` 表与 §5.11 目录都齐
 **本轮验证边界**：Docker Desktop 已停（PostgreSQL / Redis / 网关全不可达），所以**全量回归
 未跑**，依赖真实 PG 的 `tests/unit/test_mcp_registry.py`（Server CRUD，正是本轮改到的对象）
 **未验证**。13 例新增用例与 95 例相关回归（不依赖存储）全绿，详情见 `doc/testing.md` §4.6。
+
+### 后续演进：扫描版 PDF 走页面图像，不引 OCR（2026-09-20，成员 D）
+
+上一轮结束时，附件链路还剩一个真实的洞：**抽不出正文的 PDF（扫描件、字体子集码冲突）
+对模型是零内容**——字节在库里、文件名在清单里、气泡上挂着那个附件，但它对回答毫无贡献。
+待办清单里那条叫「扫描件 OCR」。这一轮的回答是：**不做 OCR，把页面渲成图交给视觉模型**
+（[ADR-027](decisions/027-scanned-pdf-page-images.md)）。
+
+| 上一轮的状态 | 本轮结果 |
+| --- | --- |
+| 扫描件 / 码冲突 PDF 一律 `failed`，模型看不到内容 | 渲成页面 PNG 走**已经付过成本的** `image_url` 通路；`status` 变 `ready` + 一句降级说明，前端把这句说明显示出来 |
+| 「不做 OCR」是范围选择 | 补上**技术理由**：OCR 识别错一个字产出的是一句通顺但错误的话（本项目在字体码冲突上已经因为同一个理由拒绝过一次）；版面（表格线、印章、勾选）在纯文本输出里会丢 |
+| 渲染器怎么选 | pypdfium2（BSD-3 / Apache-2.0，wheel 自带 pdfium，直接从字节渲染不落临时文件）；**PyMuPDF 是 AGPL，不引** |
+| 上限口径 | 5 页 / 单页 1.2 MB / 合计 4 MB / 长边 2000px / 1.7 倍（≈122 dpi，对齐视觉模型的输入分辨率）。超限**丢页并如实报告**；不拼长图——拼起来每页只剩约 300px 高，文字全糊 |
+| 新依赖 | 只加一个：**不引 Pillow、不依赖 numpy**（后者只是传递依赖，写进去就会"本地能跑、镜像里炸"）。pdfium 给的是裸 RGB 缓冲，PNG 容器用标准库拼 |
+
+两份原本读不出正文的真实夹具（`scanned-invoice.pdf`、`two-font-heading.pdf`）渲出来的图
+**肉眼完全可读**。后者尤其能说明问题：标题 `Two Font Heading` 与正文
+`The body uses a second embedded font subset.` 都清清楚楚，而文本通路出于正确性**刻意**不给
+——渲染不是 OCR 的降级品，它是另一条独立通路。
+
+**本轮验证边界**：Docker Desktop 仍未启动 → 全量回归仍未跑（同上一轮）。已跑的四组：
+附件与编排相关 **173 例**、附件接口契约 **10 例**、前端 `npm run build` 与
+`workspace-smoke` **80/80**。**backend 镜像未重建**，pypdfium2 要重建后才进容器。
+详情见 `doc/testing.md` §4.7。
 

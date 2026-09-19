@@ -348,6 +348,27 @@ check(
   "失败项没有 error 时给兜底文案而不是空白",
   describeAttachment(sentAttachment({ status: "failed", error: null })).includes("已跳过内容"),
 );
+// ADR-027：`ready` 也可能带一句**降级说明**（扫描版 PDF 改用页面图像提供正文）。
+// 服务端把这个字段当「解析成功但有话要说」用，界面必须转述——报 ready 却什么都不说，
+// 用户会以为正文是被正常提取出来的。
+check(
+  "解析成功但有降级说明时显示该说明",
+  describeAttachment(
+    sentAttachment({
+      status: "ready",
+      kind: "document",
+      name: "扫描件.pdf",
+      error: "这份 PDF 没有文本层（扫描件），已改用页面图像提供正文。",
+    }),
+  ).includes("页面图像"),
+  describeAttachment(sentAttachment({ kind: "text" })),
+);
+check(
+  "没有降级说明的附件仍按「类型 · 体积」显示",
+  describeAttachment(
+    sentAttachment({ kind: "document", size_bytes: 40960, error: null }),
+  ) === "文档 · 40.0 KB",
+);
 check("没有附件时不渲染空容器", renderToStaticMarkup(<MessageAttachmentList items={[]} />) === "");
 // 原件留档（ADR-024）：所有类型都能拿回原件，且图片与文档的语义要分开。
 check(
