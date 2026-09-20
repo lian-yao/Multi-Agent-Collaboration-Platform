@@ -387,6 +387,23 @@ M5 闭环后又有两批改动合入 `master`，当时都未回填本文件的�
     jsdom 渲染冒烟 + 人工核对。`AGENTS.md` 技术栈一栏已改为与实现一致并指向 ADR-021；
     `doc/15 ...平台.md` 的建议方案措辞属事实源，改动需人类同意，本次未动。
   - 本轮为纯文档改动，未触碰代码，测试基线不变（623 passed / 7 skipped）。
+- 2026-09-20（Dapr Agents 最小可运行 POC 完成，关闭 ADR-004 的遗留要求）：
+  新增 `scripts/poc_dapr_agents.py`（`EchoAgentExecutor`，不需要模型凭据），
+  在本地 Dapr 运行时（CLI 1.18.2 + `dapr init` 默认组件）上跑通一个 `DurableAgent` 工作流。
+  - 实测：`dapr run --app-id macp-agents-poc --dapr-http-port 3510 --dapr-grpc-port 50001 --
+    uv run python scripts/poc_dapr_agents.py` → 工作流 `dapr.agents.MacpPocAgent.workflow`
+    实例 `8d74349217fc44998aba0f4c1e9a6e9e` 终态 **COMPLETED**、输出 `echo: …`、退出码 0；
+    第二个进程用 `--inspect` 读回同一实例的终态与输出（状态跨进程持久），状态存储里可见
+    `macp-agents-poc||dapr.internal.default.macp-agents-poc.workflow||<instance>||history-*`
+    与 `metadata` 键。
+  - **发现的 1.0.6 上游不一致**：executor 分支传裸绑定方法给 `ctx.call_activity`
+    （`agents/durable.py:675-679`），而活动注册与 LLM 分支都用 agent 前缀名
+    （`dapr.agents.<agent>.<method>`），于是报 `Activity function named 'run_executor'
+    was not registered`；POC 用显式注册未加前缀别名绕过。已写入 ADR-020 供反馈上游。
+  - 组件用 `dapr init` 的默认目录（指向 `dapr_redis` 6379、`actorStateStore=true`），
+    **不要求 compose 栈在跑**；仓库里 `deploy/dapr/components-local/` 指向 compose 的 6380，
+    栈未起时 sidecar 会因 pubsub 组件初始化失败而退出（本轮实测）。
+  - 本轮未改生产代码，测试基线不变（623 passed / 7 skipped）。
 - 注意事项：数据库读取用例的设计口径是 SQLite 内存表与注入目录数据；**集成层已由
   `tests/integration/conftest.py` 完成隔离（2026-09-20），见上一条与 `doc/testing.md`
   §4.5**——三层 conftest 现在都把 DSN 钉成内存 SQLite，并用 autouse fixture 替换

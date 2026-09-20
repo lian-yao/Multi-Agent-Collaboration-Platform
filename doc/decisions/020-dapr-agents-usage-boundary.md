@@ -40,12 +40,44 @@ OpenTelemetry 1.39.1，同时规定「Workflow 与状态读写能力应复用其
 | `dapr_agents.memory`（Dapr State Store 记忆） | 会话/长期记忆 Redis 契约（ADR-005、ADR-019） | 不采用：会让记忆事实源分裂 |
 | `AgentTool` | MCP 工具注册与调用（ADR-009、ADR-012） | 不采用：工具层已按 MCP 标准化 |
 
-4. **未完成项（待定，需方向决策）**：ADR-004 要求的「最小可运行 POC」**尚未做**。
-   已核实的可行性边界：`DurableAgent(...)` 构造即连接 Dapr sidecar（gRPC 50001），
-   没有 sidecar 会立刻 `UNAVAILABLE`，因此 POC 需要一次独立的 `dapr run`
-   （CLI 1.18.2 可用）+ 组件目录，且不与 compose 已占端口冲突。
-   做与不做、以及是否要在报告里给出「Dapr Agents 端到端跑通」的演示证据，
-   属方向与验收范围问题，由人类决定；若决定做，另开任务与 ADR 修订本节。
+4. **POC（2026-09-20 已完成）**：ADR-004 要求的「最小可运行 POC」落地为
+   `scripts/poc_dapr_agents.py`，在本地 Dapr 运行时上跑通一个 `DurableAgent` 工作流。
+
+### POC 结果（2026-09-20）
+
+```powershell
+# 跑一次（宿主机根目录；组件用 dapr init 默认目录，不要求 compose 在跑）
+dapr run --app-id macp-agents-poc --dapr-http-port 3510 --dapr-grpc-port 50001 `
+    -- uv run python scripts/poc_dapr_agents.py
+# 再起一个进程读回同一个实例（验证状态跨进程持久）
+dapr run --app-id macp-agents-poc --dapr-http-port 3510 --dapr-grpc-port 50001 `
+    -- uv run python scripts/poc_dapr_agents.py --inspect <instance_id>
+```
+
+| 项 | 实测结果 |
+| --- | --- |
+| Agent | `MacpPocAgent`（`EchoAgentExecutor`，不需要模型凭据） |
+| 注册 | `Registered workflows/activities on WorkflowRuntime for agent 'MacpPocAgent'` |
+| 工作流 | `dapr.agents.MacpPocAgent.workflow`，实例 `8d74349217fc44998aba0f4c1e9a6e9e` |
+| 终态 | `WorkflowStatus.COMPLETED`（Dapr 侧 `ORCHESTRATION_STATUS_COMPLETED`），脚本退出码 0 |
+| 输出 | `{"role": "assistant", "content": "echo: POC：用 echo 执行器回显这条任务，证明 Dapr Agents 工作流跑通。"}` |
+| 持久化 | 第二个进程 `--inspect` 读回同一实例：`COMPLETED` + 同一输出；状态存储里可见 `macp-agents-poc\|\|dapr.internal.default.macp-agents-poc.workflow\|\|<instance>\|\|history-0000NN` 与 `metadata` 键 |
+| 前提 | 需要 sidecar：`DurableAgent(...)` 构造即连 gRPC 50001，无 sidecar 直接 `UNAVAILABLE` |
+
+复跑（同一脚本、新实例 `fdcf795411b149a0a65028d1fef0a028`）同样 `COMPLETED`，
+`--inspect` 同样读回完整输出——结论可重复，不是一次性偶然结果。
+
+**POC 中发现的上游不一致（dapr-agents 1.0.6，值得反馈）**：活动注册用的是 agent 前缀名
+`dapr.agents.<agent>.<method>`，标准 LLM 分支也按前缀名调用
+（`ctx.call_activity(self._activity_name(self.call_llm), ...)`），但 **executor 分支**
+（`agents/durable.py` 第 675-679 行）传的是裸绑定方法 `self.run_executor`，运行时据此查找
+未加前缀的 `run_executor`，报 `Activity function named 'run_executor' was not registered`、
+工作流终态 FAILED。POC 用「显式注册一个未加前缀的活动别名」绕过
+（`runtime.register_activity(agent.run_executor)`），上游修复后该行可删。
+
+**结论**：`dapr-agents` 1.0.6 的 Durable Workflow 链路在本地 Dapr 运行时上可用，
+但走 executor 形态需要补一个注册别名；生产链路继续用 `dapr.ext.workflow` + 固定三步编排，
+不引入该高层封装（理由见上文决策 2/3）。
 
 ## 影响
 
