@@ -46,6 +46,14 @@ cd deploy; .\start.ps1                     # 起完整环境
 > 不要为了让用例通过而清空开发环境里的 `provider_configs` 或 Redis 的 `provider:config`
 > ——那是真实配置（含在用凭据）。
 
+> **2026-09-16 收敛（合入 C-1 后）**：`tests/unit/conftest.py` 与 `tests/e2e/conftest.py`
+> 已在导入 `app.*` 之前把 DSN 钉成内存 SQLite（`eda7758`），所以**单元层与 E2E 层现在
+> 无外部服务也能跑完**，上面那条「阻塞在连接重试上」的风险只剩 `tests/integration/`——
+> 该目录至今没有 conftest，DSN 落到 `app/core/storage.py` 的默认
+> `postgresql+psycopg://postgres:postgres@localhost:5433/multi_agent`。
+> 要把单元/E2E 用例指到真实库，设 `MACP_UNIT_DATABASE_URL` / `MACP_E2E_DATABASE_URL`
+> （优先级高于运行环境里已有的 `DATABASE_URL`）。
+
 测试替身：
 
 - LLM 使用 `FakeChatModel`（已有实现），按用例注入固定回复；
@@ -68,6 +76,8 @@ cd deploy; .\start.ps1                     # 起完整环境
 | U-08 | 沙箱边界拒绝越权 | 代码执行工具拒绝网络/危险命令 | M4 |
 | U-09 | 流水线接入 MCP 工具 | 注册表工具被发现，按模型 `tool_calls` 调用并回填观察；失败记为 failed 且不中断；阶段载荷可序列化 | M4 |
 | U-10 | 行为日志事件 | 阶段开始/结束/失败与工具调用输出 `event=... field=value` 结构化日志，含 workflow_id 与耗时 | M4 |
+| U-11 | 会话与长期记忆的 Redis 读写 | `session:{id}:messages` List 追加与「读最近 N 条」、`agent:{id}:memory` Hash 覆盖写、序列化往返、客户端不可用时按契约降级（ADR-005 修订，2026-09-16 补） | M4（增量） |
+| U-12 | 沙箱 Docker 后端隔离与 fail-closed | 容器隔离边界参数齐全、网络仅在显式允许时打开、超时杀容器且不报成功、Docker 不可用时报 sandbox unavailable、输出超限截断并标记（2026-09-16 补，`38200cc` 只加测试） | M4（增量） |
 
 ### 2.2 集成测试（I）
 
@@ -83,6 +93,7 @@ cd deploy; .\start.ps1                     # 起完整环境
 | I-08 | 配置热更新 | PATCH agent 后新执行使用新配置 | M4 |
 | I-09 | D7-D8 只读巡检接口 | Provider/Agent/工具/调用/指标接口的分页、`availability` 区分「未接入」与「零条记录」、404/422/503 契约 | M4 |
 | I-10 | Provider 配置读写 | `GET/PUT /api/v1/config/provider`：200 生效值与回退、422 校验、503 写失败、裸请求可写（不鉴权，ADR-015）；覆盖值落 `provider_configs` 并镜像 Redis，响应与日志不含密钥（ADR-014） | M4 |
+| I-11 | 注册表与 Agent 目录 API | `doc/api.md` §5.7、§5.9–§5.12：Provider / 模型 / MCP Server 注册表与 Agent 角色目录的 CRUD 契约、404/409/422 校验、预设目录、批量引入去重与 `existing` 计数（ADR-017，2026-09-16 补） | M5 后（ADR-017） |
 
 ### 2.3 端到端测试（E）
 
@@ -93,6 +104,7 @@ cd deploy; .\start.ps1                     # 起完整环境
 | E-03 | 故障恢复 | 执行中断掉 backend → 重启 | 任务从断点续跑成功，无状态丢失 | M3 起可演练，M5 验收 |
 | E-04 | Web 会话管理 | UI 创建会话、发消息、暂停/恢复 | UI 与 API 状态一致 | M5 |
 | E-05 | 一键部署 | `start.ps1` → 健康检查 → `stop.ps1` | 全部服务健康 | M5 |
+| E-06 | MCP 跨进程 stdio 链路 | 真实启动 `python -m app.mcp.server` 子进程，经 stdio 握手并发现工具 | 子进程可启动、stdout 不被日志污染、工具目录跨进程一致（2026-09-16 补，关闭 I-06 的遗留缺口） | M4（增量） |
 
 E-04/E-05 目前的自动化程度（成员 D D9-10）：会话生命周期（创建 → 暂停 → 暂停期提交被拒
 → 恢复 → 回读）与「前端容器 + nginx `/api` 反代」走 `tests/e2e/test_live_e2e.py` 的
@@ -306,10 +318,10 @@ npm i jsdom && node verify_preview.mjs frontend/rendercheck/ui-preview.html
 | U-08 沙箱边界拒绝越权 | 通过 | `tests/unit/test_sandbox_policy.py`：Python/Shell 越权拒绝、策略先于后端、`denied` 后端不降级执行（ADR-012） |
 | U-09 流水线接入 MCP 工具 | 通过（含真实模型验收） | `tests/unit/test_pipeline_tools.py`（15 例全绿，含「阶段活动消费默认注册表」，ADR-009）。真实路径已验收：API 模型下 collector/analyst 两阶段各产生一次 `calculator` 调用（`21*2`、`21+21`，`succeeded`） |
 | U-10 行为日志事件 | 通过 | `tests/unit/test_observability.py`（ADR-010） |
-| I-06 MCP 工具发现与调用 | 通过（缺跨进程 stdio） | `tests/unit/test_mcp_tools.py` 走 `mcp.shared.memory` 的**真实 MCP 协议往返**（发现、调用、错误还原、目录）；真实流水线验收（2026-09-15）：Workflow 内 2 次 `calculator` 调用落 `tool_calls` 并读回（`21*2`、`21+21` → `42`）；仍缺跨进程 stdio 传输的端到端用例 |
+| I-06 MCP 工具发现与调用 | 通过（跨进程 stdio 已补齐） | `tests/unit/test_mcp_tools.py` 走 `mcp.shared.memory` 的**真实 MCP 协议往返**（发现、调用、错误还原、目录）；真实流水线验收（2026-09-15）：Workflow 内 2 次 `calculator` 调用落 `tool_calls` 并读回（`21*2`、`21+21` → `42`）。原先遗留的「跨进程 stdio 传输端到端用例」已由 E-06（`tests/e2e/test_mcp_stdio_e2e.py`，2026-09-16）补齐 |
 | I-07 可观测数据输出 | 通过 | `tests/unit/test_observability_metrics.py`：Span 与属性/异常、指标去重、Prometheus 文本、`metrics` 表写入（SQLite 与表缺失两种路径）、降级不阻塞；`metrics` 表已由 `app/core/checkpoint.py::MetricRecord` 建出，2026-09-15 在真实 PostgreSQL 上跑通采样落库与 `/api/v1/metrics` 读回（16 条采样），真实 Prometheus 上抓到 `backend`/`dapr-sidecar` 两个 `up` target（43 条 `macp_*` 序列），真实 Jaeger 上查到 `stage.run`/`llm.chat` span；Token 按真实模型名归因（F-03 回归，见 §4.2） |
 | I-08 配置热更新 | 通过 | `PATCH /api/v1/config/agents/{agent_id}` 已实现（`doc/api.md` §5.7、ADR-013）：覆盖写 `agent_configs`，阶段活动执行时解析生效配置，无需重启；单元用例 `tests/unit/test_agent_config.py`（合并/校验/回退/表契约），集成用例 `tests/integration/test_config_api.py`（404/422/503/200 与生效值，裸请求可写见 ADR-015）；真实 PostgreSQL 上已跑通写入—读回—新执行生效 |
-| I-09 只读巡检接口 | 通过 | `tests/integration/test_inspection_api.py`；覆盖分页、`availability` 区分「未接入」与「零条记录」、默认工具目录接线（`/tools` 返回 4 个注册工具）与 Prometheus 文本端点（`/metrics`）；用 SQLite 内存表与注入目录数据，不等于真实 PostgreSQL/MCP 验收 |
+| I-09 只读巡检接口 | 通过（本轮 3 条转红，见 §4.4） | `tests/integration/test_inspection_api.py`；覆盖分页、`availability` 区分「未接入」与「零条记录」、默认工具目录接线（`/tools` 返回 4 个注册工具）与 Prometheus 文本端点（`/metrics`）。**2026-09-16 修正**：此前写的「用 SQLite 内存表与注入目录数据」只对巡检存储成立——该文件没有屏蔽 Provider 覆盖，而 `tests/integration/` 又没有固定 DSN 的 conftest，Provider 相关 3 条实际读的是开发库，因此不等于真实 PostgreSQL/MCP 验收 |
 | I-10 Provider 配置读写 | 通过（含真实环境冒烟） | 单元与集成用例：`tests/unit/test_provider_config.py`（26 例：表契约、合并顺序、Redis 命中/回源/回填、镜像失败降级、密钥脱敏、字段校验）与 `tests/integration/test_provider_config_api.py`（11 例：422/503/200、显式 null 清除、provider 切换、裸请求可写）。2026-09-15 真实环境冒烟（本机 PostgreSQL 5433 + Redis 6380 + uvicorn）：`PUT` 不带任何令牌 → `200` 且响应不含密钥；`GET` 回读生效值；`/providers` 反映新值；删除 `provider:config` 后 `GET` 仍返回存储值并自动回填缓存。测试数据已清理 |
 
 2026-09-15（M4 收口后）：`uv run pytest -q` → **294 passed / 1 failed**，
@@ -391,8 +403,10 @@ F-04 `metrics` 表（B）、`/tools` 接线与 Prometheus 文本端点（D）、
 ——**三项均已落地**（测试全绿、真实库与容器侧均已验收）；
 F-05 poc/故障演练路径业务终态与 Dapr 终态不一致（B，**已修复**：`session_id` 不再硬编码，
 CLI 对运行时终态非 `COMPLETED` 即非零码退出）；
-F-06 会话/长期记忆未接入编排（`app/memory/` 只有 Protocol，历史消息既不落记忆也不回注
-Prompt，仅 `GET /messages` 读取）——**本轮只记录，未处置**。
+F-06 会话/长期记忆未接入编排（当时 `app/memory/` 只有 Protocol，历史消息既不落记忆也不
+回注 Prompt，仅 `GET /messages` 读取）——**当时只记录，未处置**。2026-09-16 合入 C-1 后
+Redis 实现已落地（`app/memory/redis_store.py`，U-11 覆盖），但编排与 API 仍无调用方，
+即**「实现已就绪、接线未做」**，见 §4.4。
 
 ### 4.3 Web UI 与部署编排（2026-09-15，成员 D D9-10）
 
@@ -462,6 +476,18 @@ I-06 `/workflows/{id}/tool-calls` 返回 `availability=available`；E-04 API 侧
 显式 `PUT` 全 `null` 清除覆盖后这 8 条立即恢复通过（38 passed），全量回到
 **371 passed / 7 skipped**。建议后续给这批用例加一个「清空 Provider 覆盖」的 fixture。
 
+**2026-09-16 更新（合入 PR #9 与 C-1 后）**：单元层那部分**已修**——`eda7758` 让
+`tests/unit/conftest.py` 在导入 `app.*` 之前把 DSN 钉成内存 SQLite，
+`tests/unit/test_agent_config.py` 的同类失败归零。**集成层仍未修**：实测
+`uv run pytest -q` → **606 passed / 5 failed / 7 skipped**（618 例），5 条失败全部来自
+`tests/integration/`（`test_config_api.py` 2、`test_inspection_api.py` 3）——该目录没有
+conftest，DSN 落到 `app/core/storage.py` 的默认开发库，而这些用例只 monkeypatch 了
+`get_settings` / `agent_config_reader`，没有屏蔽库里的 `provider_configs` 行。
+另需修正上文计数：本轮实测的单元层失败是 **2 条**
+（`test_resolve_returns_base_when_agent_has_no_override`、
+`test_resolve_falls_back_when_read_fails`），不是「3 条」，以实测为准。
+收敛后的建议不变：给 `tests/integration/` 补 conftest（按 §1 的 DSN 钉法）。
+
 **未完成 / 未验**（不隐瞒）：
 
 1. 依赖模型的 4 条**已补跑通过**（见 §4.3.1）。仍属未验的是环境性路径：本机无公网出口，
@@ -469,10 +495,32 @@ I-06 `/workflows/{id}/tool-calls` 返回 `availability=available`；E-04 API 侧
    在本机**无法**验收——E-01/E-02 目前的通过依赖模型当次未选该工具。
 2. 浏览器渲染，以及「发消息 → 观察 Agent 执行台推进 → 展开协作详情」仍是人工步骤：
    本轮只给核对清单，没有引入浏览器自动化（前端门禁是类型检查 + 构建，见 §3.3）。
-3. 「任务记录」页只显示当前会话最近一次执行（`App.tsx::History`，页面已标注
-   「完整历史查询尚未接入」）。做完整历史需要新增 `GET /api/v1/workflows` 一类的列表
-   接口，属新增能力，本轮未做；因此**不据此宣称** `分工.md` §7 的「Web UI 可展示任务历史」
-   已闭环。
+3. 「任务记录」页只显示当前会话最近一次执行（`App.tsx::History`）。**已闭环**
+   （2026-09-16 回填）：PR #9 新增 `GET /api/v1/sessions` 枚举接口（`doc/api.md` §5.13）
+   与删除接口（§5.14），记录页因此从三分区扩为四分区并新增「历史会话」分区，
+   `doc/roadmap.md` 的 M5 状态同步记为已闭环。
+
+### 4.4 合入 PR #9 与 C-1 后（2026-09-16）
+
+M5 闭环后合入的两批改动（PR #9 的注册表/工作台，C-1 的记忆/MCP/沙箱/测试基座）当时没有
+回填本文档，此处按实测补齐。运行环境：本机 compose 全栈在跑（backend 8000、PostgreSQL
+5433、Redis 6380 等），生效 Provider 仍是 2026-09-15 保存的
+`openai` / `deepseek-flash` / `https://api.deepseek.com`。
+
+```bash
+uv run pytest -q          # 618 用例：606 passed / 5 failed / 7 skipped，17.01s
+uv run pytest -q -rs      # 7 skipped 全部为 MACP_E2E_LIVE=1 控制的 test_live_e2e.py
+```
+
+| 项 | 状态 | 说明 |
+| --- | --- | --- |
+| 用例规模 | 371 → 618 | PR #9 的 `tests/integration/test_registry_api.py`（52 例）与 C-1 的 `test_memory_redis_store.py`（19）、`test_sandbox_docker_runtime.py`（13）、`test_mcp_stdio_e2e.py`（5）等未在旧记录中体现 |
+| 单元层隔离 | 已修 | `eda7758`：`tests/unit/conftest.py` 钉内存 SQLite，`test_agent_config.py` 归零 |
+| 集成层隔离 | **未修** | `tests/integration/` 无 conftest，读到开发库真实 `provider_configs` 行，5 条失败；建议按 §1 的 DSN 钉法补 conftest |
+| 记忆实现 | 代码就绪、**未接线** | U-11 覆盖 `app/memory/redis_store.py`；`app/api`、`app/orchestration`、`app/workflows` 无调用方（F-06） |
+| MCP 跨进程 stdio | 已补 | E-06（`tests/e2e/test_mcp_stdio_e2e.py`）真实启动 `python -m app.mcp.server` 子进程 |
+| 沙箱 Docker 后端 | 只补了测试 | `38200cc` 的 diff 内无 `app/sandbox` 变更，提交信息所述的「隔离参数」没有代码改动 |
+| `.env_example` | 已补、此前无文档引用 | `31d9cef` 在原文件上补 65 行（`TOOL_` / `MCP_` / `SANDBOX_` / `OBS_` 四段）；`doc/deployment.md` 的环境变量表已补上指向它的说明 |
 
 ## 5. 失败处理约定
 
