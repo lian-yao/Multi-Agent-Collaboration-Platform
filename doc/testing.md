@@ -385,10 +385,10 @@ OpenAI 兼容 API，表中「未达成」的结论已在 API 模型下复测通�
 | --- | --- | --- |
 | E-01 单 Agent 问答 | 通过（结论分提供方） | 真实环境跑通：会话→消息→轮询→`completed`，报告消息落库。答复内容在 Ollama `qwen2.5-coder:7b` 下**未达成**——报告正文是 `{"name": "web_search", ...}` 这样的工具调用 JSON 文本（缺口 F-02）；换 OpenAI 兼容 API（`deepseek-flash`）后达成：报告 1877 字并引用工具返回值 `42`（见 §4.1 与 `doc/roadmap.md` 验证记录） |
 | E-02 多 Agent 协作 | 通过（结论分提供方） | 真实环境三步依次完成（`checkpoint.completed_steps=[collect, analyze, report]`，2-4s/条）；同受 F-02 影响（Ollama 下 `tool_calls=0`，工具未真正执行），API 模型下 collector/analyst 各产生一次 `calculator` 调用。2026-09-15 晚以 `gpt-5.5`（API 提供方、`MACP_E2E_TIMEOUT=900`）复测：workflow `completed` 330.9s，报告 3983 字符结构化 Markdown（见 §4.3.1） |
-| E-03 故障恢复 | 通过（旧数据有缺口） | `scripts/measure_recovery.py`：不可用 2.62s、**恢复耗时 ≤0.2s（目标 <5s）**、业务状态保留 `completed`/三步齐全；该次演练的 Dapr 终态为 FAILED（缺口 F-05，**已由 B 修复**），修复后的演练需重跑以确认两个终态同时成功。数据取自 poc 的确定性（假模型）路径 |
+| E-03 故障恢复 | 通过 | `scripts/measure_recovery.py`：不可用 2.62s、**恢复耗时 ≤0.2s（目标 <5s）**、业务状态保留 `completed`/三步齐全；该次演练的 Dapr 终态为 FAILED（缺口 F-05，**已由 B 修复**）。数据取自 poc 的确定性（假模型）路径；**2026-09-20 已在真实 API 提供方下重测，两个终态同时成功，见 §4.6** |
 | E-04 Web 会话管理 | 部分（Web 侧数据路径已验，渲染未验） | API 侧通过：暂停 → 新消息被 409 `SESSION_PAUSED` 拒绝 → 恢复 → 原 Workflow 续跑 `completed`（2026-09-15 晚 `gpt-5.5` 下复测 88.3s 到 `completed`，见 §4.3.1）。Web 侧由成员 D 补自动化（§4.3）：经 nginx 反代跑完「新建任务 → 暂停 → 暂停期提交被拒 → 恢复 → 回读」六步；浏览器**渲染效果**仍需人工按 `doc/deployment.md` 的核对清单确认 |
 | E-05 一键部署 | 通过（2026-09-15，成员 D 实跑） | `start.ps1` 退出码 `0` 且 Frontend / Backend / Dapr Sidecar 三段健康检查全部打印 `is healthy`，随后打印 7 行访问地址；`stop.ps1` 退出码 `0` 且 `docker ps -a` 中项目容器全部移除。过程中修复了两个脚本在 Windows PowerShell 5.1 下被 `docker compose` 的 stderr 中断的缺陷（见 §4.3）。容器侧 `/metrics`、`/tools` 与 Prometheus/Jaeger 已由 B/D 验收（`doc/roadmap.md`「M4 代码落地情况」） |
-| 并发会话（§3.2） | 通过 | 10 会话/并发度 10：成功率 1.0、HTTP 5xx 0、受理延迟 p50 0.46s、端到端 p50 16.54s / p95 18.61s、Token 合计 18650（621.7/次调用）、工具调用成功率**无样本**（0 次；Ollama 下模型未发起工具调用，F-02 之外的模型行为差异，API 模型下重测后应不再为 0） |
+| 并发会话（§3.2） | 通过 | 10 会话/并发度 10：成功率 1.0、HTTP 5xx 0、受理延迟 p50 0.46s、端到端 p50 16.54s / p95 18.61s、Token 合计 18650（621.7/次调用）、工具调用成功率**无样本**（0 次；Ollama 下模型未发起工具调用）。**2026-09-20 已在真实 API 提供方下重测（p50 54.63s、Token 4241.1/次、工具成功率 0.6798），见 §4.6；上表数字以 §4.6 为准** |
 
 合入 `master` 后（2026-09-15）：`uv run pytest -q` → **371 passed / 0 failed / 5 skipped**
 （5 skipped 为需要 compose 的 `test_live_e2e.py`；比先前 378 例少，是 master
@@ -417,6 +417,10 @@ Redis 实现已落地（`app/memory/redis_store.py`，U-11 覆盖），但编排
 受理用户消息与终态回写报告时写记忆，阶段活动读最近 10 条注入提示词（剔除本轮）——
 用例 U-13 与 E-07；长期记忆仍是「实现就绪、无调用方」，需显式「记住这个」交互或抽取流程，
 届时另开 ADR。
+F-07 阶段空 content 静默降级下游（C 侧，**2026-09-20 新增，未处置**）：真实 API 提供方下
+模型调用了工具但最终没有输出文本时，阶段仍记 `completed`、上游内容为空，最终报告退化成
+「输入缺失/阻塞」说明而不报错。当天 live 运行的 18 份阶段载荷中有 10 份 `content` 为空；
+已排除 F-01/F-06 改动的影响（live 用例是新会话、无历史）。详见 §4.6 与 ADR-016 修订。
 
 ### 4.3 Web UI 与部署编排（2026-09-15，成员 D D9-10）
 
@@ -580,6 +584,34 @@ REDIS_URL=redis://localhost:6399/0 uv run pytest -q
 
 两处契约用例的失败信息只打印 `provider` / `model`，不带 `api_key`——覆盖行里的凭据
 不应因为一次断言失败就进测试日志。
+
+### 4.6 真实 API 提供方下的重测（2026-09-20）
+
+compose 全栈 + 真实提供方（`openai` / `deepseek-flash` / `https://api.deepseek.com`，
+由 `PUT /api/v1/config/provider` 保存）上的重测，取代 §4.2 里 Ollama/poc 路径的数字
+（详细口径与对照见 ADR-016 的 2026-09-20 修订）。
+
+| 场景 | 命令 | 结果 |
+| --- | --- | --- |
+| live 验收（E 系列 7 条） | `MACP_E2E_LIVE=1 MACP_E2E_TIMEOUT=900 uv run pytest tests/e2e/test_live_e2e.py -q -s` | **7 passed，190.37s** |
+| 并发（E 系列性能） | `uv run python scripts/perf_concurrency.py --sessions 10 --concurrency 10 --timeout 900` | 10/10 完成、成功率 1.0、总耗时 75.836s；受理延迟 p50 0.348s；端到端 p50 **54.628s** / p95 74.571s；Token 合计 432596（4241.1/次）；工具调用成功率 **0.6798（138/203）** |
+| 恢复（E-03） | `uv run python scripts/measure_recovery.py --timeout 900` | 重启 3.07s；**恢复 2.48s（目标 <5s）**、回填等待 0.00s；业务 `completed` 三步齐全且 Dapr 终态 **COMPLETED** |
+
+**F-01/F-06 的真实链路定向验证**（同一次 live 会话 `33c0700b-…`）：
+
+- 第一轮要求「两阶段各调一次 calculator（21*2 / 21+21）」→ workflow `completed`（21.0s），
+  `GET /workflows/{id}/tool-calls` 返回 **4 条** `calculator` 记录（`21*2` ×2、`21+21` ×2，
+  均 `succeeded`、ID 互不相同）——修复前同 (scope, index, tool) 的两阶段调用会被合并成 1 条
+  并返回首阶段缓存，这里是 F-01 修复后的真实链路证据；报告 1962 字且含 `42`。
+- 第二轮在同一会话追问「不要调用工具，只根据上文回答 21*2 的结果」→ `completed`（27.1s），
+  回答明确引用「阶段一 `21*2` 与阶段二 `21+21` 的结果均为 42」——**F-06 多轮上下文继承在
+  真实模型下成立**（会话记忆写入 + 阶段提示词注入生效）。
+
+**同轮暴露的 F-07**：当天 live 运行的 18 份阶段载荷里有 10 份 `content` 为空字符串，
+下游阶段因此拿到空上游内容、最终报告退化为「输入缺失/阻塞」说明，但 workflow 仍
+`completed`（例：`bee18d15-…:collect/analyze/report` 全空）。已排除本轮 F-01/F-06 改动：
+live 用例使用新会话（历史为空、提示词与改动前一致），且无容器回归网全绿。
+处置方向（fail-fast / 空输出重试一次 / 仅告警日志）待产品口径确认，见 ADR-016 修订。
 
 ## 5. 失败处理约定
 

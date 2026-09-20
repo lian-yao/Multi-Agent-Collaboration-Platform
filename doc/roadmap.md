@@ -92,7 +92,7 @@ Token 采样按阶段记录（total 1020 / 1344 / 3051）。踩坑与决策见�
 | 分工 | 负责 | 状态 | 落地内容 |
 | --- | --- | --- | --- |
 | 端到端测试补缺 | C | 已完成 | `tests/e2e/`：无容器回归网（真实 API/Workflow/流水线/工具/可观测，仅替换 Dapr 运行时与 PostgreSQL 落库）与真实 compose 验收入口（默认 skip，`MACP_E2E_LIVE=1` 启用，覆盖 E-01/E-02/E-04/I-06/E-05 健康）；E-03 由 `scripts/measure_recovery.py` 脚本化测量；并发会话由 `scripts/perf_concurrency.py` 测量（ADR-016） |
-| 性能数据 | C | 已完成 | 10 并发会话：成功率 1.0、受理延迟 p50 0.46s、端到端 p50 16.54s / p95 18.61s、Token 18650（621.7/次）；E-03 恢复耗时 ≤0.2s（目标 <5s）、不可用 2.62s；数据采集通道与口径见 ADR-016 |
+| 性能数据 | C | 已完成（**2026-09-20 真实 API 提供方重测，以本节末条为准**） | 10 并发会话：成功率 1.0、受理延迟 p50 **0.348s**、端到端 p50 **54.63s** / p95 74.57s、Token **432596（4241.1/次）**、工具成功率 **0.6798**；E-03 恢复 **2.48s**（目标 <5s）、重启 3.07s、两个终态同时成功。原 Ollama/poc 口径：p50 16.54s、Token 621.7/次；通道与口径见 ADR-016 |
 | Web UI 与部署编排 | D | 已完成（浏览器渲染除外） | `deploy/start.ps1` / `stop.ps1` 全流程实跑通过，并修复两处 Windows PowerShell 5.1 下被 `docker compose` stderr 中断的缺陷；E-04 的 Web 侧数据路径（经 nginx 反代）补了自动化用例；`doc/deployment.md` 补「演示与验收」与浏览器核对清单。2026-09-15 晚又用 `gpt-5.5` 把依赖模型的 4 条 live 用例补跑通过（7 passed）。详见 `doc/testing.md` §4.3 与 §4.3.1 |
 
 - **M5 状态**：E-01/E-02 的「结构化报告」曾因缺口 F-02 不达成，该缺口已在
@@ -404,6 +404,34 @@ M5 闭环后又有两批改动合入 `master`，当时都未回填本文件的�
     **不要求 compose 栈在跑**；仓库里 `deploy/dapr/components-local/` 指向 compose 的 6380，
     栈未起时 sidecar 会因 pubsub 组件初始化失败而退出（本轮实测）。
   - 本轮未改生产代码，测试基线不变（623 passed / 7 skipped）。
+- 2026-09-20（事实源同步，经人类确认后修改 `doc/15`）：设计事实源里两处与实现不一致的
+  措辞按 ADR-020 / ADR-021 同步——建议方案核心框架一栏补「依赖与 OpenTelemetry 版本约束；
+  持久化执行由 Dapr Workflows 承载，使用边界见 ADR-020」，前端一栏改为
+  「React + Vite（样式为手写 CSS，见 ADR-021）」；架构图里 `Dapr Agents / Agent生命周期管理`
+  节点改为 `Dapr Workflow 运行时（dapr.ext.workflow）`；模块2 末尾补落地口径与 POC 指针。
+  ADR-020/ADR-021 中「doc/15 本次未改」的表述同步更新。
+- 2026-09-20（真实 API 提供方下的验收与性能重测，compose 全栈在跑）：
+  - **live 验收**：`MACP_E2E_LIVE=1 MACP_E2E_TIMEOUT=900 uv run pytest
+    tests/e2e/test_live_e2e.py -q -s` → **7 passed，190.37s**
+    （E-05 健康与目录、E-01/E-02 三步流水线、I-06 工具调用读取、E-04 API 侧续跑、E-05/E-04 Web 侧）。
+  - **并发（取代 §D9-10 的 Ollama 数据）**：`scripts/perf_concurrency.py --sessions 10
+    --concurrency 10` → 10/10 完成、成功率 1.0、总耗时 75.836s；受理延迟 p50 0.348s；
+    端到端 p50 **54.628s** / p95 74.571s；Token 合计 432596（4241.1/次，102 次调用）；
+    工具调用成功率 **0.6798（138/203）**；模型分布 `deepseek-flash`。
+  - **恢复（E-03，取代 poc 假模型数据）**：`scripts/measure_recovery.py` → 重启 3.07s、
+    **恢复 2.48s（目标 <5s）**、回填等待 0.00s、业务 `completed` 三步齐全且
+    **Dapr 终态 COMPLETED**——F-05 修复后两个终态首次同时成功。
+  - **F-01/F-06 真实链路定向验证**（live 会话 `33c0700b-…`）：第一轮两阶段各调 calculator
+    → 审计 **4 条**独立记录（`21*2`×2、`21+21`×2，均 succeeded），报告 1962 字含 `42`；
+    第二轮同会话追问「21*2 是多少」→ 回答引用上一轮两个计算结果（`42`），
+    证明会话记忆写入与阶段提示词注入在真实模型下生效。
+  - **新发现 F-07（未处置）**：当天 18 份阶段载荷中 **10 份 `content` 为空**，
+    阶段仍记 `completed`，下游拿到空上游内容、最终报告退化成「输入缺失/阻塞」说明；
+    已排除 F-01/F-06 改动（live 用新会话、无历史，无容器回归网全绿）。
+    处置方向（fail-fast / 空输出重试 / 仅告警）待产品口径确认，见 ADR-016 修订与
+    `doc/testing.md` §4.6。
+  - 口径：`doc/testing.md` §4.2 的两行旧数据已标注「以 §4.6 为准」，
+    ADR-016 增加 2026-09-20 修订记录本轮命令与数字。
 - 注意事项：数据库读取用例的设计口径是 SQLite 内存表与注入目录数据；**集成层已由
   `tests/integration/conftest.py` 完成隔离（2026-09-20），见上一条与 `doc/testing.md`
   §4.5**——三层 conftest 现在都把 DSN 钉成内存 SQLite，并用 autouse fixture 替换

@@ -222,3 +222,31 @@ M4 真实验收（工具调用在 API 模型下跑通，F-02 由此关闭）。
   Token 采样与 `event=llm.*` 日志现在带真实模型名，
   `doc/15 ...§六` 的「按模型对比 Token 效率」在通道可用后具备前提；
   仍未达成的部分是 OpenAI 侧没有可用凭据（见 F-02 与性能数据的降级说明）。
+
+## 修订（2026-09-20：真实 API 提供方下的重测，取代上文 Ollama/poc 数据）
+
+上文 §3.2 的并发数据与 E-03 演练取自 Ollama + poc 假模型路径，当时已注明
+「默认提供方改 API 后建议带凭据重取一轮」。本轮在 compose 全栈 + 真实提供方
+（`openai` / `deepseek-flash` / `https://api.deepseek.com`，配置由 `PUT /api/v1/config/provider`
+保存）上重取，命令与结果如下（全部 2026-09-20 实测）。
+
+| 场景 | 命令 | 结果 |
+| --- | --- | --- |
+| live 验收 | `MACP_E2E_LIVE=1 MACP_E2E_TIMEOUT=900 uv run pytest tests/e2e/test_live_e2e.py -q -s` | **7 passed，190.37s**（E-05 健康与目录、E-01/E-02 三步流水线、I-06 工具调用读取、E-04 API 侧续跑、E-05/E-04 Web 侧） |
+| 并发 | `uv run python scripts/perf_concurrency.py --sessions 10 --concurrency 10 --timeout 900` | 10/10 完成、成功率 1.0、**总耗时 75.836s**；受理延迟 p50 0.348s / p95 0.488s；端到端 p50 **54.628s** / p95 74.571s（mean 54.614s）；Token 合计 **432596**（输入 382356 / 输出 50240），102 次模型调用 → 4241.1 Token/次；模型调用耗时 p50 1.77s / p95 7.14s / max 11.84s；**工具调用成功率 0.6798（138/203**，web_search 35 / sql_query 155 / code_execution 13） |
+| 恢复（E-03） | `uv run python scripts/measure_recovery.py --timeout 900` | 重启耗时 3.07s；**恢复耗时 2.48s（目标 <5s）**、回填等待 0.00s；业务状态 `completed` 且 steps=[collect, analyze, report]，Dapr orchestration 终态 **COMPLETED**（F-05 修复后两个终态首次同时成功） |
+
+与上文 Ollama 数据的对照（口径不同，不可直接比较绝对值）：端到端 p50 由 16.54s 升到
+54.63s，Token 由 621.7/次升到 4241.1/次——API 提供方单次调用更慢更贵，但工具调用成功率
+从「无样本」变为有真实样本 0.6798，且报告不再是工具调用 JSON（F-02 关闭的依据）。
+
+**新发现：F-07 阶段空 content 会静默降级下游**（C 侧上报，**未处置**）。
+今天的 live 运行里，18 份阶段载荷中有 **10 份 `content` 为空字符串**（例如
+`bee18d15-…:collect/analyze/report`）：模型调用了工具但最终没有输出文本，阶段仍记为
+`completed`，于是下游阶段拿到空上游内容，最终报告退化为「上游输入缺失/阻塞」说明
+（例：1391 字的《本次任务因输入缺失未能进入分析阶段》）。工作流不会失败，问题被静默吞掉。
+已排除本轮 F-01/F-06 改动的影响：live 用例用的是新会话（会话记忆为空、提示词与改动前逐字
+一致），无容器回归网（脚本化模型）全部通过。
+可选的处置方向：把「空 content」记为阶段失败（fail-fast，与 ADR-013/014 的配置错误口径一致）、
+或对空输出补一次「请用文字给出本阶段结论」的重试、或至少落一条 `stage.empty_content` 告警日志。
+取舍属产品口径（演示时宁可失败还是宁可给降级报告），未擅自决定。
