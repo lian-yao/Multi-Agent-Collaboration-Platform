@@ -81,3 +81,39 @@ ReAct 循环因此补两条兜底（实现在 `app/orchestration/pipeline_graph.
 日志出现 7 次 `stage.tool_iteration_limit` + 5 次 `stage.empty_content action=retry`，
 且**没有 `continue_with_empty`**（补提示 5/5 全部救回文字）；代价是 live 套件
 168.87s → 343.69s（每个空阶段多一次模型调用）。
+
+## 修订 2（2026-09-20：工具调用失败重试，人类要求）
+
+口径：**工具调用失败时重试 3 次；3 次过后不再重试，按实际结果输出**。实现在
+`app/orchestration/tools.py`：
+
+- `TOOL_CALL_RETRY_LIMIT = 3`：首次调用 + 最多 3 次重试 = 最多 **4 次尝试**；
+- **沿用同一个 `call_id`**：审计层 `_begin_call` 对 `failed` 行先重置为 `running` 再执行
+  （U-07「失败可同 ID 重试」），因此一次逻辑调用在 `tool_calls` 表里**始终只有一行**，
+  最终状态就是真实结果（成功用成功输出，耗尽重试则记 `failed`）；
+- 每次尝试与重试都落结构化日志：`event=tool.call … attempt=N max_attempts=4` 与
+  `event=tool.retry … attempt=N next_attempt=N+1 error=…`（WARNING）；
+- 耗尽重试后把失败观察（`{"status":"failed","error":…}`）交给模型，**不中断流水线**；
+  若模型仍不给文字，由前述 F-07 兜底再补一次文字提示——即「必须输出」由
+  「失败观察 + 空输出补提示」两级保证，输出内容基于真实结果（含失败原因）。
+
+**先红后绿**：新增 `tests/unit/test_pipeline_tools.py` 两条用例——
+`test_failed_tool_call_is_retried_until_it_succeeds`（前两次失败、第三次成功：
+`status=succeeded`、同一 ID、`content` 正常）与
+`test_tool_call_stops_after_three_retries_and_stage_still_answers`（持续失败：
+尝试 4 次后记 `failed`、阶段仍 `completed` 且有文字输出）。修复前实测只尝试 1 次。
+
+**真实模型实测（2026-09-20）**：live 套件 `7 passed / 586.22s`（重试前 343.69s）；
+本轮产生 81 次 `tool.retry`，出现 `attempt=4 max_attempts=4` 的最终失败记录；
+`tool_calls` 表里每个 (tool_name,status) 分组 `rows == ids`，确认「一逻辑调用一行」未被破坏。
+
+**暴露的两个新问题（未处置）**：
+
+1. **确定性错误被无谓重试**：`calculator` 的 `不支持的表达式节点: List`、
+   `sql_query` 的 `relation "sqlite_master" does not exist` 都是模型给出的非法参数/
+   无效 SQL，重试 3 次不会成功，只增加延迟（本轮 live 套件多花约 4 分钟）。
+   可按错误类型分类重试（仅重试超时/连接/沙箱不可用等瞬时错误），需新 ADR。
+2. **容器内沙箱不可用（F-08）**：`code_execution` 在 compose 里必然失败——
+   backend 容器没有挂载 `/var/run/docker.sock`，日志为
+   `ToolExecutionError: 沙箱不可用: Docker 守护进程不可用`。宿主机直跑后端时可用，
+   容器部署下该工具形同不可用；修法（挂 socket 或改用独立沙箱服务）需部署决策。

@@ -76,6 +76,7 @@ cd deploy; .\start.ps1                     # 起完整环境
 | U-11 | 会话与长期记忆的 Redis 读写 | `session:{id}:messages` List 追加与「读最近 N 条」、`agent:{id}:memory` Hash 覆盖写、序列化往返、客户端不可用时按契约降级（ADR-005 修订，2026-09-16 补） | M4（增量） |
 | U-12 | 沙箱 Docker 后端隔离与 fail-closed | 容器隔离边界参数齐全、网络仅在显式允许时打开、超时杀容器且不报成功、Docker 不可用时报 sandbox unavailable、输出超限截断并标记（2026-09-16 补，`38200cc` 只加测试） | M4（增量） |
 | U-13 | 会话记忆接线 | 阶段提示词带上会话历史且剔除本轮自己的消息、无历史时提示词逐字不变、终态把报告正文追加进记忆、受理消息时写用户消息（ADR-019，2026-09-20 补，关闭 F-06 的接线部分） | M4（增量） |
+| U-14 | 工具失败重试与空输出兜底 | 工具失败沿用同一 `call_id` 重试（首次 + 最多 3 次，最多 4 次尝试）；成功即采用真实输出、耗尽重试记 `failed` 且阶段仍输出；撞工具轮次上限时落 `stage.tool_iteration_limit`，空输出补一次文字提示、仍空则告警并继续（ADR-009 两次修订，2026-09-20 补） | M4（增量） |
 
 ### 2.2 集成测试（I）
 
@@ -423,6 +424,10 @@ F-07 阶段空 content 静默降级下游（C 侧，**2026-09-20 新增并同日
 载荷中 14 份（22%）为空。处置为「空输出补一次文字提示、仍空则告警并继续」+ 新增
 `stage.tool_iteration_limit` 告警；处置后同批 12 份载荷 0 份为空。详见 §4.6、ADR-009 修订
 与 ADR-016 修订。
+F-08 容器部署下 code_execution 必然不可用（C 侧，**2026-09-20 新增，未处置**）：
+backend 容器没有挂载 `/var/run/docker.sock`，沙箱 Docker 后端报
+`沙箱不可用: Docker 守护进程不可用`（真实模型 live 运行里 10 次 code_execution 全部失败）；
+宿主机直跑后端时可用。修法（挂载 socket 或改用独立沙箱服务）属部署决策，见 §4.7 与 ADR-009 修订 2。
 
 ### 4.3 Web UI 与部署编排（2026-09-15，成员 D D9-10）
 
@@ -627,6 +632,36 @@ MACP_E2E_LIVE=1 MACP_E2E_TIMEOUT=900 uv run pytest tests/e2e/test_live_e2e.py -q
 # 日志 7 × stage.tool_iteration_limit + 5 × stage.empty_content action=retry，0 × continue_with_empty
 uv run pytest -q          # 627 passed / 7 skipped（新增 U-13 延伸用例 4 条）
 ```
+
+### 4.7 工具失败重试与"3 次过后必须输出"（2026-09-20）
+
+按人类要求实现：**工具调用失败重试 3 次，3 次过后不再重试、按实际结果输出**
+（实现与口径见 ADR-009 修订 2）。
+
+| 项 | 处理 |
+| --- | --- |
+| 重试粒度 | 单次**逻辑调用**：首次 + 最多 3 次重试 = 最多 4 次尝试（`TOOL_CALL_RETRY_LIMIT = 3`） |
+| 调用 ID | 全程沿用同一 `call_id`；审计层把 `failed` 行重置为 `running` 再执行，**一次逻辑调用只占一行** |
+| 可观测 | `event=tool.call … attempt=N max_attempts=4`、`event=tool.retry … next_attempt=N+1`（WARNING） |
+| 3 次过后 | 失败观察交给模型；模型不给文字时由 F-07 兜底补一次文字提示——输出基于真实结果（含失败原因），流水线不中断 |
+
+```bash
+# 单元：修复前只尝试 1 次（RED），修复后
+uv run pytest tests/unit/test_pipeline_tools.py -q      # 24 passed（含新增 2 条）
+uv run pytest -q                                        # 629 passed / 7 skipped
+# 真实模型：本机 web_search 不可达，天然覆盖失败重试路径
+MACP_E2E_LIVE=1 MACP_E2E_TIMEOUT=900 uv run pytest tests/e2e/test_live_e2e.py -q -s
+# → 7 passed，586.22s（重试前 343.69s）；81 次 tool.retry；出现 attempt=4 max_attempts=4 的终态失败
+# tool_calls 表按 (tool_name,status) 分组 rows == ids（27 failed / 61 succeeded），一逻辑调用一行未被破坏
+```
+
+同轮暴露的两个新问题（未处置，见 ADR-009 修订 2）：
+
+1. **确定性错误被无谓重试**——`calculator` 的非法参数、`sql_query` 的无效 SQL 重试 3 次
+   不会成功，只增加延迟（本轮 live 多花约 4 分钟）；建议按错误类型分类重试（仅瞬时错误）。
+2. **F-08 容器内沙箱不可用**——backend 容器未挂载 `/var/run/docker.sock`，
+   `code_execution` 在 compose 下必然报 `沙箱不可用: Docker 守护进程不可用`；
+   宿主直跑可用，容器部署下该工具形同不可用，修法需部署决策。
 
 ## 5. 失败处理约定
 

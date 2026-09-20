@@ -439,6 +439,23 @@ M5 闭环后又有两批改动合入 `master`，当时都未回填本文件的�
     日志 7 × `stage.tool_iteration_limit` + 5 × `stage.empty_content action=retry`、
     0 × `continue_with_empty`（补提示 5/5 救回）。代价：live 套件 168.87s → 343.69s。
     实现与判空坑见 ADR-009 修订；数据见 ADR-016 修订与 `doc/testing.md` §4.6。
+- 2026-09-20（工具失败重试 3 次、之后按实际结果输出，人类要求）：`ToolCaller.invoke`
+  改为「首次 + 最多 3 次重试（`TOOL_CALL_RETRY_LIMIT = 3`，最多 4 次尝试）」，
+  **全程沿用同一 `call_id`**（审计层把 failed 行重置为 running，U-07 契约），
+  因此一次逻辑调用在 `tool_calls` 表里仍只占一行；每次尝试与重试落
+  `event=tool.call … attempt=N max_attempts=4`、`event=tool.retry … next_attempt=N+1`。
+  耗尽重试后把失败观察交给模型，仍无文字则由 F-07 兜底补提示——输出基于真实结果、不中断流水线。
+  - 先红后绿：新增 2 条单元用例（失败两次后成功采用真实输出；持续失败尝试 4 次后记 failed
+    且阶段仍输出），修复前实测只尝试 1 次。
+  - 验证：`uv run pytest -q` → **629 passed / 7 skipped**；真实模型 live →
+    **7 passed / 586.22s**（重试前 343.69s），81 次 `tool.retry`、出现
+    `attempt=4 max_attempts=4` 终态失败，`tool_calls` 表 27 failed / 61 succeeded 且
+    每组 `rows == ids`。
+  - **新发现（未处置）**：① 确定性错误被无谓重试——`calculator` 非法参数、
+    `sql_query` 无效 SQL 重试 3 次不会成功，只增加延迟（本轮多花约 4 分钟），
+    建议后续按错误类型分类重试；② **F-08**：compose 的 backend 未挂载
+    `/var/run/docker.sock`，`code_execution` 在容器里必然报「沙箱不可用」（本轮 10 次全失败），
+    宿主机直跑可用，修法属部署决策。
   - 口径：`doc/testing.md` §4.2 的两行旧数据已标注「以 §4.6 为准」，
     ADR-016 增加 2026-09-20 修订记录本轮命令与数字。
 - 注意事项：数据库读取用例的设计口径是 SQLite 内存表与注入目录数据；**集成层已由
