@@ -297,15 +297,32 @@ M5 闭环后又有两批改动合入 `master`，当时都未回填本文件的�
   `tests/integration/test_inspection_api.py`（`test_provider_and_agent_agree` 两参数化、
   `test_missing_model`）。单元层的同类失败已由 `eda7758` 修复，这条记录取代
   2026-09-15 的「8 条转红」口径（当时 3 条在单元层，现为 0 条）。
-- 注意事项：数据库读取用例的设计口径是 SQLite 内存表与注入目录数据，但**集成层目前并未
-  真正隔离**——`tests/integration/` 没有 conftest，默认连开发库，见上一条与
-  `doc/testing.md` §4.4。MCP 用例既有内存协议往返（`tests/unit/test_mcp_tools.py`），
+- 2026-09-20（修复集成层测试隔离，`codex/integration-test-isolation`）：新增
+  `tests/integration/conftest.py`（导入 `app.*` 之前把 DSN 钉成内存 SQLite；
+  autouse fixture 用 `set_redis_factory` 注入 Provider 配置的内存 Redis 替身）与
+  `tests/integration/test_isolation_contract.py`（隔离契约用例：覆盖行读不到 + 默认 DSN
+  不是开发库，删掉 conftest 任一半即转红）。
+  - **根因更正**：上一条把泄漏源记成「读开发库 `provider_configs` 行」，实测主泄漏源是
+    **本机 Redis 的活镜像 `provider:config`**（`provider_config_row()` 的解析顺序是
+    Redis 优先）。单把 `DATABASE_URL` 钉成内存 SQLite 后 5 条仍失败，必须同时替换 Redis
+    客户端才归零；`tests/unit/conftest.py` 早已有该替身，集成层此前没有 conftest。
+  - 验证：`uv run pytest tests/integration -q` → **108 passed，2.12s**
+    （修复前 5 failed / 101 passed）；`uv run pytest -q` → **613 passed / 0 failed /
+    7 skipped，15.49s**（620 例，含新增 2 条契约用例）；把 `REDIS_URL` 指向不可达端口后
+    全量仍 **613 passed / 7 skipped**（89.24s）。反向对照：不经 conftest 的裸进程
+    `provider_config_row()` 仍返回 `deepseek-flash`，证明隔离由 conftest 提供而非环境巧合。
+  - **残留待办（未改他人文件）**：`tests/e2e/` 只钉了 DSN，仍连本机 Redis 的活镜像，
+    Redis 不可达时该批用例 6.63s → 80.09s（每个流水线用例多等约 12s 连接重试），
+    已记入 `doc/testing.md` §1 与 §4.5。
+- 注意事项：数据库读取用例的设计口径是 SQLite 内存表与注入目录数据；**集成层已由
+  `tests/integration/conftest.py` 完成隔离（2026-09-20），见上一条与 `doc/testing.md`
+  §4.5**——三层 conftest 现在都把 DSN 钉成内存 SQLite，全量套件不再隐含依赖可连的
+  PostgreSQL；但 `tests/e2e/` 的 Provider 配置镜像仍连本机 Redis（残留待办见上一条）。
+  MCP 用例既有内存协议往返（`tests/unit/test_mcp_tools.py`），
   也有真实跨进程 stdio（`tests/e2e/test_mcp_stdio_e2e.py`，2026-09-16 补）；两者都不等于
   真实 PostgreSQL 与浏览器端到端验收。E-04/E-05 的 Web 侧与部署脚本已补上实跑证据
   （见上文两条），**依赖模型的链路已于 2026-09-15 用 `gpt-5.5` 补跑通过**（同见上两条），
-  **浏览器端渲染仍是人工核对项**（前端门禁为类型检查 + 构建，未引入浏览器自动化）；
-  全量 `uv run pytest` 现在只有**集成层**隐含需要可达的 PostgreSQL 与 Redis
-  （单元与 E2E 层已 DSN 自足化，见 `doc/testing.md` §1）。
+  **浏览器端渲染仍是人工核对项**（前端门禁为类型检查 + 构建，未引入浏览器自动化）。
 
 ### 范围说明
 

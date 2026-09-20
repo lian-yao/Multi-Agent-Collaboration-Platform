@@ -8,7 +8,7 @@
 | 层级 | 范围 | 目录 | 运行前提 |
 | --- | --- | --- | --- |
 | 单元测试 | 图节点、状态、模型工厂、工具函数、Schema | `tests/unit` | 无需外部服务 |
-| 集成测试 | Dapr、Redis、PostgreSQL、MCP、API | `tests/integration` | 本地 Dapr + 服务 |
+| 集成测试 | Dapr、Redis、PostgreSQL、MCP、API | `tests/integration` | 默认无需外部服务（可显式指向真实服务） |
 | 端到端测试 | REST API + Web UI + Dapr + 部署 | `tests/e2e` | 完整 compose 环境 |
 
 常用命令：
@@ -19,40 +19,38 @@ uv run pytest                              # 全部可用用例
 cd deploy; .\start.ps1                     # 起完整环境
 ```
 
-> **`uv run pytest` 需要可达的 PostgreSQL 与 Redis**（本机 compose 的 `postgres` 与
-> `redis` 即可，见 `doc/deployment.md`）。这两者不可达时，用例**不会快速失败**，而是
-> 长时间阻塞在连接重试上——曾出现 30 分钟仍无结果、起栈后 14.51s 跑完（成员 D D9-10
-> 实测）。跑全量前先确认 `localhost:5433` 与 `localhost:6380` 可连。
+> **`uv run pytest` 默认不依赖 PostgreSQL**（2026-09-20 收口）。三层 conftest
+> （`tests/unit`、`tests/integration`、`tests/e2e`）都在导入 `app.*` 之前把 DSN 钉成内存
+> SQLite，所以单元层、集成层与无容器 E2E 回归网都不需要数据库即可跑完；只有
+> `tests/e2e/test_live_e2e.py` 的验收用例需要完整 compose
+> （由 `MACP_E2E_LIVE=1` 显式开启，默认 skip，见 `doc/deployment.md`）。
+> 历史口径保留：起栈之前 `uv run pytest` 会阻塞在连接重试上（曾出现 30 分钟无结果）、
+> 且集成层会读到开发环境的真实配置——这两条在 `eda7758` 修单元层、2026-09-20 补集成层
+> 之前成立。
+>
+> **残留待办（2026-09-20 实测，未修）**：Provider 配置的 Redis 镜像只有单元层与集成层
+> 换成了内存替身，`tests/e2e/` 仍会连本机 Redis 并读到开发环境的活镜像 `provider:config`
+> （这些用例不据此断言，所以不失败；但环境里保存过 provider/model 后，E2E 的语义就不再是
+> 「无覆盖」）。实测：Redis 可达时 `uv run pytest tests/e2e -q` 为 6.63s，把 `REDIS_URL`
+> 指向不可达端口时同一批用例 80.09s（每个流水线用例多等约 12s 的连接重试），仍全部通过。
 
-> **配置类用例要求「无既有覆盖」的干净存储**（2026-09-15 补充）。`tests/integration/`
-> 里 `test_config_api.py`、`test_inspection_api.py` 断言的是「环境配置 + 无覆盖」的生效值，
-> 而 `provider_configs` 与 Redis 镜像 `provider:config` 都是**跨运行持久**的：只要开发环境
-> 里通过配置页保存过 provider/model，这些用例就会以「存储值优先于环境配置」而失败
-> （表现为 `provider`/`model` 断言不符、`status` 由 `missing_model` 变成 `configured`）。
+> **配置类用例要求「无既有覆盖」的干净存储**。`tests/integration/` 里
+> `test_config_api.py`、`test_inspection_api.py` 断言的是「环境配置 + 无覆盖」的生效值，
+> 而 `provider_configs`（PostgreSQL 事实源）与镜像 `provider:config`（Redis）都是
+> **跨运行持久**的：开发环境里通过配置页保存过 provider/model 之后，这些用例会以
+> 「存储值优先于环境配置」而失败（表现为 `provider`/`model` 断言不符、`status` 由
+> `missing_model` 变成 `configured`）。
 >
-> 这是**环境隔离问题，不是代码缺陷**。跑全量前把测试指向独立的库与 Redis DB：
->
-> ```bash
-> # 一次性：准备空库
-> docker exec <postgres 容器> psql -U postgres -c "DROP DATABASE IF EXISTS macp_test;" \
->                                          -c "CREATE DATABASE macp_test;"
-> docker exec <redis 容器> redis-cli -n 15 flushdb
->
-> DATABASE_URL="postgresql+psycopg://postgres:postgres@localhost:5433/macp_test" \
-> REDIS_URL="redis://localhost:6380/15" \
-> uv run pytest
-> ```
->
-> 不要为了让用例通过而清空开发环境里的 `provider_configs` 或 Redis 的 `provider:config`
-> ——那是真实配置（含在用凭据）。
+> 这是**环境隔离问题，不是代码缺陷**，已由 `tests/integration/conftest.py` 结构性消除：
+> 集成层默认既不读开发库的 `provider_configs`，也不读开发 Redis 的 `provider:config`
+> （DSN 钉内存 SQLite + Provider 配置的 Redis 客户端换内存替身）。确需对着真实服务跑时，
+> 用独立空库与空 Redis DB（`MACP_INTEGRATION_DATABASE_URL`），并**不要为了让用例通过而
+> 清空开发环境里的 `provider_configs` 或 `provider:config`**——那是真实配置（含在用凭据）。
 
-> **2026-09-16 收敛（合入 C-1 后）**：`tests/unit/conftest.py` 与 `tests/e2e/conftest.py`
-> 已在导入 `app.*` 之前把 DSN 钉成内存 SQLite（`eda7758`），所以**单元层与 E2E 层现在
-> 无外部服务也能跑完**，上面那条「阻塞在连接重试上」的风险只剩 `tests/integration/`——
-> 该目录至今没有 conftest，DSN 落到 `app/core/storage.py` 的默认
-> `postgresql+psycopg://postgres:postgres@localhost:5433/multi_agent`。
-> 要把单元/E2E 用例指到真实库，设 `MACP_UNIT_DATABASE_URL` / `MACP_E2E_DATABASE_URL`
-> （优先级高于运行环境里已有的 `DATABASE_URL`）。
+> **2026-09-20 收敛**：`tests/integration/conftest.py` 补齐后，「集成层直连开发库/Redis」
+> 这一最后缺口关闭。三层 DSN 的覆盖变量为 `MACP_UNIT_DATABASE_URL`、
+> `MACP_INTEGRATION_DATABASE_URL`、`MACP_E2E_DATABASE_URL`，均优先于运行环境里已有的
+> `DATABASE_URL`。
 
 测试替身：
 
@@ -516,11 +514,46 @@ uv run pytest -q -rs      # 7 skipped 全部为 MACP_E2E_LIVE=1 控制的 test_l
 | --- | --- | --- |
 | 用例规模 | 371 → 618 | PR #9 的 `tests/integration/test_registry_api.py`（52 例）与 C-1 的 `test_memory_redis_store.py`（19）、`test_sandbox_docker_runtime.py`（13）、`test_mcp_stdio_e2e.py`（5）等未在旧记录中体现 |
 | 单元层隔离 | 已修 | `eda7758`：`tests/unit/conftest.py` 钉内存 SQLite，`test_agent_config.py` 归零 |
-| 集成层隔离 | **未修** | `tests/integration/` 无 conftest，读到开发库真实 `provider_configs` 行，5 条失败；建议按 §1 的 DSN 钉法补 conftest |
+| 集成层隔离 | **已修**（2026-09-20） | `tests/integration/conftest.py`：DSN 钉内存 SQLite + Provider 配置的 Redis 客户端换内存替身，5 条失败归零；根因更正见 §4.5 |
 | 记忆实现 | 代码就绪、**未接线** | U-11 覆盖 `app/memory/redis_store.py`；`app/api`、`app/orchestration`、`app/workflows` 无调用方（F-06） |
 | MCP 跨进程 stdio | 已补 | E-06（`tests/e2e/test_mcp_stdio_e2e.py`）真实启动 `python -m app.mcp.server` 子进程 |
 | 沙箱 Docker 后端 | 只补了测试 | `38200cc` 的 diff 内无 `app/sandbox` 变更，提交信息所述的「隔离参数」没有代码改动 |
 | `.env_example` | 已补、此前无文档引用 | `31d9cef` 在原文件上补 65 行（`TOOL_` / `MCP_` / `SANDBOX_` / `OBS_` 四段）；`doc/deployment.md` 的环境变量表已补上指向它的说明 |
+
+### 4.5 集成层测试隔离收口（2026-09-20）
+
+本节关闭 §4.4 记录的「集成层隔离 未修」，并把根因改写为实测结论。
+
+**根因（比原记录更具体）**：失败的 5 条用例（`test_config_api.py` ×2、
+`test_inspection_api.py` ×3）并非只读 PostgreSQL 的 `provider_configs` 行，**主泄漏源是
+本机 Redis 的活镜像 `provider:config`**——`app/core/provider_config.py::provider_config_row()`
+的解析顺序是 Redis 优先。反证：把 `DATABASE_URL` 单独指向内存 SQLite 后重跑，5 条仍然失败
+（2026-09-20 实测）；只有同时替换 Redis 客户端，失败才归零。原因是 `tests/unit/conftest.py`
+已有 `set_redis_factory` 内存替身，而 `tests/integration/` 既没有 conftest，也就没有替身，
+于是直接读到开发环境里 2026-09-15 保存的 `openai` / `deepseek-flash`（含在用凭据）。
+
+**处置**：新增 `tests/integration/conftest.py`（DSN 钉内存 SQLite，导入 `app.*` 之前生效；
+autouse fixture 注入 Provider 配置的 Redis 内存替身）与
+`tests/integration/test_isolation_contract.py`（把「看不到开发环境运行期配置」固化为用例，
+删掉 conftest 任一半即转红）。
+
+```bash
+# 修复前：集成层 5 failed / 101 passed
+uv run pytest tests/integration -q
+# 修复后
+uv run pytest tests/integration -q        # 108 passed，2.12s（Redis 不可达时同样通过）
+uv run pytest -q                          # 613 passed / 0 failed / 7 skipped，15.49s
+# 反向对照（不经 conftest 的裸进程）：仍能读到开发环境的活覆盖
+# uv run python -c "from app.core.provider_config import provider_config_row;
+#                   print(provider_config_row()['model'])"   → deepseek-flash
+```
+
+`7 skipped` 仍全部是 `MACP_E2E_LIVE=1` 控制的 `test_live_e2e.py`；用例数 618 → 620
+（新增 2 条隔离契约用例）。
+
+**残留待办**：`tests/e2e/` 只钉了 DSN，Provider 配置的 Redis 镜像仍连本机 Redis——
+语义上已不是「无覆盖」，且 Redis 不可达时该批用例从 6.63s 涨到 80.09s（实测数据见 §1）。
+修法与本次相同（在 `tests/e2e/conftest.py` 复用 `set_redis_factory` 内存替身），本次未改。
 
 ## 5. 失败处理约定
 
