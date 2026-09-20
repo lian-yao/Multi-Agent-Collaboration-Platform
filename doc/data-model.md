@@ -113,7 +113,7 @@ erDiagram
 
 | 字段 | 类型 | 约束/默认 | 说明 |
 | --- | --- | --- | --- |
-| id | UUID | PK | 调用 ID |
+| id | UUID | PK | 调用 ID（派生键见下） |
 | run_id | UUID | FK → agent_runs.id，CASCADE | 所属 AgentRun |
 | workflow_run_id | UUID | FK → workflow_runs.id，NULL | 经 Workflow 执行时的冗余关联 |
 | tool_name | VARCHAR(100) | 非空 | 工具名，如 `calculator` / `web_search` |
@@ -125,6 +125,13 @@ erDiagram
 | updated_at | TIMESTAMPTZ | `now()` | 更新时间 |
 
 索引：`idx_tool_calls_run (run_id, created_at)`。
+
+`id` 是幂等键，不是随机值：可持久化执行时由编排层按
+`macp:tool:{scope}:{stage}:{index}:{tool_name}` 派生（`scope` 为 Workflow 实例 ID、
+`stage` 为阶段名、`index` 为该阶段内的调用序号，见 `app/orchestration/tools.py::tool_call_id`），
+因此**同一阶段的同一次调用在 Dapr 活动重放后得到同一个 ID**、审计层按 ID 返回缓存结果而
+不重复执行；不同阶段（或同阶段不同序号）调同名工具则是不同的 ID，各落一行（F-01，
+2026-09-20 修复）。`tool_calls.id` 同时是主键，故跨调用复用同一 ID 会合并记录。
 
 ### metrics（指标聚合）
 

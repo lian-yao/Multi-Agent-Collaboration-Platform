@@ -96,7 +96,7 @@ M4 真实验收（工具调用在 API 模型下跑通，F-02 由此关闭）。
 
 ## 发现（只上报，未改动其他成员代码）
 
-- **F-01 跨阶段同工具调用被审计主键合并且返回首个结果**（A + B）。
+- **F-01 跨阶段同工具调用被审计主键合并且返回首个结果**（A + B，**已修复 2026-09-20**）。
   `app/orchestration/tools.py::ToolCaller` 每个阶段重建、`index` 从 0 起算，
   `app/workflows/pipeline.py:164` 传入的 `tool_scope` 是 Workflow 级 ID，
   因此 `tool_call_id(index, tool_name, scope)` 在三个阶段完全相同；
@@ -104,9 +104,18 @@ M4 真实验收（工具调用在 API 模型下跑通，F-02 由此关闭）。
   实测：analyze 请求 `12*(3+5)`、report 请求 `12*(3+6)`，两者都拿到第一阶段的
   `{"expression": "12*(3+4)", "value": 84}`，三次调用只落 1 行审计。
   真实模型下这意味着「分析师/报告员拿到收集者的检索结果」。
-  回归用例：`tests/e2e/test_pipeline_e2e.py::test_audit_key_collapses_distinct_calls_across_stages`。
+  回归用例（修复后）：`tests/e2e/test_pipeline_e2e.py::test_each_stage_call_is_audited_with_its_own_arguments`
+  （原 `test_audit_key_collapses_distinct_calls_across_stages` 把缺陷当契约，
+  已改为断言 3 条记录且各阶段 output 与自身 input 对应）。
   建议修法：`tool_scope` 带上阶段（与 `app/core/tool_audit.py` 模块文档
   「call_id 取自 workflow_id + stage + tool_name」一致）。
+  **修订（2026-09-20，采纳建议修法的等价实现）**：阶段名改为进入调用 ID 的派生键
+  （`tool_call_id(..., stage=...)` → `macp:tool:{scope}:{stage}:{index}:{tool_name}`），
+  `ToolCaller` 增加 `stage`，`run_role_stage` / `build_multi_agent_pipeline` 构造时带上阶段。
+  未改 `tool_scope` 的取值语义，因此 `app/workflows/pipeline.py` 的调用点与
+  `tests/unit/test_workflow_pipeline.py` 对 `tool_scope` 的断言都不变。同阶段重放仍得到
+  同一个 ID，Dapr 活动重放的幂等语义不变；副作用是**修复前落库的审计行不会与新 ID 命中**，
+  升级瞬间正在重放的活动会多执行一次工具调用（审计新增一行，不覆盖旧行）。
 - **F-02 真实模型不产出结构化 `tool_calls`**（模型/提示词侧，**已关闭**）。
   真实环境日志：`event=stage.start ... tools=4`（四个工具都已绑定）但
   `event=stage.finish ... tool_calls=0`；报告消息内容就是
@@ -199,7 +208,9 @@ M4 真实验收（工具调用在 API 模型下跑通，F-02 由此关闭）。
   因此 `pyproject.toml`、`uv.lock`、`doc/requirements.txt` 无需同步。
 - **E 系列有了可重复的验收入口**，`doc/testing.md` §3.1/§3.2 从「手工/无数据」
   变为「脚本 + 实测数据」，并在 §4.2 记录本轮状态。
-- **F-01 仍未清**，会让工具链路的正确性结论失真，因此在文档里标为未清缺口；
+- **F-01 已于 2026-09-20 修复**（阶段名进入调用 ID 派生键，见「发现」一节的修订），
+  工具链路的正确性结论自此成立：`uv run pytest -q` → 618 passed / 0 failed / 7 skipped，
+  其中 E2E 由「三次调用只落 1 行」翻转为「各阶段各落一行且 output 与自身 input 对应」；
   F-05 已由 B 修复（本 ADR 的 E-03 数据取自修复前，恢复演练的终态一致性
   需在修复后重跑一遍确认），F-04 三项前置已全部落地。
 - **F-02 已关闭**（换用 API 提供方后复测通过），因此真实模型下的工具演示成立；

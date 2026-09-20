@@ -390,7 +390,12 @@ OpenAI 兼容 API，表中「未达成」的结论已在 API 模型下复测通�
 删掉 7 个令牌用例所致，不是跳过或删除有效断言）。
 
 缺口状态（详见 ADR-016 F-01～F-06）：
-F-01 跨阶段同工具调用被审计主键合并且返回首个结果（A+B，**仍未清**，影响工具链路正确性）；
+F-01 跨阶段同工具调用被审计主键合并且返回首个结果（A+B，**已修复** 2026-09-20：调用 ID
+派生键加入阶段名，`tool_call_id(..., stage=...)` + `run_role_stage` 按阶段构造 `ToolCaller`，
+同阶段重放仍得到同一 ID；回归用例见 `tests/unit/test_pipeline_tools.py`
+（`test_role_stage_scopes_tool_call_ids_by_stage`、
+`test_tool_caller_stage_is_part_of_the_derived_call_id`）与
+`tests/e2e/test_pipeline_e2e.py::test_each_stage_call_is_audited_with_its_own_arguments`）；
 F-02 真实模型不产出结构化 `tool_calls`（**已关闭**：该现象实测于 Ollama
 `qwen2.5-coder:7b`，默认提供方改为 OpenAI 兼容 API 后已复测通过——
 `deepseek-flash` 下两阶段各产生一次 `calculator` 调用，报告引用返回值 `42`）；

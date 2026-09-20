@@ -106,7 +106,8 @@ Token 采样按阶段记录（total 1020 / 1344 / 3051）。踩坑与决策见�
   本轮的并发与恢复性能数据仍测于 Ollama 提供方 + poc 假模型路径，
   默认提供方改 API 后建议带凭据重取一轮。
 - **本轮新发现的跨模块缺口（均未改他人代码，见 ADR-016）**：
-  F-01 跨阶段同工具调用被审计主键合并、返回首个结果（A+B，**仍未清**）；
+  F-01 跨阶段同工具调用被审计主键合并、返回首个结果（A+B，**已于 2026-09-20 修复**，
+  见下方验证记录）；
   F-02 真实模型不产出结构化 `tool_calls`（C 侧上报，**已关闭**：Ollama
   `qwen2.5-coder:7b` 下模型把调用写成 `content` 里的裸 JSON；默认提供方改
   OpenAI 兼容 API 后，`deepseek-flash` 在 collector/analyst 两阶段各产生一次
@@ -143,7 +144,8 @@ M5 闭环后又有两批改动合入 `master`，当时都未回填本文件的�
     也不回注 Prompt，即**「实现已就绪、接线未做」**。
   - I-06 的遗留缺口「仍缺跨进程 stdio 传输的端到端用例」已由
     `tests/e2e/test_mcp_stdio_e2e.py`（真实启动 `python -m app.mcp.server` 子进程）关闭。
-  - F-01 仍未清；另外 `38200cc` 的提交信息写的是「Docker 后端的隔离参数」，但 diff 内
+  - F-01 已于 2026-09-20 修复（调用 ID 派生键加入阶段名，见验证记录）；另外
+    `38200cc` 的提交信息写的是「Docker 后端的隔离参数」，但 diff 内
     没有任何 `app/sandbox` 变更，实际只补了测试——若原意是加隔离参数，那部分没有进来。
 - **文档缺口**：上述两批提交都没有改 `doc/`（C-1 只改了根目录 `.env_example`），
   所以本文件与 `doc/testing.md` 的验证记录一度停留在 371 例；
@@ -321,7 +323,33 @@ M5 闭环后又有两批改动合入 `master`，当时都未回填本文件的�
   - 续修后验证：`uv run pytest tests/e2e -q`（Redis 不可达）→ **13 passed，6.31s**；
     `REDIS_URL=redis://localhost:6399/0 uv run pytest -q` → **615 passed / 0 failed /
     7 skipped，15.15s**（隔离前同一命令 89.24s）；全量用例数 620 → 622。
-    两处契约用例的失败信息只打印 `provider` / `model`，不带凭据。
+- 2026-09-20（修复 F-01：跨阶段工具调用审计键碰撞，`codex/f01-stage-scoped-tool-call-ids`）：
+  调用 ID 的派生键加入**阶段名**——`app/orchestration/tools.py::tool_call_id(..., stage=...)`
+  按 `macp:tool:{scope}:{stage}:{index}:{tool_name}` 派生，`ToolCaller` 增加 `stage`，
+  `app/orchestration/pipeline_graph.py::run_role_stage` 与
+  `build_multi_agent_pipeline` 构造 `ToolCaller` 时带上阶段。修复前 `ToolCaller` 每阶段重建、
+  `index` 从 0 起算，而 ID 只含 Workflow 级 scope，导致同一 Workflow 的两个阶段在相同序号调
+  同名工具时 ID 相同：`app/core/tool_audit.execute_tool_call` 按 ID 幂等，后一个阶段直接返回
+  前一个阶段的**缓存结果**、审计只落 1 行（真实模型下即「分析师/报告员拿到收集者的结果」）。
+  修法与 `app/core/tool_audit.py` 模块文档「call_id 取自 workflow_id + stage + tool_name」
+  的约定一致；同阶段重放仍得到同一 ID，Dapr 活动重放的幂等语义不变。
+  - **先红后绿**：新增 `tests/unit/test_pipeline_tools.py`
+    （`test_role_stage_scopes_tool_call_ids_by_stage`、
+    `test_role_stage_keeps_tool_call_id_stable_when_the_same_stage_replays`、
+    `test_tool_caller_stage_is_part_of_the_derived_call_id`），修复前实测两阶段 call_id
+    完全相同（`11f76dff-…` == `11f76dff-…`）。
+  - E2E 原先把缺陷当契约：`test_audit_key_collapses_distinct_calls_across_stages`
+    断言「三次调用只落 1 行、后两阶段拿到首阶段结果」，改为
+    `test_each_stage_call_is_audited_with_its_own_arguments`，断言 3 条审计记录、
+    各阶段 output 与自身 input 对应（84 / 96 / 108）；
+    `test_pipeline_runs_three_stages_in_order_with_real_tools` 的 `len(rows) == 1`
+    同步改为 3。
+  - 验证：`uv run pytest -q` → **618 passed / 0 failed / 7 skipped，14.15s**；
+    `tests/unit/test_pipeline_tools.py` + `test_workflow_pipeline.py` + `test_tool_audit.py`
+    → 46 passed；`tests/e2e/test_pipeline_e2e.py` → 6 passed。
+  - **变更影响**：修复改变了调用 ID 的取值，因此升级前已落库的审计行不会与新 ID 命中缓存——
+    对升级瞬间正在重放的活动，该工具调用会**多执行一次**（审计新增一行，不覆盖旧行）。
+    本项目工作流时长以秒计，实际影响可忽略；如需跨版本重放严格幂等，需保留旧派生键的兼容分支。
 - 注意事项：数据库读取用例的设计口径是 SQLite 内存表与注入目录数据；**集成层已由
   `tests/integration/conftest.py` 完成隔离（2026-09-20），见上一条与 `doc/testing.md`
   §4.5**——三层 conftest 现在都把 DSN 钉成内存 SQLite，并用 autouse fixture 替换
