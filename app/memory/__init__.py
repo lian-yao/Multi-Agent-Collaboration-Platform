@@ -9,6 +9,7 @@ from app.memory.redis_store import (
     build_long_term_memory,
     build_redis_client,
 )
+from app.memory.runtime import conversation_memory, set_conversation_memory_factory
 from app.memory.schemas import (
     MemoryEntry,
     MessageRole,
@@ -40,6 +41,7 @@ __all__ = [
     "build_conversation_memory",
     "build_long_term_memory",
     "build_redis_client",
+    "conversation_memory",
     "deserialize_memory_entry",
     "deserialize_message",
     "memory_entry_from_value",
@@ -47,4 +49,5 @@ __all__ = [
     "serialize_memory_entry",
     "serialize_message",
     "session_messages_key",
+    "set_conversation_memory_factory",
 ]

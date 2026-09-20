@@ -30,6 +30,7 @@ from langgraph.graph import END, START, StateGraph
 
 from app.agents.roles import RoleId, get_role
 from app.config import AgentSettings, get_settings
+from app.memory import SessionMessage
 from app.observability.instrumentation import observed_stage
 from app.observability.logging import get_logger, log_event
 from app.orchestration.llm import build_chat_model
@@ -59,6 +60,11 @@ PIPELINE_ROLE_ASSIGNMENT: dict[PipelineStage, RoleId] = {
 
 # 单个角色节点内允许的「请求工具 → 回填观察」轮次上限，避免模型陷入无限循环。
 TOOL_CALL_MAX_ITERATIONS = 4
+
+# 注入提示词的会话历史条数上限：最近 N 条（不含本次执行自己的消息）。
+# 会话记忆是短期上下文，条数上限同时约束提示词长度；读取方见
+# `app/workflows/pipeline.py::_session_history`，接线口径见 ADR-019。
+CONVERSATION_CONTEXT_LIMIT = 10
 
 logger = get_logger("orchestration.pipeline")
 
@@ -112,15 +118,40 @@ def _content_text(content: str | list[Any]) -> str:
     return "\n".join(parts).strip()
 
 
-def _role_input(role: RoleId, task: str, previous: dict[str, Any] | None) -> str:
-    """构造角色节点的用户输入：首节点给原始任务，后续节点带上游结果。"""
+def _conversation_block(history: Sequence[SessionMessage]) -> str:
+    """把会话历史渲染成提示词前缀；无有效内容时返回空串（不加空段）。"""
+
+    lines = [
+        f"{message.role.value}: {message.content.strip()}"
+        for message in history
+        if message.content and message.content.strip()
+    ]
+    if not lines:
+        return ""
+    header = f"【会话历史（最近 {len(lines)} 条，供多轮上下文继承）】"
+    return "\n".join([header, *lines, ""])
+
+
+def _role_input(
+    role: RoleId,
+    task: str,
+    previous: dict[str, Any] | None,
+    history: Sequence[SessionMessage] = (),
+) -> str:
+    """构造角色节点的用户输入。
+
+    基础形态是「首节点给原始任务、后续节点带上游结果」；接上会话记忆后，
+    两者前面都会加上最近若干轮的历史（F-06，接线口径见 ADR-019）。
+    """
+
+    prefix = _conversation_block(history)
     if role is RoleId.COLLECTOR:
-        return f"用户任务：\n{task}"
+        return f"{prefix}用户任务：\n{task}"
     if previous is None or not isinstance(previous.get("content"), str):
         raise ValueError(
             f"角色 {role.value} 缺少上游结果，不能独立执行"
         )
-    return f"{_UPSTREAM_LABELS[role]}：\n{previous['content']}"
+    return f"{prefix}{_UPSTREAM_LABELS[role]}：\n{previous['content']}"
 
 
 def _stage_result(
@@ -205,12 +236,13 @@ def _run_role_stage(
     llm: BaseChatModel,
     caller: ToolCaller | None = None,
     workflow_id: str | None = None,
+    history: Sequence[SessionMessage] = (),
 ) -> dict[str, Any]:
     role = role_for_stage(stage)
     definition = get_role(role)
     messages = [
         SystemMessage(content=definition.system_prompt),
-        HumanMessage(content=_role_input(role, task, previous)),
+        HumanMessage(content=_role_input(role, task, previous, history)),
     ]
     discovered = caller.available() if caller is not None else ()
     log_event(
@@ -267,6 +299,7 @@ def run_role_stage(
     tool_registry: ToolRegistry | None = None,
     tool_scope: str | None = None,
     workflow_id: str | None = None,
+    history: Sequence[SessionMessage] = (),
 ) -> dict[str, Any]:
     """调用指定阶段对应角色的模型，返回 Workflow 阶段活动使用的载荷。
 
@@ -279,6 +312,9 @@ def run_role_stage(
 
     ``workflow_id`` 用于行为日志关联（`event=stage.start|finish|failed`），
     未显式给出 ``tool_scope`` 时也作为工具调用 ID 的 scope。
+
+    ``history`` 是本次执行之前同一会话的消息（不含本轮），由调用方从会话记忆读出
+    （`app/workflows/pipeline.py::_session_history`），会渲染到提示词开头。
     """
 
     resolved = PipelineStage(stage) if isinstance(stage, str) else stage
@@ -291,7 +327,15 @@ def run_role_stage(
         if registry is not None
         else None
     )
-    return _run_role_stage(resolved, task, previous, model, caller, workflow_id=workflow_id)
+    return _run_role_stage(
+        resolved,
+        task,
+        previous,
+        model,
+        caller,
+        workflow_id=workflow_id,
+        history=history,
+    )
 
 
 def _state_update(state: PipelineState) -> dict[str, Any]:

@@ -272,3 +272,30 @@ def test_delete_agent_registry_entry(monkeypatch) -> None:
 
     removed = client.delete("/api/v1/config/agents/summarizer")
     assert removed.status_code == 204
+
+
+def test_send_message_appends_user_message_to_conversation_memory(monkeypatch) -> None:
+    """用户消息在受理时写入会话记忆，供后续轮次做上下文继承（F-06 / ADR-019）。"""
+
+    from app.memory import MessageRole
+    from app.memory.runtime import conversation_memory
+
+    store = InMemoryApiStore()
+    monkeypatch.setattr(api_main, "api_store", store)
+    monkeypatch.setattr(api_main, "get_workflow_service", lambda: FakeWorkflowService())
+    client = TestClient(app)
+
+    session_id = client.post(
+        "/api/v1/sessions", json={"user_id": "demo-user"}
+    ).json()["id"]
+    accepted = client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"content": "第一轮问题"},
+    )
+    assert accepted.status_code == 202
+
+    [stored] = conversation_memory().list_messages(session_id)
+    assert stored.role is MessageRole.USER
+    assert stored.content == "第一轮问题"
+    assert stored.id == accepted.json()["message_id"]
+    assert stored.agent_run_id == accepted.json()["agent_run_id"]

@@ -48,6 +48,8 @@ from app.core.provider_config import (
     update_provider_config,
 )
 from app.mcp.registry import tool_catalog
+from app.memory import MessageRole, MessageStatus, SessionMessage
+from app.memory.runtime import conversation_memory
 from app.observability.logging import get_logger, log_event
 from app.observability.metrics import render_prometheus_metrics
 from app.workflows.pipeline import WorkflowTask
@@ -910,6 +912,19 @@ def send_message(session_id: str, payload: MessageRequest) -> MessageAcceptedRes
         api_store.update_workflow(workflow_id, status="running")
         api_store.update_agent_run_status(agent_run["id"], "running")
         api_store.update_message_status(message["id"], "running")
+        # 用户消息进会话记忆，供同一会话的后续轮次做上下文继承（F-06 / ADR-019）。
+        # Redis 不可用时由实现层降级为无操作，不影响消息受理。
+        conversation_memory().append_message(
+            session_id,
+            SessionMessage(
+                session_id=session_id,
+                role=MessageRole.USER,
+                content=payload.content,
+                id=message["id"],
+                agent_run_id=agent_run["id"],
+                status=MessageStatus.RUNNING,
+            ),
+        )
         get_workflow_service().schedule(
             WorkflowTask(
                 workflow_id=workflow_id,

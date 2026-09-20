@@ -44,7 +44,13 @@ from app.orchestration.pipeline import (
     serialize_pipeline_state,
     start,
 )
-from app.orchestration.pipeline_graph import role_for_stage, run_role_stage
+from app.memory import MessageRole, MessageStatus, SessionMessage
+from app.memory.runtime import conversation_memory
+from app.orchestration.pipeline_graph import (
+    CONVERSATION_CONTEXT_LIMIT,
+    role_for_stage,
+    run_role_stage,
+)
 from app.orchestration.tools import ToolRegistry, default_tool_registry
 from app.observability.metrics import flush_metrics, record_workflow_terminal
 from app.workflows.state import save_step_result
@@ -131,8 +137,14 @@ def advance_pipeline_stage(
     run_id: str | None = None,
     workflow_run_id: str | None = None,
     tool_registry: ToolRegistry | None = None,
+    session_id: str | None = None,
+    agent_run_id: str | None = None,
 ) -> dict[str, Any]:
-    """推进一个阶段，审计工具调用并保留 Workflow 行为日志关联。"""
+    """推进一个阶段，审计工具调用并保留 Workflow 行为日志关联。
+
+    ``session_id`` / ``agent_run_id`` 用于从会话记忆读出本轮之前的上下文并注入提示词
+    （F-06，接线口径见 ADR-019）；缺省时按「没有历史」执行。
+    """
 
     stage = _to_stage(step)
     if stage != state.current_step:
@@ -164,9 +176,33 @@ def advance_pipeline_stage(
             tool_registry=registry,
             tool_scope=workflow_run_id or workflow_id or run_id,
             workflow_id=workflow_id,
+            history=_session_history(session_id, agent_run_id),
         )
     updated = complete_step(state, stage, result)
     return {**build_step_result(updated), "result": result}
+
+
+def _session_history(
+    session_id: str | None,
+    agent_run_id: str | None,
+    *,
+    limit: int = CONVERSATION_CONTEXT_LIMIT,
+) -> tuple[SessionMessage, ...]:
+    """读会话记忆里最近 `limit` 条消息，剔除本次执行自己的消息。
+
+    本轮的任务文本已经以「用户任务」进提示词，再当历史重复一遍只是浪费上下文；
+    记忆不可用时实现层返回空列表，这里不再兜底（记忆缺失不该让一次协作失败）。
+    """
+
+    if not session_id:
+        return ()
+    messages = conversation_memory().list_messages(session_id, limit=limit)
+    return tuple(
+        message
+        for message in messages
+        if not agent_run_id or message.agent_run_id != agent_run_id
+    )
+
 
 def _run_stage_activity(
     ctx: wf.WorkflowActivityContext,
@@ -197,6 +233,8 @@ def _run_stage_activity(
         workflow_id=workflow_id,
         run_id=task.get("agent_run_id"),
         workflow_run_id=workflow_id,
+        session_id=task.get("session_id"),
+        agent_run_id=task.get("agent_run_id"),
     )
     _record_checkpoint(
         workflow_id,
@@ -283,6 +321,19 @@ def finalize_activity(
             role="assistant",
             status="completed",
             agent_run_id=agent_run_id,
+        )
+        # 报告正文同时进会话记忆，供同一会话的下一轮做上下文继承（F-06 / ADR-019）；
+        # Redis 不可用时由实现层降级为无操作，不影响终态回写。
+        conversation_memory().append_message(
+            session_id,
+            SessionMessage(
+                session_id=session_id,
+                role=MessageRole.ASSISTANT,
+                content=report,
+                id=report_message_id(workflow_id),
+                agent_run_id=agent_run_id,
+                status=MessageStatus.COMPLETED,
+            ),
         )
     return {"workflow_id": workflow_id, "status": status}
 

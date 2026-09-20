@@ -258,3 +258,59 @@ def test_observability_records_stage_tool_and_workflow_metrics(
     assert {label["status"] for label in tool_labels} == {"succeeded"}
 
     assert _statuses(e2e_env, METRIC_WORKFLOW_RUNS) == {"completed"}
+
+
+def test_second_message_inherits_session_history(e2e_env) -> None:
+    """同一会话的第二轮执行带上一轮问答作为上下文（E-01 多轮，F-06 / ADR-019）。
+
+    写点：受理消息时写用户消息、终态回写时写助手报告；
+    读点：阶段活动按 `session_id` 读会话记忆并注入提示词，同时剔除本次执行自己的消息。
+    """
+
+    from app.memory import MessageRole
+    from app.memory.runtime import conversation_memory
+
+    # 假模型按阶段数消耗脚本，这里给两轮各准备三个阶段的表达式。
+    e2e_env.model.expressions = [
+        "12*(3+4)",
+        "12*(3+5)",
+        "12*(3+6)",
+        "12*(3+7)",
+        "12*(3+8)",
+        "12*(3+9)",
+    ]
+
+    client = TestClient(app)
+    session_id = client.post("/api/v1/sessions", json={"user_id": "e2e"}).json()["id"]
+
+    first = client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"content": "第一轮：整理 Agent 技术要点"},
+    )
+    assert first.status_code == 202
+    assert _wait_for_terminal(client, first.json()["workflow_id"])["status"] == "completed"
+
+    calls_before = len(e2e_env.model.calls)
+    second = client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"content": "第二轮：在上一轮基础上补充风险"},
+    )
+    assert second.status_code == 202
+    second_workflow = second.json()["workflow_id"]
+    assert _wait_for_terminal(client, second_workflow)["status"] == "completed"
+
+    # 第二轮的 collector 提示词带上了第一轮的用户问题与助手报告正文。
+    collector_prompt = e2e_env.model.calls[calls_before][1].content
+    assert "第一轮：整理 Agent 技术要点" in collector_prompt
+    assert "阶段结论" in collector_prompt
+    # 本轮自己的消息不算历史（任务本身已在提示词里），只出现一次。
+    assert collector_prompt.count("第二轮：在上一轮基础上补充风险") == 1
+
+    # 会话记忆按轮次累积：user / assistant × 2。
+    stored = conversation_memory().list_messages(session_id)
+    assert [message.role for message in stored] == [
+        MessageRole.USER,
+        MessageRole.ASSISTANT,
+        MessageRole.USER,
+        MessageRole.ASSISTANT,
+    ]

@@ -58,6 +58,8 @@ from pydantic import Field  # noqa: E402
 from app.api.store import InMemoryApiStore
 from app.core import checkpoint as checkpoint_module
 from app.core.provider_config import set_redis_factory  # noqa: E402
+from app.memory import SessionMessage  # noqa: E402
+from app.memory.runtime import set_conversation_memory_factory  # noqa: E402
 from app.observability.metrics import (
     MetricSample,
     MetricsCollector,
@@ -500,6 +502,29 @@ class MemoryRedis:
         self.data[key] = value
 
 
+class MemoryConversationMemory:
+    """会话记忆替身：进程内 List，语义与 Redis 实现一致（按时间正序、可丢失）。
+
+    F-06 接线后 API 与 Workflow 活动都会读写会话记忆；回归网用它保证
+    「多轮上下文继承」可被断言，同时又不需要真实 Redis（见 ADR-019）。
+    """
+
+    def __init__(self) -> None:
+        self.data: dict[str, list[SessionMessage]] = {}
+
+    def append_message(self, session_id: str, message: SessionMessage) -> None:
+        self.data.setdefault(session_id, []).append(message)
+
+    def list_messages(
+        self, session_id: str, *, limit: int | None = None
+    ) -> list[SessionMessage]:
+        messages = list(self.data.get(session_id, []))
+        if limit is None:
+            return messages
+        count = max(1, int(limit))
+        return messages[-count:]
+
+
 @pytest.fixture
 def memory_metrics() -> Iterator[tuple[MetricsCollector, MemoryMetricSink]]:
     """安装内存指标采集器，避免默认 sink 在建连上耗时。"""
@@ -520,6 +545,16 @@ def memory_provider_cache() -> Iterator[MemoryRedis]:
     set_redis_factory(lambda: redis)
     yield redis
     set_redis_factory(None)
+
+
+@pytest.fixture(autouse=True)
+def memory_conversation() -> Iterator[MemoryConversationMemory]:
+    """把会话记忆换成内存替身，用例之间互不影响。"""
+
+    memory = MemoryConversationMemory()
+    set_conversation_memory_factory(lambda: memory)
+    yield memory
+    set_conversation_memory_factory(None)
 
 
 @pytest.fixture

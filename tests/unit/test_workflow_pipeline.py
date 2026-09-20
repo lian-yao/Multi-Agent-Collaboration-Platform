@@ -592,3 +592,120 @@ def test_advance_pipeline_stage_wraps_tool_registry_for_audit(monkeypatch):
     assert deserialize_pipeline_state(outcome["state"]).completed_steps == [
         PipelineStage.COLLECT
     ]
+
+
+def test_advance_pipeline_stage_injects_session_history():
+    """阶段提示词带上会话历史，并剔除本次执行自己的消息（F-06 / ADR-019）。"""
+
+    from app.memory import MessageRole, MessageStatus, SessionMessage
+    from app.memory.runtime import conversation_memory
+
+    memory = conversation_memory()
+    memory.append_message(
+        "session-1",
+        SessionMessage(
+            session_id="session-1",
+            role=MessageRole.USER,
+            content="上一轮：整理 Agent 技术要点",
+            id="msg-old-user",
+            agent_run_id="run-old",
+        ),
+    )
+    memory.append_message(
+        "session-1",
+        SessionMessage(
+            session_id="session-1",
+            role=MessageRole.ASSISTANT,
+            content="上一轮报告：三条要点",
+            id="msg-old-report",
+            agent_run_id="run-old",
+            status=MessageStatus.COMPLETED,
+        ),
+    )
+    memory.append_message(
+        "session-1",
+        SessionMessage(
+            session_id="session-1",
+            role=MessageRole.USER,
+            content="本轮消息不应出现在历史里",
+            id="msg-new-user",
+            agent_run_id="run-1",
+        ),
+    )
+
+    model = _ScriptedRoleModel(replies=["收集结果"])
+    state = start(new_pipeline_state(task="本轮任务"))
+
+    advance_pipeline_stage(
+        state,
+        PipelineStage.COLLECT,
+        task="本轮任务",
+        llm=model,
+        session_id="session-1",
+        agent_run_id="run-1",
+    )
+
+    prompt = model.calls[0][1].content
+    assert "上一轮：整理 Agent 技术要点" in prompt
+    assert "上一轮报告：三条要点" in prompt
+    assert "本轮任务" in prompt
+    assert "本轮消息不应出现在历史里" not in prompt
+
+
+def test_advance_pipeline_stage_without_history_keeps_prompt_unchanged():
+    """没有会话历史时提示词与接线前完全一致（不引入空段）。"""
+
+    model = _ScriptedRoleModel(replies=["收集结果"])
+    state = start(new_pipeline_state(task="演示任务"))
+
+    advance_pipeline_stage(
+        state,
+        PipelineStage.COLLECT,
+        task="演示任务",
+        llm=model,
+    )
+
+    assert model.calls[0][1].content == "用户任务：\n演示任务"
+
+
+def test_finalize_activity_appends_report_to_conversation_memory(monkeypatch):
+    """completed 终态把报告正文追加进会话记忆，供下一轮继承（F-06 / ADR-019）。"""
+
+    from app.memory import MessageRole
+    from app.memory.runtime import conversation_memory
+    from app.workflows.pipeline import finalize_activity
+
+    monkeypatch.setattr(
+        "app.workflows.pipeline.update_workflow_run", lambda *args, **kwargs: {}
+    )
+    monkeypatch.setattr(
+        "app.workflows.pipeline.update_agent_run_status", lambda *args, **kwargs: {}
+    )
+    monkeypatch.setattr(
+        "app.workflows.pipeline.update_message_status", lambda *args, **kwargs: {}
+    )
+    monkeypatch.setattr(
+        "app.workflows.pipeline.upsert_message", lambda *args, **kwargs: {}
+    )
+
+    class FakeActivityContext:
+        workflow_id = "wf-1"
+
+    finalize_activity(
+        FakeActivityContext(),
+        {
+            "workflow_id": "wf-1",
+            "session_id": "session-1",
+            "agent_run_id": "run-1",
+            "message_id": "msg-1",
+            "status": "completed",
+            "checkpoint": {"status": "completed"},
+            "report": "# 报告正文",
+        },
+    )
+
+    [stored] = conversation_memory().list_messages("session-1")
+    assert stored.role is MessageRole.ASSISTANT
+    assert stored.content == "# 报告正文"
+    assert stored.id == report_message_id("wf-1")
+    assert stored.agent_run_id == "run-1"
