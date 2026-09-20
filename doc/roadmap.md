@@ -311,13 +311,22 @@ M5 闭环后又有两批改动合入 `master`，当时都未回填本文件的�
     7 skipped，15.49s**（620 例，含新增 2 条契约用例）；把 `REDIS_URL` 指向不可达端口后
     全量仍 **613 passed / 7 skipped**（89.24s）。反向对照：不经 conftest 的裸进程
     `provider_config_row()` 仍返回 `deepseek-flash`，证明隔离由 conftest 提供而非环境巧合。
-  - **残留待办（未改他人文件）**：`tests/e2e/` 只钉了 DSN，仍连本机 Redis 的活镜像，
-    Redis 不可达时该批用例 6.63s → 80.09s（每个流水线用例多等约 12s 连接重试），
-    已记入 `doc/testing.md` §1 与 §4.5。
+  - **同日续修（E2E 回归网同类泄漏，已收口）**：首轮只改了集成层，随后实测确认
+    `tests/e2e/` 同样只钉 DSN——Provider 配置镜像仍连本机 Redis，语义上不是「无覆盖」，
+    Redis 不可达时该批用例 6.63s → 80.09s。修法与集成层一致：
+    `tests/e2e/conftest.py` 增加 `MemoryRedis` + autouse fixture，
+    `tests/e2e/test_regression_net_isolation.py` 固化契约（文件名避免与集成层重名，
+    否则 pytest 默认导入模式下同名模块互相顶掉）。先确认 RED（读到 `deepseek-flash`）
+    再上替身转 GREEN。
+  - 续修后验证：`uv run pytest tests/e2e -q`（Redis 不可达）→ **13 passed，6.31s**；
+    `REDIS_URL=redis://localhost:6399/0 uv run pytest -q` → **615 passed / 0 failed /
+    7 skipped，15.15s**（隔离前同一命令 89.24s）；全量用例数 620 → 622。
+    两处契约用例的失败信息只打印 `provider` / `model`，不带凭据。
 - 注意事项：数据库读取用例的设计口径是 SQLite 内存表与注入目录数据；**集成层已由
   `tests/integration/conftest.py` 完成隔离（2026-09-20），见上一条与 `doc/testing.md`
-  §4.5**——三层 conftest 现在都把 DSN 钉成内存 SQLite，全量套件不再隐含依赖可连的
-  PostgreSQL；但 `tests/e2e/` 的 Provider 配置镜像仍连本机 Redis（残留待办见上一条）。
+  §4.5**——三层 conftest 现在都把 DSN 钉成内存 SQLite，并用 autouse fixture 替换
+  Provider 配置的 Redis 镜像，全量套件不再隐含依赖可连的 PostgreSQL 与 Redis
+  （Redis 不可达时 `uv run pytest -q` 15.15s，见上一条）。
   MCP 用例既有内存协议往返（`tests/unit/test_mcp_tools.py`），
   也有真实跨进程 stdio（`tests/e2e/test_mcp_stdio_e2e.py`，2026-09-16 补）；两者都不等于
   真实 PostgreSQL 与浏览器端到端验收。E-04/E-05 的 Web 侧与部署脚本已补上实跑证据
