@@ -19,6 +19,13 @@
 语义等价于「配置库里没有覆盖行」（两者都回落到环境默认设置）。
 要让这组用例对着真实 PostgreSQL 跑，设 `MACP_E2E_DATABASE_URL`。
 真实 Dapr + PostgreSQL 上的验收见 `test_live_e2e.py`（走 HTTP，不使用这里的 DSN）。
+
+**Provider 配置的 Redis 镜像**（2026-09-20 补）：`app/core/provider_config.py` 的解析
+顺序是 **Redis 优先**，所以只钉 DSN 还不够——回归网仍会读到本机 `provider:config`
+里开发环境保存的 provider/model，语义上不再是「无覆盖」，Redis 不可达时每个流水线用例
+还会多等约 12s 的连接重试（实测该批用例 6.63s → 80.09s）。这里与
+`tests/unit/conftest.py` / `tests/integration/conftest.py` 同口径，用 autouse fixture
+把该镜像换成内存替身。
 """
 
 from __future__ import annotations
@@ -50,6 +57,7 @@ from pydantic import Field  # noqa: E402
 
 from app.api.store import InMemoryApiStore
 from app.core import checkpoint as checkpoint_module
+from app.core.provider_config import set_redis_factory  # noqa: E402
 from app.observability.metrics import (
     MetricSample,
     MetricsCollector,
@@ -473,6 +481,25 @@ class E2EEnvironment:
         return self.checkpoint_state(workflow_id, stage)["results"][stage]
 
 
+# --------------------------------------------------------------------------- #
+# 替身 3：Provider 配置的 Redis 镜像
+# --------------------------------------------------------------------------- #
+
+
+class MemoryRedis:
+    """最小 Redis 替身：Provider 配置镜像只用到 `get` / `set`
+    （`app/core/provider_config.py::_read_mirror` / `_write_mirror`）。"""
+
+    def __init__(self) -> None:
+        self.data: dict[str, str] = {}
+
+    def get(self, key: str) -> str | None:
+        return self.data.get(key)
+
+    def set(self, key: str, value: str) -> None:
+        self.data[key] = value
+
+
 @pytest.fixture
 def memory_metrics() -> Iterator[tuple[MetricsCollector, MemoryMetricSink]]:
     """安装内存指标采集器，避免默认 sink 在建连上耗时。"""
@@ -483,6 +510,16 @@ def memory_metrics() -> Iterator[tuple[MetricsCollector, MemoryMetricSink]]:
     set_metrics_collector(collector)
     yield collector, sink
     set_metrics_collector(previous)
+
+
+@pytest.fixture(autouse=True)
+def memory_provider_cache() -> Iterator[MemoryRedis]:
+    """把 Provider 配置的 Redis 镜像换成内存替身，用例之间互不影响。"""
+
+    redis = MemoryRedis()
+    set_redis_factory(lambda: redis)
+    yield redis
+    set_redis_factory(None)
 
 
 @pytest.fixture

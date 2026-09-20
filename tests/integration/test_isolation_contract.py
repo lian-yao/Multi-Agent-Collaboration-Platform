@@ -21,7 +21,12 @@ def test_provider_config_row_has_no_development_override() -> None:
     这里必须仍为 None——被测代码据此回落 `AGENT_*` 环境配置。
     """
 
-    assert provider_config_row() is None
+    row = provider_config_row()
+    # 失败信息只带非敏感字段：覆盖行里含在用凭据，不该进测试输出
+    assert row is None, (
+        f"读到开发环境的运行期覆盖：provider={row.get('provider')} "
+        f"model={row.get('model')}"
+    )
 
 
 def test_storage_dsn_defaults_to_isolated_database() -> None:
