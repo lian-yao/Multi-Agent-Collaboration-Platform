@@ -117,10 +117,42 @@ Token 采样按阶段记录（total 1020 / 1344 / 3051）。踩坑与决策见�
   F-05 poc/故障演练路径业务终态 `completed` 与 Dapr 终态 `FAILED` 不一致（B，
   **已修复**：`session_id` 不再硬编码为 `demo-session`，CLI 对运行时终态非 `COMPLETED`
   即非零码退出）——修复后的恢复演练需重跑一遍；
-  F-06 会话/长期记忆未接入编排（`app/memory/` 只有 Protocol，历史消息既不落记忆
-  也不回注 Prompt）——**本轮只记录，未处置**。
+  F-06 会话/长期记忆未接入编排（当时 `app/memory/` 只有 Protocol，历史消息既不落记忆
+  也不回注 Prompt）——**当时只记录，未处置**。2026-09-16 合入 C-1 后 Redis 实现已落地
+  并有单测覆盖，但编排与 API 仍无调用方，口径见下文「M5 之后的增量」。
+
+### M5 之后的增量（2026-09-16，合入 PR #9 与 C-1）
+
+M5 闭环后又有两批改动合入 `master`，当时都未回填本文件的进度与验证记录，此处补齐。
+
+| 批次 | 提交 | 落地内容 |
+| --- | --- | --- |
+| PR #9（成员 D，`member-d/d9-10-delivery`） | `8d1ab87`、`239a113`、`a9a1cf6`、`9ef8400`、`39048d7` | ADR-017 多 Provider / 多模型 / MCP Server 三张注册表与配置 API（`doc/api.md` §5.9–§5.12）、历史会话枚举 `GET /api/v1/sessions`（§5.13）与删除（§5.14）、ADR-018 工作台视图三分；`agent_registry` 角色目录与自定义角色 CRUD（含前端「新建/删除」入口）；前端重构为「工作台 / 配置 / 记录」三页 |
+| C-1（成员 C） | `eda7758` | 单元与 E2E conftest 的 DSN 自足化：在导入 `app.*` 之前把 DSN 钉成内存 SQLite，配置库不可达时不再阻塞在建连上 |
+| 同上 | `31d9cef` | 根目录 `.env_example` 补齐 `TOOL_` / `MCP_` / `SANDBOX_` / `OBS_` 四段（原有 `AGENT_*` / `REDIS_URL` / `DATABASE_URL`） |
+| 同上 | `44712db` | `sql_default_limit` 真正生效；搜索失败给出可排查的原因 |
+| 同上 | `69960e1` | Redis 会话记忆与长期记忆实现（`app/memory/redis_store.py`，19 例单测） |
+| 同上 | `38200cc` | 沙箱 Docker 后端隔离与 fail-closed 回归测试（仅测试，`app/sandbox` 无改动） |
+| 同上 | `f043dbf` | 已注册的外部 MCP Server 并入流水线工具注册表；新增跨进程 stdio 端到端用例 |
+
+- **合并方式与完整性**：C-1 的首个提交 `eda7758` 的父提交即 `88e7390`（PR #9 的合并提交），
+  `master` 以快进方式合并到 `f043dbf`，未产生合并提交，也未回退 PR #9 的任何产物。
+- **缺口状态变化**：
+  - F-06 口径变更：`app/memory/` 不再「只有 Protocol」——Redis 实现已落地且有单测，
+    但 `app/api`、`app/orchestration`、`app/workflows` 里仍无消费者，历史消息既不落记忆
+    也不回注 Prompt，即**「实现已就绪、接线未做」**。
+  - I-06 的遗留缺口「仍缺跨进程 stdio 传输的端到端用例」已由
+    `tests/e2e/test_mcp_stdio_e2e.py`（真实启动 `python -m app.mcp.server` 子进程）关闭。
+  - F-01 仍未清；另外 `38200cc` 的提交信息写的是「Docker 后端的隔离参数」，但 diff 内
+    没有任何 `app/sandbox` 变更，实际只补了测试——若原意是加隔离参数，那部分没有进来。
+- **文档缺口**：上述两批提交都没有改 `doc/`（C-1 只改了根目录 `.env_example`），
+  所以本文件与 `doc/testing.md` 的验证记录一度停留在 371 例；
+  `doc/decisions/005-memory-schema.md` §3 的「真实存储实现由 `app/core`（成员 B）接入」
+  也已与代码不符。以上均已按实际修订。
 
 ### 验证记录
+
+> 本节按时间追加，**最新一条为准**；更早条目里的用例数是当时的快照，不代表当前状态。
 
 - 2026-09-11（合并 A/B/D 三份 D7-D8 提交后）：`uv run pytest -q` → **127 passed**，
   含 API 集成、工具审计、行为日志与流水线用例。
@@ -252,13 +284,28 @@ Token 采样按阶段记录（total 1020 / 1344 / 3051）。踩坑与决策见�
     ——这批用例 monkeypatch 了 `AgentSettings` / `list_agent_configs`，却没有屏蔽库里的
     *活的* Provider 覆盖。显式 `PUT` 全 `null` 清除覆盖后 8 条立即恢复通过（38 passed），
     全量回到 **371 passed / 7 skipped**。
-- 注意事项：数据库读取用例使用 SQLite 内存表与注入目录数据，MCP 用例走内存协议往返而非
-  跨进程 stdio，因此不代表真实 PostgreSQL、真实 MCP Server 或浏览器端到端验收。
-  E-04/E-05 的 Web 侧与部署脚本已在本轮补上实跑证据（见上两条），
-  **依赖模型的链路已于 2026-09-15 用 `gpt-5.5` 补跑通过**（同见上两条），
+- 2026-09-16（合入 PR #9 与 C-1 后，本机 compose 全栈在跑）：`uv run pytest -q` →
+  **606 passed / 5 failed / 7 skipped，17.01s**（共收集 618 例；上面 371 例是
+  2026-09-15 的快照，PR #9 的注册表用例与 C-1 的记忆/沙箱/stdio 用例都未计入）。
+  7 skipped 全部是 `tests/e2e/test_live_e2e.py` 里受 `MACP_E2E_LIVE=1` 控制的
+  compose 验收用例。
+  5 条失败**全部在集成层**，是同一处测试隔离缺口：`tests/integration/` 至今没有 conftest，
+  DSN 落到 `app/core/storage.py` 的默认 `localhost:5433/multi_agent`，于是这些用例读到
+  开发环境里真实保存的 `provider_configs` 行（`openai` / `deepseek-flash`），与
+  「环境配置 + 无覆盖」的期望值冲突——`tests/integration/test_config_api.py`
+  （`test_patch_updates_effective_config`、`test_null_clears_override`）与
+  `tests/integration/test_inspection_api.py`（`test_provider_and_agent_agree` 两参数化、
+  `test_missing_model`）。单元层的同类失败已由 `eda7758` 修复，这条记录取代
+  2026-09-15 的「8 条转红」口径（当时 3 条在单元层，现为 0 条）。
+- 注意事项：数据库读取用例的设计口径是 SQLite 内存表与注入目录数据，但**集成层目前并未
+  真正隔离**——`tests/integration/` 没有 conftest，默认连开发库，见上一条与
+  `doc/testing.md` §4.4。MCP 用例既有内存协议往返（`tests/unit/test_mcp_tools.py`），
+  也有真实跨进程 stdio（`tests/e2e/test_mcp_stdio_e2e.py`，2026-09-16 补）；两者都不等于
+  真实 PostgreSQL 与浏览器端到端验收。E-04/E-05 的 Web 侧与部署脚本已补上实跑证据
+  （见上文两条），**依赖模型的链路已于 2026-09-15 用 `gpt-5.5` 补跑通过**（同见上两条），
   **浏览器端渲染仍是人工核对项**（前端门禁为类型检查 + 构建，未引入浏览器自动化）；
-  全量 `uv run pytest` 隐含需要一个可达的 PostgreSQL 与 Redis，且**在 Provider 覆盖
-  写库后会因测试隔离缺口转红**（见上一条）。
+  全量 `uv run pytest` 现在只有**集成层**隐含需要可达的 PostgreSQL 与 Redis
+  （单元与 E2E 层已 DSN 自足化，见 `doc/testing.md` §1）。
 
 ### 范围说明
 
