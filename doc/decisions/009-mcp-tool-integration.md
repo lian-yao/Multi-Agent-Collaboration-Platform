@@ -58,3 +58,26 @@ D7-D8（里程碑 M4）要求「实现 MCP 工具注册与调用；至少 4 个�
   （内部缓存客户端），避免每个阶段重建 MCP 连接。
 - 是否真的发起工具调用取决于模型能力：本地模型返回 `tool_calls` 时走工具路径，否则自动
   退回纯生成路径，不影响既有的三步流水线演示。
+
+## 修订（2026-09-20：工具轮次上限与空输出兜底，F-07）
+
+真实 API 提供方（`deepseek-flash`）实测暴露：模型可以一直请求工具、撞上
+`TOOL_CALL_MAX_ITERATIONS`（4）后仍不产出文字，阶段于是记 `completed` 但 `content` 为空，
+下游拿到空上游内容、最终报告退化成「输入缺失」说明（ADR-016 F-07）。本 ADR 的
+ReAct 循环因此补两条兜底（实现在 `app/orchestration/pipeline_graph.py`）：
+
+1. **上限告警**：循环结束后若仍有待处理 `tool_calls`，落
+   `event=stage.tool_iteration_limit stage=… role=… iterations=4 pending_tool_calls=N`
+   （WARNING）——这是「阶段无文字产出」最常见的成因，之前不可观测。
+2. **空输出补一次文字提示**：`content` 无文字时补发
+   `请直接用文字给出本阶段的结论，不要再调用工具。` 重试一次（`MAX_EMPTY_CONTENT_RETRIES=1`）；
+   仍为空则落 `event=stage.empty_content action=continue_with_empty` 后继续，**不阻断流水线**
+   （与「工具失败不中断」的口径一致）。
+
+判空只看 `content` 是否为空——**不把「还有待处理 tool_calls」当有产出**，否则上述
+「撞上限」场景会被误判为正常完成（首版实现即踩此坑，实测 8/12 阶段载荷仍为空）。
+
+效果（2026-09-20 真实模型实测）：同批 live 运行 12 份阶段载荷 **0 份为空**，
+日志出现 7 次 `stage.tool_iteration_limit` + 5 次 `stage.empty_content action=retry`，
+且**没有 `continue_with_empty`**（补提示 5/5 全部救回文字）；代价是 live 套件
+168.87s → 343.69s（每个空阶段多一次模型调用）。
