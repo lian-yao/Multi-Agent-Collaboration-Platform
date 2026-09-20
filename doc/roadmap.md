@@ -470,7 +470,8 @@ M5 闭环后又有两批改动合入 `master`，当时都未回填本文件的�
   - **同轮修掉用例假设问题**：`test_live_tool_calls_are_readable_from_postgresql` 原断言
     `total == len(items)`（隐含不超过默认单页 20 条），本轮真实运行出现 34–39 次调用后误判；
     改为按分页语义断言（page_size=100，装满则本页 == 100，否则 total == len(items)），
-    复跑该用例 1 passed（total=16）。因此 636 的计入不含 live 用例。
+    复跑该用例 1 passed（total=16）；随后**完整 live 套件复跑 7 passed / 591.47s**
+    （最终代码状态，含重试分类与用例修正）。因此 636 的计入不含 live 用例。
   - **残留时间成本在可重试侧**：本机无公网出口，`web_search` 每次尝试约 10s × 最多 4 次
     ≈ 40s，是 live 9–10 分钟耗时的主要来源；压缩它需把 `TOOL_SEARCH_ENDPOINT` 指向可达服务
     或在无网环境不暴露该工具（配置项）。

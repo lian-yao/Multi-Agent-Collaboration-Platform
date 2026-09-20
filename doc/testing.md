@@ -677,6 +677,8 @@ MACP_E2E_LIVE=1 MACP_E2E_TIMEOUT=900 uv run pytest tests/e2e/test_live_e2e.py -q
 uv run pytest tests/unit/test_pipeline_tools.py tests/unit/test_builtin_tools.py -q   # 151 passed
 uv run pytest -q                                                                     # 636 passed / 7 skipped
 # 真实模型：日志统计 36 × tool.retry（瞬时）+ 13 × tool.retry_skipped（非法 SQL / 策略拒绝）
+MACP_E2E_LIVE=1 MACP_E2E_TIMEOUT=900 uv run pytest tests/e2e/test_live_e2e.py -q -s
+# → 7 passed / 591.47s（修掉分页假设后的完整复跑）
 ```
 
 **同轮修掉的用例假设问题**：`test_live_tool_calls_are_readable_from_postgresql` 原断言
