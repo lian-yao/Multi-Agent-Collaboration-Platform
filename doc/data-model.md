@@ -334,14 +334,16 @@ Prompt 时需同步 roles.py 与 `BUILTIN_AGENT_SEED`，避免目录与 Prompt �
 
 数据结构落地于 `app/memory/schemas.py`，读写接口契约见 `app/memory/store.py`，Redis 实现
 见 `app/memory/redis_store.py`，决策见 ADR-005（含 2026-09-16 修订：真实 IO 落在记忆层
-自身，不等待 `app/core` 接入）。两条记忆**目前尚无编排与 API 调用方**——历史消息既不落
-记忆也不回注 Prompt，仅 `GET /messages` 从 PostgreSQL 读取（缺口 F-06）。
+自身，不等待 `app/core` 接入）。调用方接线见 ADR-019（2026-09-20 收口 F-06）：
+**会话记忆已接入 API 与编排**——受理用户消息时写、终态回写助手报告时写，阶段活动读最近
+10 条并注入提示词；**长期记忆仍无调用方**（实现就绪，等待显式「记住这个」交互或抽取流程）。
 
 - **会话记忆** `session:{id}:messages`：List，元素为 `SessionMessage` 的 JSON（含
   `session_id/role/content/id/agent_run_id/status/created_at`）。`role` ∈
   `user/assistant/system/tool`，`status` ∈ `queued/running/completed/failed`
   （对齐 §3 messages 表与 `doc/api.md` §2）。仅服务会话上下文读取，TTL 7 天，可丢失；
-  PostgreSQL `messages` 为最终事实源，删除 Redis 不删除 PostgreSQL。
+  PostgreSQL `messages` 为最终事实源，删除 Redis 不删除 PostgreSQL。条目里的 `status`
+  是写入时刻的快照，不随后续状态迁移更新（消费方只用 `role` 与 `content`）。
 - **长期记忆** `agent:{id}:memory`：Hash，field=记忆项 key，value=JSON
   `{content, agent_id, updated_at}`（不含 key）。写前先落审计；无 TTL。
   **本期不引入向量检索**：设计文档将向量库标记为「可选」，故长期记忆为结构化偏好记录，

@@ -120,7 +120,8 @@ Token 采样按阶段记录（total 1020 / 1344 / 3051）。踩坑与决策见�
   即非零码退出）——修复后的恢复演练需重跑一遍；
   F-06 会话/长期记忆未接入编排（当时 `app/memory/` 只有 Protocol，历史消息既不落记忆
   也不回注 Prompt）——**当时只记录，未处置**。2026-09-16 合入 C-1 后 Redis 实现已落地
-  并有单测覆盖，但编排与 API 仍无调用方，口径见下文「M5 之后的增量」。
+  并有单测覆盖，但编排与 API 仍无调用方，口径见下文「M5 之后的增量」；
+  **2026-09-20 会话记忆接线完成**（ADR-019），长期记忆仍无调用方。
 
 ### M5 之后的增量（2026-09-16，合入 PR #9 与 C-1）
 
@@ -141,7 +142,8 @@ M5 闭环后又有两批改动合入 `master`，当时都未回填本文件的�
 - **缺口状态变化**：
   - F-06 口径变更：`app/memory/` 不再「只有 Protocol」——Redis 实现已落地且有单测，
     但 `app/api`、`app/orchestration`、`app/workflows` 里仍无消费者，历史消息既不落记忆
-    也不回注 Prompt，即**「实现已就绪、接线未做」**。
+    也不回注 Prompt，即**「实现已就绪、接线未做」**。（该缺口已于 2026-09-20 收口，
+    见下方验证记录。）
   - I-06 的遗留缺口「仍缺跨进程 stdio 传输的端到端用例」已由
     `tests/e2e/test_mcp_stdio_e2e.py`（真实启动 `python -m app.mcp.server` 子进程）关闭。
   - F-01 已于 2026-09-20 修复（调用 ID 派生键加入阶段名，见验证记录）；另外
@@ -350,6 +352,26 @@ M5 闭环后又有两批改动合入 `master`，当时都未回填本文件的�
   - **变更影响**：修复改变了调用 ID 的取值，因此升级前已落库的审计行不会与新 ID 命中缓存——
     对升级瞬间正在重放的活动，该工具调用会**多执行一次**（审计新增一行，不覆盖旧行）。
     本项目工作流时长以秒计，实际影响可忽略；如需跨版本重放严格幂等，需保留旧派生键的兼容分支。
+- 2026-09-20（F-06 会话记忆接线，直接落在 `master`）：会话记忆从「实现已就绪、接线未做」
+  变为真实链路的一部分，决策见 ADR-019。
+  - **写点**：`POST /api/v1/sessions/{id}/messages` 受理成功后写用户消息
+    （`app/api/main.py::send_message`）；`finalize_activity` 写完 assistant 报告后写同一正文
+    （`id` 用 `report_message_id(workflow_id)`，与 PostgreSQL 行同 ID）。只写进入用户视野的
+    消息，阶段中间结论与工具观察不写（重放会重建，写进去只会污染上下文）。
+  - **读点**：`advance_pipeline_stage` 按 `session_id` 读最近 10 条
+    （`CONVERSATION_CONTEXT_LIMIT`），剔除 `agent_run_id` 等于本轮的消息，按时间正序渲染成
+    `【会话历史（最近 N 条，供多轮上下文继承）】` 段落放在用户输入最前面
+    （`app/orchestration/pipeline_graph.py::_conversation_block`）；没有历史时提示词逐字不变。
+  - **运行期与降级**：新增 `app/memory/runtime.py`（`conversation_memory()` /
+    `set_conversation_memory_factory()`，与 `set_redis_factory`、`set_tool_registry_factory`
+    同一模式）；Redis 不可用时实现层降级为「空 / 无操作」，记忆缺失不让协作失败。
+  - **先红后绿**：新增 4 条用例后先确认失败（阶段提示词无历史、终态未写记忆、受理未写记忆、
+    多轮 E2E 第二轮无上一轮上下文），再接线；另加 1 条「无历史时提示词逐字不变」的守护用例。
+  - **测试基线**：三个 conftest 都注入会话记忆内存替身，用例不连真实 Redis、不污染开发环境。
+  - 验证：`uv run pytest -q` → **623 passed / 0 failed / 7 skipped，15.40s**
+    （630 例，含新增 U-13 ×3 与 E-07 ×1 以及守护用例）。
+  - **未接线部分**：长期记忆 `agent:{id}:memory` 仍无调用方——它需要显式的「记住这个」
+    交互或独立抽取流程，届时另开 ADR；向量检索按设计文档仍为可选项。
 - 注意事项：数据库读取用例的设计口径是 SQLite 内存表与注入目录数据；**集成层已由
   `tests/integration/conftest.py` 完成隔离（2026-09-20），见上一条与 `doc/testing.md`
   §4.5**——三层 conftest 现在都把 DSN 钉成内存 SQLite，并用 autouse fixture 替换

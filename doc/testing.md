@@ -75,6 +75,7 @@ cd deploy; .\start.ps1                     # 起完整环境
 | U-10 | 行为日志事件 | 阶段开始/结束/失败与工具调用输出 `event=... field=value` 结构化日志，含 workflow_id 与耗时 | M4 |
 | U-11 | 会话与长期记忆的 Redis 读写 | `session:{id}:messages` List 追加与「读最近 N 条」、`agent:{id}:memory` Hash 覆盖写、序列化往返、客户端不可用时按契约降级（ADR-005 修订，2026-09-16 补） | M4（增量） |
 | U-12 | 沙箱 Docker 后端隔离与 fail-closed | 容器隔离边界参数齐全、网络仅在显式允许时打开、超时杀容器且不报成功、Docker 不可用时报 sandbox unavailable、输出超限截断并标记（2026-09-16 补，`38200cc` 只加测试） | M4（增量） |
+| U-13 | 会话记忆接线 | 阶段提示词带上会话历史且剔除本轮自己的消息、无历史时提示词逐字不变、终态把报告正文追加进记忆、受理消息时写用户消息（ADR-019，2026-09-20 补，关闭 F-06 的接线部分） | M4（增量） |
 
 ### 2.2 集成测试（I）
 
@@ -102,6 +103,7 @@ cd deploy; .\start.ps1                     # 起完整环境
 | E-04 | Web 会话管理 | UI 创建会话、发消息、暂停/恢复 | UI 与 API 状态一致 | M5 |
 | E-05 | 一键部署 | `start.ps1` → 健康检查 → `stop.ps1` | 全部服务健康 | M5 |
 | E-06 | MCP 跨进程 stdio 链路 | 真实启动 `python -m app.mcp.server` 子进程，经 stdio 握手并发现工具 | 子进程可启动、stdout 不被日志污染、工具目录跨进程一致（2026-09-16 补，关闭 I-06 的遗留缺口） | M4（增量） |
+| E-07 | 多轮上下文继承 | 同一会话提交两次 → 第二轮阶段的 collector 提示词含第一轮用户消息与助手报告，会话记忆按轮次累积 user/assistant（ADR-019，2026-09-20 补） | 第二轮回答建立在第一轮之上 | M5 后（ADR-019） |
 
 E-04/E-05 目前的自动化程度（成员 D D9-10）：会话生命周期（创建 → 暂停 → 暂停期提交被拒
 → 恢复 → 回读）与「前端容器 + nginx `/api` 反代」走 `tests/e2e/test_live_e2e.py` 的
@@ -408,7 +410,10 @@ CLI 对运行时终态非 `COMPLETED` 即非零码退出）；
 F-06 会话/长期记忆未接入编排（当时 `app/memory/` 只有 Protocol，历史消息既不落记忆也不
 回注 Prompt，仅 `GET /messages` 读取）——**当时只记录，未处置**。2026-09-16 合入 C-1 后
 Redis 实现已落地（`app/memory/redis_store.py`，U-11 覆盖），但编排与 API 仍无调用方，
-即**「实现已就绪、接线未做」**，见 §4.4。
+即**「实现已就绪、接线未做」**，见 §4.4。**2026-09-20 会话记忆接线完成**（ADR-019）：
+受理用户消息与终态回写报告时写记忆，阶段活动读最近 10 条注入提示词（剔除本轮）——
+用例 U-13 与 E-07；长期记忆仍是「实现就绪、无调用方」，需显式「记住这个」交互或抽取流程，
+届时另开 ADR。
 
 ### 4.3 Web UI 与部署编排（2026-09-15，成员 D D9-10）
 
@@ -519,7 +524,7 @@ uv run pytest -q -rs      # 7 skipped 全部为 MACP_E2E_LIVE=1 控制的 test_l
 | 用例规模 | 371 → 618 | PR #9 的 `tests/integration/test_registry_api.py`（52 例）与 C-1 的 `test_memory_redis_store.py`（19）、`test_sandbox_docker_runtime.py`（13）、`test_mcp_stdio_e2e.py`（5）等未在旧记录中体现 |
 | 单元层隔离 | 已修 | `eda7758`：`tests/unit/conftest.py` 钉内存 SQLite，`test_agent_config.py` 归零 |
 | 集成层隔离 | **已修**（2026-09-20） | `tests/integration/conftest.py`：DSN 钉内存 SQLite + Provider 配置的 Redis 客户端换内存替身，5 条失败归零；根因更正见 §4.5 |
-| 记忆实现 | 代码就绪、**未接线** | U-11 覆盖 `app/memory/redis_store.py`；`app/api`、`app/orchestration`、`app/workflows` 无调用方（F-06） |
+| 记忆实现 | 会话记忆**已接线**（2026-09-20） | U-11 覆盖 `app/memory/redis_store.py`；会话记忆写点（`app/api/main.py`、`finalize_activity`）与读点（`advance_pipeline_stage` → 提示词）见 ADR-019、U-13、E-07；长期记忆仍无调用方 |
 | MCP 跨进程 stdio | 已补 | E-06（`tests/e2e/test_mcp_stdio_e2e.py`）真实启动 `python -m app.mcp.server` 子进程 |
 | 沙箱 Docker 后端 | 只补了测试 | `38200cc` 的 diff 内无 `app/sandbox` 变更，提交信息所述的「隔离参数」没有代码改动 |
 | `.env_example` | 已补、此前无文档引用 | `31d9cef` 在原文件上补 65 行（`TOOL_` / `MCP_` / `SANDBOX_` / `OBS_` 四段）；`doc/deployment.md` 的环境变量表已补上指向它的说明 |
