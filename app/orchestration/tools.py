@@ -87,16 +87,28 @@ def tool_call_id(
     tool_name: str,
     *,
     scope: str | None = None,
+    stage: str | None = None,
 ) -> str:
     """生成调用 ID。
 
     给定 `scope`（例如 Workflow 实例 ID）时用 uuid5 派生，使同一次执行的调用 ID
     在重放后可复现；未给定时退化为 uuid4，只要在本进程内唯一即可。
+
+    `stage` 是派生键的一部分，可持久化执行必须传入阶段名：`ToolCaller` 每个阶段重建、
+    `index` 从 0 起算，只按 `scope + index + tool_name` 派生会让同一 Workflow 的两个阶段
+    拿到同一个调用 ID，后一个阶段被审计层当成重放，直接返回前一个阶段的缓存结果（F-01）。
+    与 `app/core/tool_audit.py` 的约定一致——call_id 取自
+    `workflow_id + stage + tool_name`。
     """
 
     if scope is None:
         return str(uuid.uuid4())
-    return str(uuid.uuid5(TOOL_CALL_NAMESPACE, f"macp:tool:{scope}:{index}:{tool_name}"))
+    return str(
+        uuid.uuid5(
+            TOOL_CALL_NAMESPACE,
+            f"macp:tool:{scope}:{stage or '-'}:{index}:{tool_name}",
+        )
+    )
 
 
 def as_openai_tool(spec: ToolSpec) -> dict[str, Any]:
@@ -115,9 +127,16 @@ def as_openai_tool(spec: ToolSpec) -> dict[str, Any]:
 class ToolCaller:
     """一次执行内消费工具注册表：负责发现、调用与记录（不落库）。"""
 
-    def __init__(self, registry: ToolRegistry, *, scope: str | None = None) -> None:
+    def __init__(
+        self,
+        registry: ToolRegistry,
+        *,
+        scope: str | None = None,
+        stage: str | None = None,
+    ) -> None:
         self._registry = registry
         self._scope = scope
+        self._stage = stage
         self._discovered = tuple(registry.list_tools())
         self.records: list[ToolCallRecord] = []
         self._index = 0
@@ -145,7 +164,12 @@ class ToolCaller:
     def invoke(self, tool_name: str, arguments: dict[str, Any] | None = None) -> ToolCallRecord:
         """调用一个工具并记录结果；失败归一化为 failed 记录，不向外抛异常。"""
 
-        call_id = tool_call_id(self._index, tool_name, scope=self._scope)
+        call_id = tool_call_id(
+            self._index,
+            tool_name,
+            scope=self._scope,
+            stage=self._stage,
+        )
         self._index += 1
         record = ToolCallRecord(
             call_id=call_id,

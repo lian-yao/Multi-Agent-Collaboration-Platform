@@ -129,34 +129,28 @@ def test_pipeline_runs_three_stages_in_order_with_real_tools(
         for call in e2e_env.model.calls[1::2]
     )
 
-    # 审计链路（tool_calls 表替身）按 running→succeeded 落库。三个阶段共用同一条
-    # 记录——审计主键按 Workflow 级 scope 派生，跨阶段同工具即同一主键，详见
-    # `test_audit_key_collapses_distinct_calls_across_stages`（已知缺陷，成员 A/B 侧）。
-    assert len(e2e_env.audit.rows) == 1
-    row = next(iter(e2e_env.audit.rows.values()))
-    assert row["status"] == "succeeded"
-    assert row["tool_name"] == "calculator"
-    assert row["workflow_run_id"] == workflow_id
+    # 审计链路（tool_calls 表替身）按 running→succeeded 落库：每个阶段各落一条
+    # （调用 ID 派生键含阶段，见 `test_each_stage_call_is_audited_with_its_own_arguments`）。
+    rows = list(e2e_env.audit.rows.values())
+    assert len(rows) == 3
+    assert all(row["status"] == "succeeded" for row in rows)
+    assert {row["tool_name"] for row in rows} == {"calculator"}
+    assert all(row["workflow_run_id"] == workflow_id for row in rows)
 
 
-def test_audit_key_collapses_distinct_calls_across_stages(e2e_env) -> None:
-    """已知缺陷（待成员 A/B 决策，成员 C 侧 F-01 证据化上报）：
+def test_each_stage_call_is_audited_with_its_own_arguments(e2e_env) -> None:
+    """三个阶段用**不同**参数请求同一种工具时，各自真正执行并各落一条审计（F-01）。
 
-    三个阶段用**不同**参数请求同一种工具时，后两个阶段不会真正执行工具，
-    拿到的是第一阶段输出的缓存：
+    缺陷成因（2026-09-20 修复前）：`app/orchestration/tools.py` 的 `ToolCaller` 每阶段
+    重建、`index` 都从 0 起算，而调用 ID 只按 `scope + index + tool_name` 派生，
+    于是三个阶段的 ID 完全相同，`app/core/tool_audit.execute_tool_call` 按该 ID 幂等，
+    后两个阶段直接返回第一阶段 succeeded 的缓存（实测：analyze 请求 `12*(3+5)`、
+    report 请求 `12*(3+6)`，两者都拿到 `{"expression": "12*(3+4)", "value": 84}`，
+    三次调用只落 1 行审计）。
 
-    - `app/orchestration/tools.py` 的 `ToolCaller` 每阶段重建，`index` 都从 0 起算；
-    - `app/workflows/pipeline.py` 传入的 `tool_scope` 是 Workflow 级 ID
-      （`workflow_run_id or workflow_id or run_id`），阶段名不参与；
-    - 因此 `tool_call_id(index, tool_name, scope)` 在三个阶段完全相同，
-      `app/core/tool_audit.execute_tool_call` 按该 ID 幂等，直接返回首个 succeeded 的缓存。
-
-    后果：参数被忽略、工具只执行一次，与 `app/core/tool_audit.py` 模块文档
-    「call_id 取自 workflow_id + stage + tool_name」的约定不符。真实模型下即
-    「分析师/报告员拿到收集者的检索结果」的错误链路。
-
-    A/B 修复后（例如 `tool_scope=f"{workflow_id}:{stage}"`）本用例会失败，
-    届时应改为断言 3 条记录且各阶段 output 与自身 input 对应。
+    修复：阶段名进入调用 ID 派生键（`tool_call_id(..., stage=...)`），与
+    `app/core/tool_audit.py` 模块文档「call_id 取自 workflow_id + stage + tool_name」
+    的约定一致；同阶段重放仍得到同一个 ID，幂等语义不变。
     """
 
     client = TestClient(app)
@@ -169,16 +163,25 @@ def test_audit_key_collapses_distinct_calls_across_stages(e2e_env) -> None:
         "12*(3+5)",
         "12*(3+6)",
     ]
-    first = {"expression": "12*(3+4)", "value": 12 * (3 + 4)}
+    expected = [
+        {"expression": "12*(3+4)", "value": 84},
+        {"expression": "12*(3+5)", "value": 96},
+        {"expression": "12*(3+6)", "value": 108},
+    ]
     outputs = [
         e2e_env.stage_payload(workflow_id, stage)["tool_calls"][0]["output"]
         for stage in STAGES
     ]
-    assert outputs == [first, first, first]
-    assert len(e2e_env.audit.rows) == 1
-    assert next(iter(e2e_env.audit.rows.values()))["input"] == {
-        "expression": "12*(3+4)"
-    }
+    assert outputs == expected
+    assert outputs[1] != outputs[0] and outputs[2] != outputs[0]
+
+    rows = list(e2e_env.audit.rows.values())
+    assert len(rows) == 3
+    assert [row["input"] for row in rows] == [
+        {"expression": expression} for expression in ("12*(3+4)", "12*(3+5)", "12*(3+6)")
+    ]
+    assert [row["output"] for row in rows] == expected
+    assert len({row["id"] for row in rows}) == 3
 
 
 def test_tool_failure_is_recorded_and_pipeline_continues(

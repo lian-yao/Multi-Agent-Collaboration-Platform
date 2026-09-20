@@ -277,6 +277,85 @@ def test_tool_call_ids_are_stable_when_scope_is_given_for_replay():
     assert first.call_id == replayed.call_id
 
 
+def test_role_stage_scopes_tool_call_ids_by_stage():
+    """同一 Workflow 的两个阶段调同一工具时必须产出两个调用 ID（F-01）。
+
+    `ToolCaller` 每个阶段重建、`index` 都从 0 起算，所以调用 ID 必须把阶段纳入派生键；
+    否则 `app/core/tool_audit.execute_tool_call` 会把后一个阶段当成重放，直接返回前一个
+    阶段的缓存结果（实测：analyze 请求 `12*(3+5)` 却拿到 collect 的 `12*(3+4)` 结果）。
+    """
+
+    registry = MemoryToolRegistry(
+        [SEARCH_SPEC],
+        results={"web_search": {"hits": ["资料"]}},
+    )
+    model = ToolCallingChatModel(tool_name="web_search", tool_arguments={"query": "主题"})
+
+    collect = run_role_stage(
+        PipelineStage.COLLECT,
+        task="任务",
+        llm=model,
+        tool_registry=registry,
+        tool_scope="workflow-1",
+    )
+    analyze = run_role_stage(
+        PipelineStage.ANALYZE,
+        task="任务",
+        previous={"content": "收集阶段的结论"},
+        llm=model,
+        tool_registry=registry,
+        tool_scope="workflow-1",
+    )
+
+    assert collect["tool_calls"][0]["call_id"] != analyze["tool_calls"][0]["call_id"]
+
+
+def test_role_stage_keeps_tool_call_id_stable_when_the_same_stage_replays():
+    """同一阶段重放（Dapr 活动重放）仍要得到同一个调用 ID，幂等语义不能被改坏。"""
+
+    registry = MemoryToolRegistry(
+        [SEARCH_SPEC],
+        results={"web_search": {"hits": ["资料"]}},
+    )
+    model = ToolCallingChatModel(tool_name="web_search", tool_arguments={"query": "主题"})
+
+    first = run_role_stage(
+        PipelineStage.COLLECT,
+        task="任务",
+        llm=model,
+        tool_registry=registry,
+        tool_scope="workflow-1",
+    )
+    replayed = run_role_stage(
+        PipelineStage.COLLECT,
+        task="任务",
+        llm=model,
+        tool_registry=registry,
+        tool_scope="workflow-1",
+    )
+
+    assert first["tool_calls"][0]["call_id"] == replayed["tool_calls"][0]["call_id"]
+
+
+def test_tool_caller_stage_is_part_of_the_derived_call_id():
+    """`ToolCaller` 把阶段纳入派生键：同 scope、同序号、同工具，不同阶段即不同 ID。"""
+
+    registry = MemoryToolRegistry([SEARCH_SPEC])
+
+    collect = ToolCaller(registry, scope="workflow-1", stage="collect").invoke(
+        "web_search", {"query": "收集"}
+    )
+    analyze = ToolCaller(registry, scope="workflow-1", stage="analyze").invoke(
+        "web_search", {"query": "分析"}
+    )
+    replayed = ToolCaller(registry, scope="workflow-1", stage="collect").invoke(
+        "web_search", {"query": "收集"}
+    )
+
+    assert collect.call_id != analyze.call_id
+    assert collect.call_id == replayed.call_id
+
+
 def test_multi_agent_pipeline_records_tool_calls_per_stage():
     registry = MemoryToolRegistry(
         [SEARCH_SPEC],

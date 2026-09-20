@@ -285,7 +285,12 @@ def run_role_stage(
     model = llm or build_chat_model(settings or get_settings())
     registry = tool_registry if tool_registry is not None else default_tool_registry()
     scope = tool_scope if tool_scope is not None else workflow_id
-    caller = ToolCaller(registry, scope=scope) if registry is not None else None
+    # 阶段名进入调用 ID 派生键：同一 Workflow 的不同阶段各算一次调用（F-01）。
+    caller = (
+        ToolCaller(registry, scope=scope, stage=resolved.value)
+        if registry is not None
+        else None
+    )
     return _run_role_stage(resolved, task, previous, model, caller, workflow_id=workflow_id)
 
 
@@ -336,7 +341,11 @@ def build_multi_agent_pipeline(
                 if previous_stage is not None
                 else None
             )
-            caller = ToolCaller(registry) if registry is not None else None
+            caller = (
+                ToolCaller(registry, stage=stage.value)
+                if registry is not None
+                else None
+            )
             result = _run_role_stage(stage, state.task, previous, model, caller)
             return _state_update(complete_step(state, stage, result))
 
