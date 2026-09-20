@@ -17,7 +17,7 @@
 - 存储：Redis + PostgreSQL（SQLAlchemy）
 - 工具：MCP
 - 可观测：OpenTelemetry + Jaeger + Prometheus
-- 前端（规划）：React + Vite + TailwindCSS
+- 前端：React + Vite + 手写 CSS（按视图分区组织；与建议方案的 TailwindCSS 偏差见 ADR-021）
 - 语言：Python 3.12、TypeScript
 
 ### 已定架构决策（不要自由发挥）

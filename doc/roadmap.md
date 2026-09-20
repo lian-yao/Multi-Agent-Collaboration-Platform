@@ -372,6 +372,21 @@ M5 闭环后又有两批改动合入 `master`，当时都未回填本文件的�
     （630 例，含新增 U-13 ×3 与 E-07 ×1 以及守护用例）。
   - **未接线部分**：长期记忆 `agent:{id}:memory` 仍无调用方——它需要显式的「记住这个」
     交互或独立抽取流程，届时另开 ADR；向量检索按设计文档仍为可选项。
+- 2026-09-20（文档口径收口：Dapr Agents 使用边界 + 前端样式偏差）：
+  - **ADR-020（Dapr Agents 1.0.6 使用边界）**：核对后确认生产链路用的是
+    `dapr.ext.workflow`（Workflow/活动/子 Workflow/重放）与 `dapr.clients`（State Store），
+    `rg dapr_agents app tests` 命中 0 处。决策：保留依赖与 OTel 1.39.1 约束，
+    不引入 `DurableAgent`/`DaprChatClient`/`dapr_agents.memory`/`AgentTool` 等高层抽象
+    （逐项与 ADR-001/007/005/009/012/014 的既有决策重叠）。
+    **ADR-004 要求的「最小可运行 POC」仍未做**，并已核实可行性边界：`DurableAgent(...)`
+    构造即连 sidecar（gRPC 50001，无 sidecar 立刻 `UNAVAILABLE`），POC 需一次独立
+    `dapr run`（CLI 1.18.2 可用）；做与不做属方向与验收范围，待人类决定。
+  - **ADR-021（前端样式偏差）**：前端实际为 React + Vite + 手写 CSS
+    （`styles.css` 4249 行等 5 个文件，合计约 6800 行），`package.json` 无 tailwind 依赖；
+    决策：本期不迁移 Tailwind（纯样式重写，风险高于收益），门禁维持类型检查 + 构建 +
+    jsdom 渲染冒烟 + 人工核对。`AGENTS.md` 技术栈一栏已改为与实现一致并指向 ADR-021；
+    `doc/15 ...平台.md` 的建议方案措辞属事实源，改动需人类同意，本次未动。
+  - 本轮为纯文档改动，未触碰代码，测试基线不变（623 passed / 7 skipped）。
 - 注意事项：数据库读取用例的设计口径是 SQLite 内存表与注入目录数据；**集成层已由
   `tests/integration/conftest.py` 完成隔离（2026-09-20），见上一条与 `doc/testing.md`
   §4.5**——三层 conftest 现在都把 DSN 钉成内存 SQLite，并用 autouse fixture 替换

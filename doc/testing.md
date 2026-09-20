@@ -174,6 +174,9 @@ uv run python scripts/perf_concurrency.py --sessions 10 --concurrency 10 --json 
 （`tsc --noEmit && vite build`）。因此前端改动按「构建通过 + 真实后端冒烟」两步验证，
 不把构建通过当作功能验收。
 
+样式实现为**手写 CSS**（按工作台/配置/记录三个视图分区组织，约 6800 行），
+不是建议方案里的 TailwindCSS，偏差与原因见 ADR-021。
+
 Provider 配置面板的验证步骤（ADR-017 之后：`frontend/src/config/` 下的
 「默认路由」分区 = `DefaultRoutePanel.tsx`）：
 
