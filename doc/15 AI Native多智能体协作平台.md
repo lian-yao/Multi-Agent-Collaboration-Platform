@@ -2,7 +2,7 @@
 
 | **类别** | **编号** | **题目** | **限报** | **要求** | **需求概述** | **担任角色** | **建议方案** | **建议语言** | **成果形式** |
 |:---:|:---:|:---|:---:|:---:|:---|:---|:---|:---:|:---|
-| **2026软件新架构** | 15 | **AI Native多智能体协作平台** | 4 | | 构建基于LangGraph的多智能体协作平台，实现Agent间任务分配、协作执行与持久化编排。嵌入Dapr运行时提供状态管理、服务调用、发布订阅和Durable Workflow能力，支持多模型接入（OpenAI/Claude/Ollama）、MCP工具集成和全链路可观测。核心功能：任务规划与分解、多Agent角色协作、工作流断点续传、智能体记忆管理、Agent沙箱隔离。平台提供REST API和Web可视化界面，支持Agent团队的动态编排和水平扩展。| 架构师，后端，算法 | **核心框架**：LangGraph 1.1+ + Dapr Agents 1.0.6；**AI模型**：Ollama本地部署 / OpenAI API；**运行时**：Dapr 1.17+ + Dapr Workflows；**工具集成**：MCP Server SDK；**前端**：React + Vite + TailwindCSS；**存储**：Redis + PostgreSQL；**可观测性**：OpenTelemetry + Jaeger + Prometheus；**部署**：Docker + Dapr CLI，提供一键启动脚本。 | Python + TypeScript | 系统、开发报告 |
+| **2026软件新架构** | 15 | **AI Native多智能体协作平台** | 4 | | 构建基于LangGraph的多智能体协作平台，实现Agent间任务分配、协作执行与持久化编排。嵌入Dapr运行时提供状态管理、服务调用、发布订阅和Durable Workflow能力，支持多模型接入（OpenAI/Claude/Ollama）、MCP工具集成和全链路可观测。核心功能：任务规划与分解、多Agent角色协作、工作流断点续传、智能体记忆管理、Agent沙箱隔离。平台提供REST API和Web可视化界面，支持Agent团队的动态编排和水平扩展。| 架构师，后端，算法 | **核心框架**：LangGraph 1.1+ + Dapr Agents 1.0.6（依赖与 OpenTelemetry 版本约束；持久化执行由 Dapr Workflows 承载，使用边界见 `doc/decisions/020-dapr-agents-usage-boundary.md`）；**AI模型**：Ollama本地部署 / OpenAI API；**运行时**：Dapr 1.17+ + Dapr Workflows；**工具集成**：MCP Server SDK；**前端**：React + Vite（样式为手写 CSS，见 `doc/decisions/021-frontend-styling-deviation.md`）；**存储**：Redis + PostgreSQL；**可观测性**：OpenTelemetry + Jaeger + Prometheus；**部署**：Docker + Dapr CLI，提供一键启动脚本。 | Python + TypeScript | 系统、开发报告 |
 
 ## 第二部分：完整设计方案与开发思路（2周版）
 
@@ -28,7 +28,7 @@ flowchart TB
 
     subgraph Orchestrator["Agent编排层 (Python)"]
         C["LangGraph<br>多智能体编排引擎"]
-        D["Dapr Agents<br>Agent生命周期管理"]
+        D["Dapr Workflow 运行时<br>(dapr.ext.workflow)"]
         E["MCP Client<br>工具发现与调用"]
     end
 
@@ -86,6 +86,10 @@ flowchart TB
 Dapr Agents 1.0还提供持久化的Workflow恢复能力——Agent Workflow的每一次检查点都会持久化，故障后从最后一个已知状态继续，实现应用层高可用。
 
 Dapr Agents 1.0.6 已引入，OpenTelemetry SDK 固定为 1.39.1 以满足其语义约定约束（详见 ADR-004）。
+落地口径：`dapr-agents` 作为依赖与版本约束引入、并保留最小可运行 POC
+（`scripts/poc_dapr_agents.py`，2026-09-20 在本地 Dapr 运行时跑通），持久化执行由
+Dapr Workflow（`dapr.ext.workflow`）承载，不叠加 Dapr Agents 的高层 Agent 抽象——
+逐项理由见 ADR-020。
 
 #### 模块3：MCP工具集成
 

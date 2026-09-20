@@ -20,9 +20,9 @@
    `npm --prefix frontend run build`（`tsc --noEmit && vite build`）+
    `frontend/rendercheck/` 的 jsdom 渲染冒烟 + 人工浏览器核对清单
    （`doc/testing.md` §3.3、`doc/deployment.md`「演示与验收」）。
-3. **口径同步范围**：`AGENTS.md` 技术栈一栏改为与实现一致（React + Vite + 手写 CSS，
-   指向本 ADR）；`doc/15 ...平台.md` 的「建议方案」属事实源，修改需人类同意，
-   本次未改——若同意，按「React + Vite（样式手写 CSS，见 ADR-021）」修订。
+3. **口径同步范围**：`AGENTS.md` 技术栈一栏已改为与实现一致（React + Vite + 手写 CSS，
+   指向本 ADR）；`doc/15 ...平台.md` 的「建议方案」已按人类确认于 2026-09-20 同步为
+   「React + Vite（样式为手写 CSS，见 ADR-021）」。
 
 ## 备选与未采纳
 

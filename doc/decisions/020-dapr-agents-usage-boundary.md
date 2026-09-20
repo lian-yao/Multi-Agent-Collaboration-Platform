@@ -85,5 +85,7 @@ dapr run --app-id macp-agents-poc --dapr-http-port 3510 --dapr-grpc-port 50001 `
   Dapr Workflow 承载」，不会与代码事实冲突。
 - 若后续要用 `dapr_agents` 高层能力（例如 HITL 审批、Agent 作为独立服务暴露），
   必须新开 ADR 并修订 `doc/dapr-integration.md` §7 的模块依赖列。
-- `doc/15 ...平台.md` 的「核心框架」表述与建议方案措辞如需调整，属事实源修改，
-  需人类同意后再改（本次未动）。
+- `doc/15 ...平台.md` 的建议方案措辞已按人类确认同步（2026-09-20）：核心框架一栏补
+  「依赖与 OpenTelemetry 版本约束；持久化执行由 Dapr Workflows 承载，使用边界见 ADR-020」，
+  架构图里 `Dapr Agents / Agent生命周期管理` 节点改为
+  `Dapr Workflow 运行时（dapr.ext.workflow）`，模块2 末尾补落地口径与 POC 指针。
