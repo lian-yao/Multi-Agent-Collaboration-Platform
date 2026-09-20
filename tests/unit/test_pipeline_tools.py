@@ -15,11 +15,12 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 import pytest
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
@@ -114,6 +115,104 @@ class ToolCallingChatModel(BaseChatModel):
                 ],
             )
         return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+class EmptyAfterObservationChatModel(BaseChatModel):
+    """收到工具观察后先返回空文本（F-07 场景）。
+
+    `recovered=True` 时补一次「请用文字给出结论」的提示后给出结论；
+    `recovered=False` 时补提示后仍为空，用于验证「告警并继续」的分支。
+    """
+
+    recovered: bool = True
+    tool_name: str = "web_search"
+    tool_arguments: dict[str, Any] = Field(default_factory=dict)
+    bound_tools: list[Any] = Field(default_factory=list, exclude=True)
+    calls: list[list[BaseMessage]] = Field(default_factory=list, exclude=True)
+
+    @property
+    def _llm_type(self) -> str:
+        return "empty-after-observation-chat-model"
+
+    def bind_tools(self, tools, **kwargs):  # noqa: ANN001 - LangChain 钩子签名
+        self.bound_tools = list(tools)
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):  # noqa: ANN001
+        self.calls.append(list(messages))
+        observed = any(isinstance(message, ToolMessage) for message in messages)
+        nudged = any(
+            isinstance(message, HumanMessage) and "不要再调用工具" in str(message.content)
+            for message in messages
+        )
+        if not observed:
+            message = AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": self.tool_name,
+                        "args": dict(self.tool_arguments),
+                        "id": "call-1",
+                        "type": "tool_call",
+                    }
+                ],
+            )
+        elif not nudged or not self.recovered:
+            message = AIMessage(content="")
+        else:
+            message = AIMessage(content="补上的结论")
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+class RelentlessToolChatModel(BaseChatModel):
+    """一直请求工具、从不产出文字（真实模型撞工具轮次上限的场景，F-07）。
+
+    `answer_after_nudge=True` 表示收到「不要再调用工具」的补提示后给出结论。
+    """
+
+    answer_after_nudge: bool = True
+    tool_name: str = "web_search"
+    tool_arguments: dict[str, Any] = Field(default_factory=dict)
+    bound_tools: list[Any] = Field(default_factory=list, exclude=True)
+    calls: list[list[BaseMessage]] = Field(default_factory=list, exclude=True)
+
+    @property
+    def _llm_type(self) -> str:
+        return "relentless-tool-chat-model"
+
+    def bind_tools(self, tools, **kwargs):  # noqa: ANN001 - LangChain 钩子签名
+        self.bound_tools = list(tools)
+        return self
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):  # noqa: ANN001
+        self.calls.append(list(messages))
+        nudged = any(
+            isinstance(message, HumanMessage) and "不要再调用工具" in str(message.content)
+            for message in messages
+        )
+        if nudged and self.answer_after_nudge:
+            return ChatResult(
+                generations=[
+                    ChatGeneration(message=AIMessage(content="补上的结论"))
+                ]
+            )
+        return ChatResult(
+            generations=[
+                ChatGeneration(
+                    message=AIMessage(
+                        content="",
+                        tool_calls=[
+                            {
+                                "name": self.tool_name,
+                                "args": dict(self.tool_arguments),
+                                "id": f"call-{len(self.calls)}",
+                                "type": "tool_call",
+                            }
+                        ],
+                    )
+                )
+            ]
+        )
 
 
 @pytest.fixture(autouse=True)
@@ -408,3 +507,102 @@ def test_workflow_stage_activity_consumes_default_registry_without_changes():
     assert record["tool_name"] == "web_search"
     assert record["status"] == ToolCallStatus.SUCCEEDED.value
     assert record["output"] == {"hits": ["资料一"]}
+
+
+def test_empty_output_is_retried_once_with_a_text_nudge():
+    """工具回合后模型只回空文本时，补一次「给出文字结论」的提示（F-07）。"""
+
+    registry = MemoryToolRegistry(
+        [SEARCH_SPEC],
+        results={"web_search": {"hits": ["资料"]}},
+    )
+    model = EmptyAfterObservationChatModel(tool_arguments={"query": "主题"})
+    model.recovered = True
+
+    result = run_role_stage(
+        PipelineStage.COLLECT,
+        task="任务",
+        llm=model,
+        tool_registry=registry,
+    )
+
+    assert result["content"] == "补上的结论"
+    assert len(model.calls) == 3  # 工具请求 → 空输出 → 补提示后的结论
+    assert "不要再调用工具" in str(model.calls[2][-1].content)
+
+
+def test_persistently_empty_output_warns_and_pipeline_continues(caplog):
+    """补提示后仍为空：落 WARNING、只重试一次，流水线继续（不中断协作）。"""
+
+    registry = MemoryToolRegistry(
+        [SEARCH_SPEC],
+        results={"web_search": {"hits": ["资料"]}},
+    )
+    model = EmptyAfterObservationChatModel(tool_arguments={"query": "主题"})
+    model.recovered = False
+
+    with caplog.at_level(logging.WARNING, logger="macp.orchestration.pipeline"):
+        result = run_role_stage(
+            PipelineStage.COLLECT,
+            task="任务",
+            llm=model,
+            tool_registry=registry,
+        )
+
+    assert result["content"] == ""
+    assert result["status"] == "completed"
+    assert len(model.calls) == 3  # 不无限重试：工具请求 + 空输出 + 一次补提示
+    assert "stage.empty_content" in caplog.text
+
+
+def test_tool_iteration_limit_is_warned_and_then_nudged_for_text(caplog):
+    """模型撞到工具轮次上限且没有文字时：先记上限告警，再补一次文字提示（F-07）。"""
+
+    from app.orchestration.pipeline_graph import TOOL_CALL_MAX_ITERATIONS
+
+    registry = MemoryToolRegistry(
+        [SEARCH_SPEC],
+        results={"web_search": {"hits": ["资料"]}},
+    )
+    model = RelentlessToolChatModel(tool_arguments={"query": "主题"})
+
+    with caplog.at_level(logging.WARNING, logger="macp.orchestration.pipeline"):
+        result = run_role_stage(
+            PipelineStage.COLLECT,
+            task="任务",
+            llm=model,
+            tool_registry=registry,
+        )
+
+    assert result["content"] == "补上的结论"
+    # 1 次首调用 + 轮次上限次重入 + 1 次补提示
+    assert len(model.calls) == TOOL_CALL_MAX_ITERATIONS + 2
+    assert "stage.tool_iteration_limit" in caplog.text
+    assert "不要再调用工具" in str(model.calls[-1][-1].content)
+
+
+def test_tool_iteration_limit_with_persistent_empty_output_continues(caplog):
+    """补提示后模型仍只给工具调用、不给文字：只重试一次、告警后继续（不阻断流水线）。"""
+
+    from app.orchestration.pipeline_graph import TOOL_CALL_MAX_ITERATIONS
+
+    registry = MemoryToolRegistry(
+        [SEARCH_SPEC],
+        results={"web_search": {"hits": ["资料"]}},
+    )
+    model = RelentlessToolChatModel(tool_arguments={"query": "主题"})
+    model.answer_after_nudge = False
+
+    with caplog.at_level(logging.WARNING, logger="macp.orchestration.pipeline"):
+        result = run_role_stage(
+            PipelineStage.COLLECT,
+            task="任务",
+            llm=model,
+            tool_registry=registry,
+        )
+
+    assert result["content"] == ""
+    assert result["status"] == "completed"
+    assert len(model.calls) == TOOL_CALL_MAX_ITERATIONS + 2  # 不无限重试
+    assert "stage.tool_iteration_limit" in caplog.text
+    assert "stage.empty_content" in caplog.text

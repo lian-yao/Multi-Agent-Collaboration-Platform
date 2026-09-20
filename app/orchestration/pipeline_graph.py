@@ -66,6 +66,13 @@ TOOL_CALL_MAX_ITERATIONS = 4
 # `app/workflows/pipeline.py::_session_history`，接线口径见 ADR-019。
 CONVERSATION_CONTEXT_LIMIT = 10
 
+# 阶段输出为空时的兜底（F-07，2026-09-20）：真实 API 模型在工具回合后可能只回空
+# content（deepseek-flash 实测），阶段仍记 completed，下游于是拿到空上游内容、
+# 最终报告退化成「输入缺失」说明。这里补一次明确要求文字的提示；仍为空则只告警，
+# 不中断流水线（与 ADR-009/010 的「失败不中断、记结构化日志」口径一致）。
+EMPTY_CONTENT_NUDGE = "请直接用文字给出本阶段的结论，不要再调用工具。"
+MAX_EMPTY_CONTENT_RETRIES = 1
+
 logger = get_logger("orchestration.pipeline")
 
 _UPSTREAM_LABELS: dict[RoleId, str] = {
@@ -195,17 +202,24 @@ def _invoke_role(
     messages: list[Any],
     llm: BaseChatModel,
     caller: ToolCaller | None,
+    *,
+    stage: PipelineStage,
+    role: RoleId,
 ) -> Any:
     """执行角色节点：接入注册表时按模型请求调用工具，否则单次调用模型。"""
 
     if caller is None or not caller.has_tools():
-        return llm.invoke(messages)
+        return _ensure_text_response(
+            llm, messages, llm.invoke(messages), stage=stage, role=role
+        )
 
     try:
         model = llm.bind_tools(caller.openai_tools())
     except (AttributeError, NotImplementedError):
         # 模型不支持工具调用时退回普通对话，不阻断流水线。
-        return llm.invoke(messages)
+        return _ensure_text_response(
+            llm, messages, llm.invoke(messages), stage=stage, role=role
+        )
 
     response = model.invoke(messages)
     for _ in range(TOOL_CALL_MAX_ITERATIONS):
@@ -226,6 +240,63 @@ def _invoke_role(
                 )
             )
         response = model.invoke(messages)
+    pending = list(getattr(response, "tool_calls", None) or [])
+    if pending:
+        # 模型撞到工具轮次上限仍在要工具：不会再执行这些调用，值得单独告警
+        # （真实 API 模型上这是「阶段没有文字产出」的常见成因，F-07）。
+        log_event(
+            logger,
+            "stage.tool_iteration_limit",
+            level=logging.WARNING,
+            stage=stage.value,
+            role=role.value,
+            iterations=TOOL_CALL_MAX_ITERATIONS,
+            pending_tool_calls=len(pending),
+        )
+    return _ensure_text_response(model, messages, response, stage=stage, role=role)
+
+
+def _ensure_text_response(
+    model: BaseChatModel,
+    messages: list[Any],
+    response: Any,
+    *,
+    stage: PipelineStage,
+    role: RoleId,
+) -> Any:
+    """保证阶段有文字产出：空输出补一次文字提示，仍为空则告警并继续（F-07）。
+
+    判空只看 `content` 是否有文字：**不能把「还有待处理 tool_calls」当作有产出**——
+    真实模型可能一直请求工具、撞到轮次上限后仍不产出结论（F-07 的实测成因）。
+    补提示时保留已有对话（含工具观察）并明确要求「不要再调用工具」。
+    """
+
+    if _content_text(response.content).strip():
+        return response
+
+    for attempt in range(1, MAX_EMPTY_CONTENT_RETRIES + 1):
+        log_event(
+            logger,
+            "stage.empty_content",
+            level=logging.WARNING,
+            stage=stage.value,
+            role=role.value,
+            attempt=attempt,
+            action="retry",
+        )
+        response = model.invoke([*messages, HumanMessage(content=EMPTY_CONTENT_NUDGE)])
+        if _content_text(response.content).strip():
+            return response
+
+    log_event(
+        logger,
+        "stage.empty_content",
+        level=logging.WARNING,
+        stage=stage.value,
+        role=role.value,
+        attempt=MAX_EMPTY_CONTENT_RETRIES,
+        action="continue_with_empty",
+    )
     return response
 
 
@@ -261,7 +332,7 @@ def _run_role_stage(
         with observed_stage(
             workflow_id=workflow_id, stage=stage.value, role=role.value
         ):
-            response = _invoke_role(messages, llm, caller)
+            response = _invoke_role(messages, llm, caller, stage=stage, role=role)
     except Exception as exc:
         log_event(
             logger,
