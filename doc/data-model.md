@@ -325,7 +325,10 @@ Prompt 时需同步 roles.py 与 `BUILTIN_AGENT_SEED`，避免目录与 Prompt �
 
 ### 4.1 记忆结构明细（角色 C 定义，2026-09-08）
 
-数据结构落地于 `app/memory/schemas.py`，读写接口契约见 `app/memory/store.py`，决策见 ADR-005。
+数据结构落地于 `app/memory/schemas.py`，读写接口契约见 `app/memory/store.py`，Redis 实现
+见 `app/memory/redis_store.py`，决策见 ADR-005（含 2026-09-16 修订：真实 IO 落在记忆层
+自身，不等待 `app/core` 接入）。两条记忆**目前尚无编排与 API 调用方**——历史消息既不落
+记忆也不回注 Prompt，仅 `GET /messages` 从 PostgreSQL 读取（缺口 F-06）。
 
 - **会话记忆** `session:{id}:messages`：List，元素为 `SessionMessage` 的 JSON（含
   `session_id/role/content/id/agent_run_id/status/created_at`）。`role` ∈

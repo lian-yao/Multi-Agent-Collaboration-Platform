@@ -184,6 +184,10 @@ M4 真实验收（工具调用在 API 模型下跑通，F-02 由此关闭）。
   `GET /messages`，即历史消息既不落记忆也不回注 Prompt。
   系统当前仍可跑通是因为 PostgreSQL 是事实源；但事实源模块 2「会话记忆持久化」的
   内容在真实链路里尚未生效。是否补、由谁补留给后续决策。
+  **2026-09-16 更新**：本条描述的两处已变——真实存储不再等待 `app/core`，Redis 实现已落地在
+  `app/memory/redis_store.py`（`69960e1`，见 ADR-005 的「修订（2026-09-16）」）；
+  **但「未接入编排」的结论不变**，`WorkflowTask` 仍只带 `task=payload.content`，
+  历史消息既不落记忆也不回注 Prompt（`doc/testing.md` §4.4）。
 
 ## 影响
 

@@ -22,6 +22,7 @@
 3. **落地边界**：D3-4 仅定义 Pydantic Schema、序列化函数、key 命名与读写接口契约
    （`ConversationMemory` / `LongTermMemory`），不接入真实 IO；真实存储实现由存储层
    （`app/core`，成员 B）待 Dapr State Management / 存储配置就绪后按契约接入。
+   （**该项已修订**：真实 IO 最终落在记忆层自身，见文末「修订（2026-09-16）」）
 4. **读写通道**：会话记忆（List）与长期记忆（Hash）均为 Redis 原生结构，
    记忆层内封装，不依赖 Dapr State Management，不触碰 `app/core` 目录边界。
 
@@ -32,3 +33,23 @@
 - 消息与会话字段以 data-model/api.md 契约为准，D 端会话 API 与 B 端存储实现可引用
   `app.memory` 而无需自行重定义。
 - 后续引入语义检索（向量库）需新增 ADR 并修订设计文档后再排期，不改变既有 Hash 契约。
+
+## 修订（2026-09-16）
+
+§3 的「真实存储实现由存储层（`app/core`，成员 B）接入」与实际落地不符，按代码修订：
+Redis 读写实现在**记忆层自身** `app/memory/redis_store.py`
+（`RedisConversationMemory` / `RedisLongTermMemory` 与 `build_conversation_memory` /
+`build_long_term_memory` 工厂），不由 `app/core` 承接。
+
+- **依据**：§4 已规定「会话记忆与长期记忆均为 Redis 原生结构，记忆层内封装，不依赖
+  Dapr State Management，不触碰 `app/core` 目录边界」。把实现留在 `app/memory` 与 §4
+  一致，也免去记忆读写等待存储层排期。
+- **落地时间与来源**：`69960e1`（「新增（记忆）：Redis 会话记忆与长期记忆实现」），
+  2026-09-16 合入 `master`；单元覆盖见 `tests/unit/test_memory_redis_store.py`
+  （`doc/testing.md` U-11）。
+- **代码事实源**：`app/memory/schemas.py`（结构）、`app/memory/store.py`（契约）、
+  `app/memory/redis_store.py`（Redis 实现）。
+- **未改变的边界**：会话/长期记忆**尚未接入编排与 API**——实现可被调用，但没有调用方，
+  历史消息既不落记忆也不回注 Prompt（缺口 F-06）。接入需要新的决策与文档，不在本修订范围。
+- **§1、§2 的结构契约未变**：key 命名、TTL 7 天、Hash 覆盖写与「写前先落审计」的语义
+  与实现一致，故不另开 ADR。
