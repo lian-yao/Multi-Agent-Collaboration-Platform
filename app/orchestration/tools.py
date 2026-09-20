@@ -203,6 +203,9 @@ class ToolCaller:
                 record.status = ToolCallStatus.FAILED
                 record.output = None
                 record.error = f"{type(exc).__name__}: {exc}"
+                # 只有瞬时故障才重试：入参/策略造成的确定性失败原样重试必然重复失败
+                # （ADR-009 修订 3；异常默认按可重试处理）。
+                retryable = bool(getattr(exc, "retryable", True))
                 log_event(
                     logger,
                     "tool.call",
@@ -212,10 +215,11 @@ class ToolCaller:
                     status=record.status.value,
                     attempt=attempt,
                     max_attempts=max_attempts,
+                    retryable=retryable,
                     duration_ms=round((time.perf_counter() - started) * 1000, 1),
                     error=record.error,
                 )
-                if attempt < max_attempts:
+                if retryable and attempt < max_attempts:
                     log_event(
                         logger,
                         "tool.retry",
@@ -227,6 +231,16 @@ class ToolCaller:
                         error=record.error,
                     )
                     continue
+                if not retryable:
+                    log_event(
+                        logger,
+                        "tool.retry_skipped",
+                        call_id=call_id,
+                        tool_name=tool_name,
+                        attempt=attempt,
+                        reason="non_retryable",
+                        error=record.error,
+                    )
                 break
             record.status = ToolCallStatus.SUCCEEDED
             record.output = output

@@ -223,7 +223,11 @@ def test_live_tool_calls_are_readable_from_postgresql(
 
     assert _wait_for_terminal(live_client, workflow_id)[0]["status"] == "completed"
 
-    response = live_client.get(f"/api/v1/workflows/{workflow_id}/tool-calls")
+    page_size = 100  # 单轮真实运行可能产生几十次调用（模型会反复查库），取最大页避免误判
+    response = live_client.get(
+        f"/api/v1/workflows/{workflow_id}/tool-calls",
+        params={"page": 1, "page_size": page_size},
+    )
     assert response.status_code == 200, response.text
     payload = response.json()
     print(
@@ -232,7 +236,12 @@ def test_live_tool_calls_are_readable_from_postgresql(
     assert payload["availability"] == "available", (
         "真实 compose 环境应已建 tool_calls 表；not_integrated 说明建表或连接有缺口"
     )
-    assert payload["total"] == len(payload["items"])
+    # 分页语义：本页装满则 total 可以大于本页条数，否则必须相等。
+    # （先前直接断言 total == len(items)，模型调用超过默认单页 20 条时会误判为失败。）
+    if payload["total"] <= page_size:
+        assert payload["total"] == len(payload["items"])
+    else:
+        assert len(payload["items"]) == page_size
     for item in payload["items"]:
         assert item["workflow_run_id"] == workflow_id
         assert item["status"] in {"succeeded", "failed"}

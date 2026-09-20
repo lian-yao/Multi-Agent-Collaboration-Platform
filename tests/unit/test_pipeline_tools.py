@@ -668,3 +668,52 @@ def test_tool_call_stops_after_three_retries_and_stage_still_answers():
     assert len(registry.calls) == 4  # 首次 + 3 次重试
     assert result["status"] == "completed"
     assert result["content"] == "最终结论"  # 失败不中断：模型仍给出结论
+
+
+def test_non_retryable_tool_failure_is_not_retried(caplog):
+    """入参/策略造成的确定性失败只尝试一次（ADR-009 修订 3）。"""
+
+    from app.tools.base import ToolExecutionError
+
+    registry = MemoryToolRegistry(
+        [SEARCH_SPEC],
+        error=ToolExecutionError("参数不合法: query 缺失", retryable=False),
+    )
+    model = ToolCallingChatModel(tool_name="web_search", tool_arguments={"query": "主题"})
+
+    with caplog.at_level(logging.INFO, logger="macp.orchestration.tools"):
+        result = run_role_stage(
+            PipelineStage.COLLECT,
+            task="任务",
+            llm=model,
+            tool_registry=registry,
+        )
+
+    [record] = result["tool_calls"]
+    assert record["status"] == ToolCallStatus.FAILED.value
+    assert len(registry.calls) == 1  # 不重试
+    assert "tool.retry_skipped" in caplog.text
+    assert result["content"] == "最终结论"  # 仍按实际结果输出
+
+
+def test_retryable_tool_failure_is_still_retried_three_times():
+    """瞬时故障（服务不可达/超时）仍按上限重试 3 次（ADR-009 修订 3）。"""
+
+    from app.tools.base import ToolExecutionError
+
+    registry = MemoryToolRegistry(
+        [SEARCH_SPEC],
+        error=ToolExecutionError("搜索服务不可达: timed out"),  # retryable 默认 True
+    )
+    model = ToolCallingChatModel(tool_name="web_search", tool_arguments={"query": "主题"})
+
+    result = run_role_stage(
+        PipelineStage.COLLECT,
+        task="任务",
+        llm=model,
+        tool_registry=registry,
+    )
+
+    [record] = result["tool_calls"]
+    assert record["status"] == ToolCallStatus.FAILED.value
+    assert len(registry.calls) == 4  # 首次 + 3 次重试

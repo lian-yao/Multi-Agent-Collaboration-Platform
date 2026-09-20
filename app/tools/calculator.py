@@ -81,7 +81,12 @@ class CalculatorTool(BuiltinTool):
     args_model = CalculatorArgs
 
     def run(self, args: CalculatorArgs) -> dict[str, Any]:
-        value = self._evaluate(args.expression)
+        try:
+            value = self._evaluate(args.expression)
+        except ToolExecutionError as exc:
+            # 计算器的失败全部由表达式内容决定（语法错、未知标识符、非数值节点……），
+            # 原样重试必然重复失败，因此统一标记为不可重试（ADR-009 修订 3）。
+            raise ToolExecutionError(str(exc), retryable=False) from exc
         return {"expression": args.expression, "value": value}
 
     def _evaluate(self, expression: str) -> int | float:

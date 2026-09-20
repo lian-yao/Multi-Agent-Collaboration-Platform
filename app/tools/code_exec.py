@@ -57,7 +57,8 @@ class CodeExecutionTool(BuiltinTool):
                 settings=self._settings,
             )
         except SandboxViolation as exc:
-            raise ToolExecutionError(f"沙箱策略拒绝: {exc}") from exc
+            # 策略拒绝由代码内容决定，重试同样会被拒绝（ADR-009 修订 3）。
+            raise ToolExecutionError(f"沙箱策略拒绝: {exc}", retryable=False) from exc
         except SandboxUnavailable as exc:
             raise ToolExecutionError(f"沙箱不可用: {exc}") from exc
         return {

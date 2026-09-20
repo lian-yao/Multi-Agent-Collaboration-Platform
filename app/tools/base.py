@@ -22,7 +22,18 @@ class ToolExecutionError(RuntimeError):
     """工具执行失败（参数非法、外部依赖不可用、策略拒绝等）。
 
     该异常由编排层 `ToolCaller` 归一化为 `failed` 调用记录，不中断流水线（ADR-009）。
+
+    `retryable` 决定编排层是否重试（ADR-009 修订 3）：
+
+    - `True`（默认）：**瞬时故障**——服务不可达、超时、沙箱/数据库暂时不可用等，
+      换个时刻同样的调用可能成功；
+    - `False`：**由入参或安全策略导致的确定性失败**——参数不合法、表达式/SQL 非法、
+      策略拒绝、工具未注册等，原样重试只会重复失败，编排层直接放弃重试。
     """
+
+    def __init__(self, message: str, *, retryable: bool = True) -> None:
+        super().__init__(message)
+        self.retryable = retryable
 
 
 class BuiltinTool(ABC):
@@ -48,7 +59,8 @@ class BuiltinTool(ABC):
             parsed = self.args_model.model_validate(dict(arguments or {}))
         except ValidationError as exc:
             raise ToolExecutionError(
-                f"{self.name} 参数不合法: {_format_validation_error(exc)}"
+                f"{self.name} 参数不合法: {_format_validation_error(exc)}",
+                retryable=False,
             ) from exc
         return self.run(parsed)
 

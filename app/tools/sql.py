@@ -27,6 +27,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 from sqlalchemy import Engine, create_engine, text
 from sqlalchemy.engine import Connection
+from sqlalchemy.exc import DataError, IntegrityError, ProgrammingError
 
 from app.core.storage import get_storage_settings
 from app.tools.base import BuiltinTool, ToolExecutionError
@@ -37,6 +38,9 @@ READ_ONLY_DIALECTS = frozenset({"postgresql", "sqlite"})
 
 MAX_ROWS = 500
 """单次查询返回行数的硬上限；`TOOL_SQL_DEFAULT_LIMIT` 也受它约束。"""
+
+_NON_RETRYABLE_SQL_ERRORS = (ProgrammingError, IntegrityError, DataError)
+"""语句本身写错（表/列不存在、语法错、类型不匹配）的执行失败：重试必然重复失败。"""
 
 _FORBIDDEN_KEYWORDS = (
     "insert",
@@ -117,7 +121,10 @@ class SqlQueryTool(BuiltinTool):
         except ToolExecutionError:
             raise
         except Exception as exc:
-            raise ToolExecutionError(f"SQL 执行失败: {type(exc).__name__}: {exc}") from exc
+            raise ToolExecutionError(
+                f"SQL 执行失败: {type(exc).__name__}: {exc}",
+                retryable=_sql_error_is_retryable(exc),
+            ) from exc
         return {
             "columns": columns,
             "rows": rows,
@@ -152,20 +159,32 @@ def assert_read_only_statement(sql: str) -> str:
 
     stripped = _strip_comments(sql).strip()
     if not stripped:
-        raise ToolExecutionError("SQL 语句为空")
+        raise ToolExecutionError("SQL 语句为空", retryable=False)
     body = stripped.rstrip(";").strip()
     if not body:
-        raise ToolExecutionError("SQL 语句为空")
+        raise ToolExecutionError("SQL 语句为空", retryable=False)
     if ";" in body:
-        raise ToolExecutionError("只允许单条语句，禁止分号拼接多语句")
+        raise ToolExecutionError("只允许单条语句，禁止分号拼接多语句", retryable=False)
     if not body.lower().startswith(READ_ONLY_PREFIXES):
-        raise ToolExecutionError("只允许 SELECT / WITH 查询")
+        raise ToolExecutionError("只允许 SELECT / WITH 查询", retryable=False)
     matched = _KEYWORD_PATTERN.search(_strip_literals(body))
     if matched:
         raise ToolExecutionError(
-            f"只读查询不允许出现关键字: {matched.group(1).upper()}"
+            f"只读查询不允许出现关键字: {matched.group(1).upper()}",
+            retryable=False,
         )
     return body
+
+
+def _sql_error_is_retryable(error: Exception) -> bool:
+    """SQL 执行失败是否值得重试：写错的语句不重试，连接/暂态类才重试（ADR-009 修订 3）。
+
+    `ProgrammingError`（表/列不存在、语法错）与 `IntegrityError` / `DataError`
+    是语句本身的问题，同样的 SQL 重试必然重复失败；其余（`OperationalError`、
+    `InterfaceError` 等）可能是连接或资源问题，交给编排层重试。
+    """
+
+    return not isinstance(error, _NON_RETRYABLE_SQL_ERRORS)
 
 
 def _strip_comments(sql: str) -> str:

@@ -52,7 +52,10 @@ class BuiltinToolRegistry:
     def call(self, request: ToolCall) -> Any:
         tool = self._tools.get(request.tool_name)
         if tool is None:
-            raise ToolExecutionError(f"未注册的工具: {request.tool_name}")
+            # 模型请求了未注册的工具：原样重试同样找不到（ADR-009 修订 3）。
+            raise ToolExecutionError(
+                f"未注册的工具: {request.tool_name}", retryable=False
+            )
         return tool.invoke(request.arguments)
 
 

@@ -135,7 +135,10 @@ class CompositeToolRegistry:
             return self._base.call(request)
         server_id = self._owner.get(request.tool_name)
         if server_id is None:
-            raise ToolExecutionError(f"未注册的工具: {request.tool_name}")
+            # 模型请求了未注册的工具：原样重试同样找不到（ADR-009 修订 3）。
+            raise ToolExecutionError(
+                f"未注册的工具: {request.tool_name}", retryable=False
+            )
         return self._client_for(server_id).call(request)
 
     def close(self) -> None:

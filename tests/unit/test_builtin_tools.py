@@ -146,6 +146,62 @@ def test_calculator_requires_expression_argument():
     assert "参数不合法" in str(failure.value)
 
 
+def test_calculator_failures_are_classified_non_retryable():
+    """表达式内容决定的失败不带重试价值：标记 retryable=False（ADR-009 修订 3）。"""
+
+    with pytest.raises(ToolExecutionError) as failure:
+        CalculatorTool().invoke({"expression": "[1, 2, 3]"})
+
+    assert failure.value.retryable is False
+
+
+def test_invalid_arguments_are_classified_non_retryable():
+    with pytest.raises(ToolExecutionError) as failure:
+        CalculatorTool().invoke({})
+
+    assert failure.value.retryable is False
+
+
+def test_sql_policy_violation_is_classified_non_retryable():
+    with pytest.raises(ToolExecutionError) as failure:
+        SqlQueryTool().invoke({"query": "delete from messages"})
+
+    assert failure.value.retryable is False
+
+
+class _FailingEngine:
+    """连库即失败的 Engine 替身，用于验证 SQL 执行失败的分类。"""
+
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    def connect(self) -> None:
+        raise self._error
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_retryable"),
+    [
+        # SQL 写错（表/列不存在、语法错）→ 原样重试必然重复失败
+        ("ProgrammingError", False),
+        # 连接/暂态类 → 换个时刻可能成功
+        ("OperationalError", True),
+    ],
+)
+def test_sql_execution_failure_retryability_follows_cause(error, expected_retryable):
+    from sqlalchemy.exc import OperationalError, ProgrammingError
+
+    error_type = {"ProgrammingError": ProgrammingError, "OperationalError": OperationalError}[
+        error
+    ]
+    engine = _FailingEngine(error_type("SELECT 1", {}, Exception("boom")))
+
+    with pytest.raises(ToolExecutionError) as failure:
+        SqlQueryTool(engine=engine).invoke({"query": "select 1"})
+
+    assert failure.value.retryable is expected_retryable
+
+
 # --- sql_query：静态只读校验 ------------------------------------------------
 
 
