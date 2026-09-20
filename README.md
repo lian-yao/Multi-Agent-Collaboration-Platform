@@ -14,8 +14,12 @@
 - D7-D8（M4，已完成）：四个内置 MCP 工具与沙箱隔离、工具调用审计落库、
   OpenTelemetry + Jaeger + Prometheus 可观测；Web 工作台展示 Agent 团队、工具调用链路与
   Token 采样，模型 Provider 配置可在「工具与配置」页读写。
-- D9-10（M5，进行中）：Web UI 与一键部署全流程（`deploy/start.ps1` / `stop.ps1`）已实跑验收；
-  端到端用例、性能基线与未闭环项见 [doc/testing.md](doc/testing.md) §4。
+- D9-10（M5，已完成）：Web UI 与一键部署全流程（`deploy/start.ps1` / `stop.ps1`）已实跑验收，
+  E-01～E-05 与性能基线见 [doc/testing.md](doc/testing.md) §4；浏览器端渲染仍是人工核对项。
+- M5 之后（2026-09-16）：多 Provider / 多模型 / MCP Server 注册表与工作台视图三分
+  （ADR-017、ADR-018）、Agent 角色目录与自定义角色 CRUD 已合入；Redis 会话/长期记忆实现与
+  「外部 MCP Server 并入流水线工具注册表」也已合入，但记忆**尚未接入编排**。
+  进度、缺口与实测结果见 [doc/roadmap.md](doc/roadmap.md) 与 [doc/testing.md](doc/testing.md) §4.4。
 - Python 环境由 UV 管理，实际环境以 `pyproject.toml + uv.lock` 为准。
 
 ## 技术栈
@@ -61,6 +65,10 @@
 uv sync
 uv run pytest
 ```
+
+> 全量 `uv run pytest` 目前需要可达的 PostgreSQL（`localhost:5433`）与 Redis（`localhost:6380`），
+> 且**集成层有 5 条已知失败**（测试隔离缺口，非功能缺陷）；单元与 E2E 层已自足。
+> 用例规模与失败原因见 [doc/testing.md](doc/testing.md) §1 与 §4.4。
 
 Dapr 本地运行时初始化：
 

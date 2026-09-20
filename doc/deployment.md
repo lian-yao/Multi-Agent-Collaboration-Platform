@@ -248,6 +248,12 @@ npm run dev
 
 ## 环境变量
 
+仓库根目录的 `.env_example` 是这份清单的可复制版本（`AGENT_` / `TOOL_` / `MCP_` /
+`SANDBOX_` / `OBS_` 五个业务前缀，外加 `REDIS_URL`、`DATABASE_URL`；其中
+`TOOL_` / `MCP_` / `SANDBOX_` / `OBS_` 四段由 2026-09-16 的 `31d9cef` 补齐）。
+它是模板，不是运行时配置：应用只加载 `.env`
+（`app/config.py` 的 `env_file`），`uv run pytest` 与 `deploy/` 都不读它。
+
 | 变量 | 说明 |
 | --- | --- |
 | `AGENT_LLM_PROVIDER` | `openai`（默认，OpenAI 兼容 API）或 `ollama`（备用） |
