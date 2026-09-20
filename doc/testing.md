@@ -76,7 +76,7 @@ cd deploy; .\start.ps1                     # 起完整环境
 | U-11 | 会话与长期记忆的 Redis 读写 | `session:{id}:messages` List 追加与「读最近 N 条」、`agent:{id}:memory` Hash 覆盖写、序列化往返、客户端不可用时按契约降级（ADR-005 修订，2026-09-16 补） | M4（增量） |
 | U-12 | 沙箱 Docker 后端隔离与 fail-closed | 容器隔离边界参数齐全、网络仅在显式允许时打开、超时杀容器且不报成功、Docker 不可用时报 sandbox unavailable、输出超限截断并标记（2026-09-16 补，`38200cc` 只加测试） | M4（增量） |
 | U-13 | 会话记忆接线 | 阶段提示词带上会话历史且剔除本轮自己的消息、无历史时提示词逐字不变、终态把报告正文追加进记忆、受理消息时写用户消息（ADR-019，2026-09-20 补，关闭 F-06 的接线部分） | M4（增量） |
-| U-14 | 工具失败重试与空输出兜底 | 工具失败沿用同一 `call_id` 重试（首次 + 最多 3 次，最多 4 次尝试）；成功即采用真实输出、耗尽重试记 `failed` 且阶段仍输出；撞工具轮次上限时落 `stage.tool_iteration_limit`，空输出补一次文字提示、仍空则告警并继续（ADR-009 两次修订，2026-09-20 补） | M4（增量） |
+| U-14 | 工具失败重试与空输出兜底 | 工具失败沿用同一 `call_id` 重试（首次 + 最多 3 次，最多 4 次尝试）；**只有瞬时故障重试**——入参/策略/无效 SQL 等确定性失败标 `retryable=False`、只尝试一次并落 `tool.retry_skipped`；成功即采用真实输出、耗尽重试记 `failed` 且阶段仍输出；撞工具轮次上限时落 `stage.tool_iteration_limit`，空输出补一次文字提示、仍空则告警并继续（ADR-009 三次修订，2026-09-20 补） | M4（增量） |
 
 ### 2.2 集成测试（I）
 
@@ -662,6 +662,31 @@ MACP_E2E_LIVE=1 MACP_E2E_TIMEOUT=900 uv run pytest tests/e2e/test_live_e2e.py -q
 2. **F-08 容器内沙箱不可用**——backend 容器未挂载 `/var/run/docker.sock`，
    `code_execution` 在 compose 下必然报 `沙箱不可用: Docker 守护进程不可用`；
    宿主直跑可用，容器部署下该工具形同不可用，修法需部署决策。
+
+### 4.8 按错误类型分类重试（2026-09-20，ADR-009 修订 3）
+
+「失败就重试 3 次」会把模型自己造成的确定性失败也重试一遍，因此补上分类：
+异常携带 `retryable`（默认 `True`），确定性失败标 `False`，编排层只在可重试时重试。
+
+| 类别 | 例子 | 行为 |
+| --- | --- | --- |
+| 瞬时（`retryable=True`） | `web_search` 超时/不可达、沙箱或数据库暂时不可用、MCP 传输错误、未知异常 | 按上限重试（首次 + 3 次） |
+| 确定性（`retryable=False`） | 参数不合法、计算器表达式非法、只读策略拒绝、SQL 语句写错（`ProgrammingError` 等）、沙箱策略拒绝、工具未注册 | **只尝试一次**，落 `tool.retry_skipped reason=non_retryable` |
+
+```bash
+uv run pytest tests/unit/test_pipeline_tools.py tests/unit/test_builtin_tools.py -q   # 151 passed
+uv run pytest -q                                                                     # 636 passed / 7 skipped
+# 真实模型：日志统计 36 × tool.retry（瞬时）+ 13 × tool.retry_skipped（非法 SQL / 策略拒绝）
+```
+
+**同轮修掉的用例假设问题**：`test_live_tool_calls_are_readable_from_postgresql` 原断言
+`total == len(items)`，隐含「一次运行的调用数不超过默认单页 20 条」；本轮真实运行出现
+34–39 次调用后误判失败。改为按分页语义断言（`page_size=100`；`total <= page_size` 时相等，
+否则本页装满），其余「每行属于本次 Workflow 且状态为终态」不变。
+
+**残留的时间成本在可重试侧**：本机无公网出口，`web_search` 每次尝试约 10s，重试 3 次
+≈ 40s/次，是 live 套件 9–10 分钟的主要来源；压缩它需要把 `TOOL_SEARCH_ENDPOINT` 指向
+可达服务或在无网环境不暴露该工具（配置项，未在本次范围）。
 
 ## 5. 失败处理约定
 

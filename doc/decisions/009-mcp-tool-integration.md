@@ -116,4 +116,45 @@ ReAct 循环因此补两条兜底（实现在 `app/orchestration/pipeline_graph.
 2. **容器内沙箱不可用（F-08）**：`code_execution` 在 compose 里必然失败——
    backend 容器没有挂载 `/var/run/docker.sock`，日志为
    `ToolExecutionError: 沙箱不可用: Docker 守护进程不可用`。宿主机直跑后端时可用，
-   容器部署下该工具形同不可用；修法（挂 socket 或改用独立沙箱服务）需部署决策。
+  容器部署下该工具形同不可用；修法（挂 socket 或改用独立沙箱服务）需部署决策。
+
+## 修订 3（2026-09-20：按错误类型分类重试，只重试瞬时故障）
+
+修订 2 的「失败就重试 3 次」把模型自己造成的确定性失败也一起重试了（非法表达式、
+无效 SQL、策略拒绝），日志噪声大且白等时间。本修订给重试加上分类：
+
+- **异常携带 `retryable`**：`app/tools/base.py::ToolExecutionError` 增加 `retryable`
+  关键字（默认 `True`），语义为「换个时刻同样的调用是否可能成功」；
+- **确定性失败标 `retryable=False`**：入参校验失败（`BuiltinTool.invoke`）、
+  计算器全部失败（表达式内容决定）、只读策略拒绝（空语句/多语句/非 SELECT/写关键字/
+  未知方言）、SQL 语句本身写错（`ProgrammingError`/`IntegrityError`/`DataError`）、
+  沙箱策略拒绝（`SandboxViolation`）、工具未注册（内置与 MCP 注册表）；
+- **保持可重试**：服务不可达与超时（`web_search`）、沙箱/数据库暂时不可用
+  （`SandboxUnavailable`、其余 SQLAlchemy 异常）、MCP 传输类错误、未知异常
+  （默认 `retryable=True`，宁可多试）；
+- **编排层**：`ToolCaller.invoke` 只在 `retryable` 为真时重试，日志把决策记全——
+  `tool.call … retryable=<bool>`，重试时 `tool.retry`，放弃时
+  `tool.retry_skipped … reason=non_retryable`（ADR-009 修订 2 的同一 ID 与
+  「3 次过后必须输出」口径不变）。
+
+分类用结构化异常类型判断（`isinstance`），不做字符串匹配；`retryable` 只影响编排层决策，
+不进 `tool_calls` 表（重试明细仍在日志）。
+
+**先红后绿**：新增 6 条用例（编排层：不可重试只尝试 1 次并落 `tool.retry_skipped`、
+可重试仍尝试 4 次；工具层：计算器失败、参数非法、只读策略拒绝均为 `retryable=False`，
+SQL 执行按 `ProgrammingError`/`OperationalError` 分类），实现前 6 条全红。
+
+**真实模型实测（2026-09-20）**：live 套件 `6 passed / 1 failed / 586.46s`——
+唯一失败是用例自身假设问题（见下），与分类无关。日志统计：**36 次 `tool.retry`**
+（瞬时：`web_search` 超时、沙箱不可用）+ **13 次 `tool.retry_skipped`**
+（非法 SQL 的 `UndefinedTable`、代码策略拒绝 `禁止导入模块: os`），即避免了 13×3 次
+必然失败的重试。
+**代价仍然在可重试侧**：本机无公网出口，`web_search` 每次尝试约 10s、重试 3 次 ≈ 40s/次，
+是 live 套件 9–10 分钟耗时的主要来源；要压缩这段时间应把 `TOOL_SEARCH_ENDPOINT`
+指向可达搜索服务，或在无网环境不向 Agent 暴露该工具（配置项，不在本次范围）。
+
+**同轮修掉的用例假设问题**：`test_live_tool_calls_are_readable_from_postgresql`
+原断言 `total == len(items)`，隐含「单次运行的调用数不超过默认单页 20 条」；
+本轮真实运行出现 34–39 次调用（模型反复查库）后该断言误判为失败。改为按分页语义断言：
+取 `page_size=100`，`total <= page_size` 时 `total == len(items)`，否则 `len(items) == page_size`
+（其余「每行都属于本次 Workflow 且状态为终态」的断言不变）。

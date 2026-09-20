@@ -137,7 +137,9 @@ erDiagram
 全程沿用同一 `id`，失败行先被重置为 `running` 再执行，因此表中一行代表一次逻辑调用、
 `status` 是其真实终态（成功后 `succeeded`、耗尽重试则 `failed`）。每次尝试与重试的明细在
 结构化日志里（`event=tool.call … attempt=N`、`event=tool.retry …`），表结构不为此新增列
-（ADR-009 修订 2，2026-09-20）。
+（ADR-009 修订 2，2026-09-20）。**只有瞬时故障才重试**：入参/策略/无效 SQL 等确定性失败
+由 `ToolExecutionError.retryable=False` 标记，只尝试一次并落 `tool.retry_skipped`
+（ADR-009 修订 3）；`retryable` 是编程接口上的分类，同样不进表。
 
 ### metrics（指标聚合）
 

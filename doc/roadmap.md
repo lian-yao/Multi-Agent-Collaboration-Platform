@@ -456,6 +456,24 @@ M5 闭环后又有两批改动合入 `master`，当时都未回填本文件的�
     建议后续按错误类型分类重试；② **F-08**：compose 的 backend 未挂载
     `/var/run/docker.sock`，`code_execution` 在容器里必然报「沙箱不可用」（本轮 10 次全失败），
     宿主机直跑可用，修法属部署决策。
+- 2026-09-20（按错误类型分类重试，只重试瞬时故障，ADR-009 修订 3）：
+  `ToolExecutionError` 增加 `retryable`（默认 True），确定性失败标 False——
+  参数不合法、计算器表达式非法、只读策略拒绝、SQL 语句写错（ProgrammingError/IntegrityError/
+  DataError）、沙箱策略拒绝、工具未注册；编排层只在 `retryable` 时重试，并落
+  `tool.call … retryable=<bool>`、`tool.retry`、`tool.retry_skipped reason=non_retryable`。
+  分类用 `isinstance` 判断结构化异常类型，不做字符串匹配；`retryable` 不进 `tool_calls` 表。
+  - 先红后绿：新增 6 条用例（编排层 2 + 工具层 4），实现前全红；相关套件 151 passed。
+  - 验证：`uv run pytest -q` → **636 passed / 7 skipped**；真实模型 live →
+    **6 passed / 1 failed / 586.46s**，日志 **36 × tool.retry**（瞬时）+
+    **13 × tool.retry_skipped**（`UndefinedTable` 非法 SQL、`禁止导入模块: os` 策略拒绝），
+    即避免 13×3 次必然失败的尝试。
+  - **同轮修掉用例假设问题**：`test_live_tool_calls_are_readable_from_postgresql` 原断言
+    `total == len(items)`（隐含不超过默认单页 20 条），本轮真实运行出现 34–39 次调用后误判；
+    改为按分页语义断言（page_size=100，装满则本页 == 100，否则 total == len(items)），
+    复跑该用例 1 passed（total=16）。因此 636 的计入不含 live 用例。
+  - **残留时间成本在可重试侧**：本机无公网出口，`web_search` 每次尝试约 10s × 最多 4 次
+    ≈ 40s，是 live 9–10 分钟耗时的主要来源；压缩它需把 `TOOL_SEARCH_ENDPOINT` 指向可达服务
+    或在无网环境不暴露该工具（配置项）。
   - 口径：`doc/testing.md` §4.2 的两行旧数据已标注「以 §4.6 为准」，
     ADR-016 增加 2026-09-20 修订记录本轮命令与数字。
 - 注意事项：数据库读取用例的设计口径是 SQLite 内存表与注入目录数据；**集成层已由
