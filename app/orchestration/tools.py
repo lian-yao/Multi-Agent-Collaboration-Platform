@@ -31,6 +31,15 @@ from app.observability.logging import get_logger, log_event
 
 TOOL_CALL_NAMESPACE = uuid.NAMESPACE_URL
 
+TOOL_CALL_RETRY_LIMIT = 3
+"""单次工具调用失败后的最大重试次数（首次 + 3 次重试 = 最多 4 次尝试）。
+
+重试沿用同一个 `call_id`：审计层按 ID 幂等，失败行会先被重置为 `running` 再执行
+（`app/core/tool_audit.py::_begin_call`，U-07「失败可同 ID 重试」），因此一次逻辑调用
+在 `tool_calls` 表里始终只有一行，最终状态就是真实结果。耗尽重试后不再重试，
+失败以 `failed` 记录交给模型，由模型按实际结果输出结论（不中断流水线）。
+"""
+
 logger = get_logger("orchestration.tools")
 
 
@@ -162,7 +171,11 @@ class ToolCaller:
         return [as_openai_tool(spec) for spec in self._discovered]
 
     def invoke(self, tool_name: str, arguments: dict[str, Any] | None = None) -> ToolCallRecord:
-        """调用一个工具并记录结果；失败归一化为 failed 记录，不向外抛异常。"""
+        """调用一个工具并记录结果；失败按 `TOOL_CALL_RETRY_LIMIT` 重试。
+
+        重试沿用同一个 `call_id`（审计层可重置失败行，见模块常量说明），所以一次逻辑调用
+        只占一行审计；耗尽重试后归一化为 failed 记录交给模型，不向外抛异常。
+        """
 
         call_id = tool_call_id(
             self._index,
@@ -181,25 +194,54 @@ class ToolCaller:
             tool_name=record.tool_name,
             arguments=record.input,
         )
-        started = time.perf_counter()
-        try:
-            output = self._registry.call(request)
-        except Exception as exc:  # 工具失败不应中断流水线，记录后交给模型继续
-            record.status = ToolCallStatus.FAILED
-            record.error = f"{type(exc).__name__}: {exc}"
-        else:
+        max_attempts = TOOL_CALL_RETRY_LIMIT + 1
+        for attempt in range(1, max_attempts + 1):
+            started = time.perf_counter()
+            try:
+                output = self._registry.call(request)
+            except Exception as exc:  # 工具失败不应中断流水线，重试后交给模型继续
+                record.status = ToolCallStatus.FAILED
+                record.output = None
+                record.error = f"{type(exc).__name__}: {exc}"
+                log_event(
+                    logger,
+                    "tool.call",
+                    level=logging.WARNING,
+                    call_id=call_id,
+                    tool_name=tool_name,
+                    status=record.status.value,
+                    attempt=attempt,
+                    max_attempts=max_attempts,
+                    duration_ms=round((time.perf_counter() - started) * 1000, 1),
+                    error=record.error,
+                )
+                if attempt < max_attempts:
+                    log_event(
+                        logger,
+                        "tool.retry",
+                        level=logging.WARNING,
+                        call_id=call_id,
+                        tool_name=tool_name,
+                        attempt=attempt,
+                        next_attempt=attempt + 1,
+                        error=record.error,
+                    )
+                    continue
+                break
             record.status = ToolCallStatus.SUCCEEDED
             record.output = output
-        log_event(
-            logger,
-            "tool.call",
-            level=logging.WARNING if record.status is ToolCallStatus.FAILED else logging.INFO,
-            call_id=call_id,
-            tool_name=tool_name,
-            status=record.status.value,
-            duration_ms=round((time.perf_counter() - started) * 1000, 1),
-            error=record.error,
-        )
+            record.error = None
+            log_event(
+                logger,
+                "tool.call",
+                call_id=call_id,
+                tool_name=tool_name,
+                status=record.status.value,
+                attempt=attempt,
+                max_attempts=max_attempts,
+                duration_ms=round((time.perf_counter() - started) * 1000, 1),
+            )
+            break
         self.records.append(record)
         return record
 

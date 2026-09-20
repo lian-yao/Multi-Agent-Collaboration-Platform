@@ -55,7 +55,12 @@ SEARCH_SPEC = ToolSpec(
 
 
 class MemoryToolRegistry:
-    """内存版工具注册表（测试替身）：按名字返回固定结果，可注入统一异常。"""
+    """内存版工具注册表（测试替身）：按名字返回固定结果。
+
+    - `error`：每次调用都失败（异常即该 `error`）；
+    - `failures_before_success=N`：先失败 N 次（异常取 `error`，未给则用默认），之后成功。
+      两种模式互斥——给了 `failures_before_success` 就按「重试后成功」的语义走。
+    """
 
     def __init__(
         self,
@@ -63,10 +68,13 @@ class MemoryToolRegistry:
         *,
         results: dict[str, Any] | None = None,
         error: Exception | None = None,
+        failures_before_success: int = 0,
     ) -> None:
         self._specs = list(specs)
         self._results = dict(results or {})
         self._error = error
+        self._failures_before_success = failures_before_success
+        self._retry_mode = failures_before_success > 0
         self.calls: list[ToolCall] = []
 
     def list_tools(self) -> list[ToolSpec]:
@@ -74,7 +82,10 @@ class MemoryToolRegistry:
 
     def call(self, request: ToolCall) -> Any:
         self.calls.append(request)
-        if self._error is not None:
+        if self._failures_before_success:
+            self._failures_before_success -= 1
+            raise self._error or RuntimeError("工具暂时不可用")
+        if self._error is not None and not self._retry_mode:
             raise self._error
         if request.tool_name not in {spec.name for spec in self._specs}:
             raise ValueError(f"unknown tool: {request.tool_name}")
@@ -606,3 +617,54 @@ def test_tool_iteration_limit_with_persistent_empty_output_continues(caplog):
     assert len(model.calls) == TOOL_CALL_MAX_ITERATIONS + 2  # 不无限重试
     assert "stage.tool_iteration_limit" in caplog.text
     assert "stage.empty_content" in caplog.text
+
+
+def test_failed_tool_call_is_retried_until_it_succeeds():
+    """工具失败后按同一调用 ID 重试，成功即采用真实结果（不再记失败）。"""
+
+    registry = MemoryToolRegistry(
+        [SEARCH_SPEC],
+        results={"web_search": {"hits": ["资料"]}},
+        error=RuntimeError("mcp server down"),
+        failures_before_success=2,
+    )
+    model = ToolCallingChatModel(tool_name="web_search", tool_arguments={"query": "主题"})
+
+    result = run_role_stage(
+        PipelineStage.COLLECT,
+        task="任务",
+        llm=model,
+        tool_registry=registry,
+    )
+
+    [record] = result["tool_calls"]
+    assert record["status"] == ToolCallStatus.SUCCEEDED.value
+    assert record["output"] == {"hits": ["资料"]}
+    assert record["error"] is None
+    assert len(registry.calls) == 3  # 第 3 次尝试成功
+    assert len({call.call_id for call in registry.calls}) == 1  # 同一个逻辑调用共用一个 ID
+    assert result["content"] == "最终结论"
+
+
+def test_tool_call_stops_after_three_retries_and_stage_still_answers():
+    """重试 3 次后仍失败：记 failed、不再重试，阶段照常按实际结果输出。"""
+
+    registry = MemoryToolRegistry(
+        [SEARCH_SPEC],
+        error=RuntimeError("mcp server down"),
+    )
+    model = ToolCallingChatModel(tool_name="web_search", tool_arguments={"query": "主题"})
+
+    result = run_role_stage(
+        PipelineStage.COLLECT,
+        task="任务",
+        llm=model,
+        tool_registry=registry,
+    )
+
+    [record] = result["tool_calls"]
+    assert record["status"] == ToolCallStatus.FAILED.value
+    assert "mcp server down" in record["error"]
+    assert len(registry.calls) == 4  # 首次 + 3 次重试
+    assert result["status"] == "completed"
+    assert result["content"] == "最终结论"  # 失败不中断：模型仍给出结论
