@@ -17,6 +17,7 @@ import {
   Database,
   FileText,
   Gauge,
+  GitFork,
   History,
   LoaderCircle,
   Maximize2,
@@ -1465,6 +1466,13 @@ function Welcome({
       text: "阅读我上传的附件，归纳主题、列出关键结论，并指出还需要补充什么。",
       shape: "多步核对与整理",
       tone: "green",
+    },
+    {
+      icon: GitFork,
+      title: "并行分工调研",
+      text: "请分两路并行收集：一路查 A 股医药板块近一周的行情与资金流向，一路查最近一周医药行业的政策与新闻动态，两路都完成后，再汇总对比，给出投资参考结论。",
+      shape: "两路并行 → 汇聚",
+      tone: "violet",
     },
   ];
   return (

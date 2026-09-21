@@ -733,7 +733,7 @@ svg {
  * 三个色调只是区分任务原型，不承担语义。 */
 .suggestions {
   display:grid;
-  grid-template-columns:repeat(3,minmax(0,1fr));
+  grid-template-columns:repeat(4,minmax(0,1fr));
   gap:12px;
   margin-top:30px;
   width:100%
@@ -801,6 +801,11 @@ svg {
 .suggestion.green .suggestion-icon {
   background:#ebf4ee;
   color:#508b6c
+}
+
+.suggestion.violet .suggestion-icon {
+  background:#f1edfb;
+  color:#7a63c4
 }
 
 
