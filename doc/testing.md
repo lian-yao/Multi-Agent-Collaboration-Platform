@@ -233,8 +233,9 @@ node_modules/.bin/esbuild rendercheck/workspace-smoke.tsx --bundle --platform=no
 模型回显）与 `ModelSection`（两条模型、特化徽标、开关、批量引入入口）。
 
 `workspace-smoke`（ADR-018）覆盖工作台三块新视图，同样是「显式 props 驱动」那一类：
-`CollaborationGraph`（串行 / 并行波次两种排布、等待态文案、空态，以及**未传 `onSelect`
-时渲染为 `<div>` 而不是 `<button>`**）、`AgentStageModal`（身份与绑定、`pending` 说
+`GraphCanvas` / `layoutCollaboration`（ADR-028：串行 / 并行波次两种排布的**坐标**与首尾端子、
+弧线确为三次贝塞尔、连线激活口径、悬停详情与工具胶囊、`minHeight` 撑高与**不满压**，
+以及侧栏紧凑档不写任务与产出）、`AgentStageModal`（身份与绑定、`pending` 说
 「等待前置阶段」而不是 workflow 词汇「排队中」、角色未就绪时的降级、明示推理过程尚未
 对外暴露）与 `TaskUsagePanel` + `groupUsage`（**同一指标多次采样并排列出、断言不求和**）。
 另有一组读源文件的静态断言，固定「假选择已删除」：`styles.css` 不含 `.decision-*`、
@@ -1152,6 +1153,60 @@ node_modules/.bin/esbuild rendercheck/config-smoke.tsx ... && node "$TEMP/config
 - **动态链路只有进度没有逐步骤轨迹**：画布能显示波次与状态，轨迹仍旧缺（见 §4.8 的边界）。
 - `app/core/checkpoint.py` 的 `list_workflows_for_session()` 属**只读新增**（B 的文件），
   已登记 `分工.md` §4。
+- **本节的画布是「卡片 + 连线」，下一轮被重写为节点图**（用户判定「当前根本就不是画布」），
+  见 §4.10；本节其余（接口、编号回看、Token 归因）仍是当前状态。
+
+### 4.10 协作画布重写为节点图：卡片排布不是画布（2026-09-21，成员 D）
+
+用户的反馈很直接：「画布效果非常不好，当前根本就不是画布」，并附参考项目
+（`Jasper-zh/Multi-Agent-Playground`）的截图，指出可视化源码可参考。根子上是 §4.9 把画布做成了
+**竖向堆叠的卡片 + 横向连线**——那是一张表，不是一张图：没有节点、没有弧线、没有「谁指向谁」。
+本轮照参考项目的画法重写：**圆节点 + 弧线连线**。决策补进 [ADR-028](decisions/028-sidebar-collaboration-canvas.md)
+（同日修订 + 决策 7 的「画布四条规则」）。
+
+**1. 改动**
+
+| 文件 | 变化 |
+| --- | --- |
+| `frontend/src/workspace/GraphCanvas.tsx` | **新增**画布本体：`layoutCollaboration()` 纯函数算坐标，`CollaborationCanvas` 渲染 SVG 弧线 + 绝对定位圆节点，`useElementSize` 量像素尺寸 |
+| `frontend/src/workspace/CollaborationGraph.tsx` | 由「卡片 + 连线」**收成薄封装**：只把 `graph` 交给紧凑档画布，空态文案保留 |
+| `frontend/src/workspace/CollabCanvas.tsx` | 复用同一画布宽档；`cv-frame` 量出的可用高度喂给 `minHeight` |
+| `frontend/src/workspace/workspace.css` | `.collab-card*` / `.collab-link*` / `.collab-legend` / `.collab-foot` **删除**，换成 `.cv-*`（节点、弧线、并行圈定框、工具胶囊、悬停详情） |
+| `frontend/src/App.tsx` | 删掉模块标题下的功能说明段（用户要求「模块标题区域不需要那么多文本介绍功能」） |
+| `frontend/rendercheck/workspace-smoke.tsx` | 卡片断言换成**几何断言**（节点数 / 连线数 / 路径形状 / 锚点不在中点 / 高度），净 +20 条 |
+
+**2. 画布的硬规则（写进 ADR-028 决策 7）**
+
+1. **`viewBox` 必须等于元素的像素尺寸**（配 `preserveAspectRatio="none"`）：否则 SVG 用户坐标
+   和节点的 `left/top` 对不上，弧线整体飘走。
+2. **量不到宽高就用默认值**：`useElementSize` 在首帧 / 离屏量不到时退 720（宽档）/ 248（窄档），
+   否则首帧 `NaN` 会把整张图画没（冒烟正是断言这两个数）。
+3. **`minHeight` 由外层给**：侧栏不给（用自然高度），全屏给 `cv-frame` 的可用高度——
+   行距按可用高度铺开，屏幕高时不满压、屏幕矮时才滚动。
+4. **标签要盖住弧线，工具胶囊不能放几何中点**：`.cv-name` / `.cv-meta` 带 `--cfg-surface` 底色
+   （否则弧线从字上穿过去）；胶囊若放在 `t=0.5` 会被上游标签压住，要采样到
+   「上游标签下沿 ↔ 下游节点上沿」的空带里。
+
+**3. 验证**
+
+```bash
+cd frontend && npm run build      # tsc --noEmit + vite build 通过（CSS 85.95 kB / JS 420.11 kB）
+node_modules/.bin/esbuild rendercheck/workspace-smoke.tsx --bundle --platform=node \
+  --format=cjs --jsx=automatic --loader:.css=empty --outfile=rendercheck/.smoke.cjs \
+  && node rendercheck/.smoke.cjs   # 141/141 checks passed（121 → 141）
+```
+
+**4. 边界（如实记录）**
+
+- **侧栏紧凑档只写「生效参数 + Token 消耗」**：圆下只滑出 `模型 · Token`；
+  任务 / 阶段产出 / 工具调用留给全屏档与执行台弹窗——三块视图的分工（ADR-018）没变，只是画法换了。
+- **悬停详情仍走 CSS `:hover` / `:focus-within`**，不用 JS 状态：离屏冒烟还能断言到内容。
+- **节点可拖**（仅全屏档），但拖动只改渲染偏移，不改会话数据、不落盘。
+- 参考项目是 Vue（`GraphViewer.vue`），本仓是 React，**只借画法不借代码**：弧线控制点从
+  「按 dx 水平折」改成「按垂直极点切线弯曲」；节点用绝对定位 div 而非 SVG `<circle>`
+  （图标与文字更好排，且能挂 CSS 驱动的悬停面板）。
+- **箭头不能吃 `strokeWidth` 单位**：默认 `markerUnits="strokeWidth"` 会让箭头随线宽放大，
+  30px 节点上会盖住圆——改为 `markerUnits="userSpaceOnUse"` 并给死尺寸（7.5 窄档 / 9.5 宽档）。
 
 ## 5. 失败处理约定
 - 任一用例失败：先复现，再定位，修复后将失败模式固化为新的测试或本文档约束；

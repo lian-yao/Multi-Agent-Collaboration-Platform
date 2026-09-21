@@ -300,6 +300,12 @@ Token 采样按阶段记录（total 1020 / 1344 / 3051）。踩坑与决策见�
   不是拿单测替身糊的。顺带修掉一处**文档漂移**：§5.5 原写采样标签含 `agent_id`，
   实际编排层两条链路都只传 `role`，照原文实现的前端把三个 Agent 的 Token 合并成了一个
   `model` 分组（看起来像"数据丢了"，其实是读法错了）。详见 `doc/testing.md` §4.8、§4.9。
+- 2026-09-21（同日续：协作画布重写为节点图）：用户判定上一版「当前根本就不是画布」（卡片 + 横向连线
+  是表不是图），并给出参考项目 `Jasper-zh/Multi-Agent-Playground`。本轮照其画法重写：**圆节点 +
+  弧线连线**（新增 `frontend/src/workspace/GraphCanvas.tsx`，`CollaborationGraph.tsx` 收成薄封装，
+  `.collab-*` 换成 `.cv-*`）。前端 `npm run build` 通过（CSS 85.95 kB / JS 420.11 kB）；
+  `workspace-smoke` **141/141**（121 → 141，卡片断言换成几何断言）。**未跑后端全量**
+  （本轮无后端改动）。详见 `doc/testing.md` §4.10、ADR-028。
 - 注意事项：数据库读取用例使用 SQLite 内存表与注入目录数据，MCP 用例走内存协议往返而非
   跨进程 stdio，因此不代表真实 PostgreSQL、真实 MCP Server 或浏览器端到端验收。
   E-04/E-05 的 Web 侧与部署脚本已在本轮补上实跑证据（见上两条），

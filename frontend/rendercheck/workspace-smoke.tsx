@@ -30,6 +30,7 @@ import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { CollaborationGraph } from "../src/workspace/CollaborationGraph";
 import { CollabCanvas, type CollabConversation } from "../src/workspace/CollabCanvas";
+import { layoutCollaboration } from "../src/workspace/GraphCanvas";
 import {
   buildCollaboration,
   type CollabGraph,
@@ -204,30 +205,103 @@ check("模型：下游节点标注输入来自哪一步", collabGraph.nodes[1].p
 check("模型：截断标记带出来", collabGraph.nodes[2].truncated);
 check("模型：usageFor 按角色取到该 Agent 的采样", usageFor(collabMetrics, "reporter").length === 1);
 
+/* -------------------------------------------------------------------------- */
+/* 画布几何：纯函数，先把坐标算对再看渲染                                        */
+/* -------------------------------------------------------------------------- */
+
+const layout = layoutCollaboration(collabGraph, 720);
+check("画布：首尾端子 + 三个 Agent 共五个节点", layout.nodes.length === 5, `实际 ${layout.nodes.length}`);
+check(
+  "画布：首尾端子是任务与交付",
+  layout.nodes[0].kind === "start" && layout.nodes[4].kind === "end",
+  `${layout.nodes[0].kind} / ${layout.nodes[4].kind}`,
+);
+check("画布：串行链路连成四条边", layout.edges.length === 4, `实际 ${layout.edges.length}`);
+check(
+  "画布：整条链路跑完就整条点亮",
+  layout.edges.filter((edge) => edge.active).length === 4,
+  `${layout.edges.filter((edge) => edge.active).length} 条点亮`,
+);
+check(
+  "画布：边是三次贝塞尔而不是直线",
+  layout.edges.every((edge) => edge.d.startsWith("M ") && edge.d.includes(" C ")),
+  layout.edges[0].d,
+);
+check(
+  "画布：路径两端退到圆周上",
+  // 圆心在 y=46、半径 23，起点必须离开圆心：起点 y 不应等于 46
+  !layout.edges[0].d.startsWith(`M 360 46`),
+  layout.edges[0].d,
+);
+check("画布：连线记得带上游工具链路", layout.edges[1].toolSummary === "calculator ×1", layout.edges[1].toolSummary);
+const yOfNode = (id: string) => layout.nodes.find((node) => node.id === id)?.y ?? -1;
+check(
+  "画布：胶囊落在「上游标签之下、下游圆之上」的空带里",
+  // 上游圆下沿 + 标签高度 < 胶囊 < 下游圆上沿：直接取 t=0.5 会被标签的底色压住
+  layout.edges[1].mid.y > yOfNode("collect") + 21 + 34 &&
+    layout.edges[1].mid.y < yOfNode("analyze") - 21 - 4,
+  `mid=${layout.edges[1].mid.y} 空带 ${yOfNode("collect") + 55}~${yOfNode("analyze") - 25}`,
+);
+check("画布：没有并行波次就不画圈定框", layout.groups.length === 0, `实际 ${layout.groups.length}`);
+check(
+  "画布：高度由行数算出，不随容器拉伸",
+  layout.height === 44 + 74 + 4 * 96,
+  `实际 ${layout.height}`,
+);
+check(
+  "画布：给了更高的可用高度就把行距撑开",
+  layoutCollaboration(collabGraph, 720, false, 900).height === 900,
+  `实际 ${layoutCollaboration(collabGraph, 720, false, 900).height}`,
+);
+check(
+  "画布：可用高度不够时不压缩行距",
+  layoutCollaboration(collabGraph, 720, false, 200).height === 44 + 74 + 4 * 96,
+  `实际 ${layoutCollaboration(collabGraph, 720, false, 200).height}`,
+);
+check("画布：量不到宽度时退回默认宽度", layoutCollaboration(collabGraph, 0).width === 720);
+check("画布：侧栏窄档退回更小的默认宽度", layoutCollaboration(collabGraph, 0, true).width === 248);
+
+/* -------------------------------------------------------------------------- */
+/* 侧栏：紧凑画布                                                              */
+/* -------------------------------------------------------------------------- */
+
 let serial = "";
 try {
   serial = renderToStaticMarkup(
     <CollaborationGraph graph={collabGraph} onExpand={() => undefined} />,
   );
-  check("侧栏协作卡片可渲染", serial.length > 400, `长度 ${serial.length}`);
+  check("侧栏画布可渲染", serial.length > 400, `长度 ${serial.length}`);
 } catch (cause) {
-  check("侧栏协作卡片可渲染", false, cause instanceof Error ? cause.message : String(cause));
+  check("侧栏画布可渲染", false, cause instanceof Error ? cause.message : String(cause));
 }
 
-check("卡片渲染出三个 Agent", ["信息收集 Agent", "数据分析 Agent", "报告生成 Agent"].every((n) => serial.includes(n)));
-check("卡片记录模型与 Provider", serial.includes("gpt-5.5") && serial.includes("OpenAI"));
-check("卡片记录 Token 消耗", serial.includes("总 Token") && serial.includes("883"));
-check("卡片在没采样时说明是没采到而不是 0", serial.includes("暂无用量采样"));
-check("卡片标出第几步", serial.includes("第 1 步"));
-check("卡片把显式覆盖标出来", serial.includes("collab-chip override"));
-check("连线记录上游工具链路", serial.includes("calculator ×1"));
-check("波次之间标注串行", serial.includes(">串行<"));
-check("串行链路口径为串行流水线", serial.includes("串行流水线"));
-check("图例三态齐全", serial.includes("已完成") && serial.includes("执行中") && serial.includes("等待前置"));
-check("提供展开全屏入口", serial.includes("展开全屏画布"));
-check("侧栏卡片不再是执行轨迹的入口", !serial.includes("查看信息收集 Agent的"), serial.slice(0, 200));
+check("侧栏画布是 SVG + 绝对定位节点的画法", serial.includes("cv-canvas dense") && serial.includes("cv-svg"));
+check("侧栏画布画出了圆节点", serial.includes("cv-node kind-agent"));
+check(
+  "侧栏画出三个 Agent 节点",
+  ["信息收集 Agent", "数据分析 Agent", "报告生成 Agent"].every((name) => serial.includes(name)),
+);
+check("侧栏标出首尾端子", serial.includes(">任务<") && serial.includes(">交付<"));
+check(
+  "侧栏节点记下模型与 Token",
+  serial.includes("gpt-5.5 · 883 tok"),
+  serial.slice(serial.indexOf("cv-meta"), serial.indexOf("cv-meta") + 60),
+);
+check("侧栏未采样的节点只写模型", serial.includes(">gpt-5.5<"));
+check("侧栏悬停面板给参数全表", serial.includes("生效参数") && serial.includes("显式覆盖"));
+check(
+  "侧栏悬停面板不重复执行轨迹",
+  !serial.includes("分配到的任务") && !serial.includes("阶段产出"),
+  "侧栏只回答「用什么跑的」，轨迹归执行台",
+);
+check(
+  "侧栏不再铺一段功能说明",
+  !serial.includes("串行流水线") && !serial.includes("节点是 Agent 卡片") && !serial.includes("collab-legend"),
+);
+check("侧栏给出全屏画布入口", serial.includes("全屏画布"));
+check("侧栏不弹执行轨迹", !serial.includes("查看信息收集 Agent的"), serial.slice(0, 200));
 
-/* 并行：同层步骤算同一波，上游一波多个节点时连线口径变成「并行汇入」 */
+/* 并行：同层步骤算同一波，画成一个圈定框而不是写一句「并行」 */
 const parallelGraph = buildCollaboration({
   stages: collabStages,
   agents: collabAgents,
@@ -254,10 +328,49 @@ check("模型：同层步骤算作同一波并行", parallelGraph.waves[0].lengt
 check("模型：并行波次的节点带 parallel 标记", parallelGraph.nodes[0].parallel && !parallelGraph.nodes[2].parallel);
 check("模型：上游一波多节点时连线口径为并行汇入", parallelGraph.edges.every((edge) => edge.kind === "parallel"));
 
+const parallelLayout = layoutCollaboration(parallelGraph, 720);
+const parallelRow = parallelLayout.nodes.filter((node) => node.kind === "agent").slice(0, 2);
+check(
+  "画布：同波节点摊在同一行",
+  parallelRow.length === 2 && parallelRow[0].y === parallelRow[1].y && parallelRow[0].x !== parallelRow[1].x,
+  JSON.stringify(parallelRow.map((node) => [node.x, node.y])),
+);
+check(
+  "画布：未跑完的那一步不点亮下一条边",
+  // s1/s2 都已完成 → 任务端子进去的两条 + 汇入 s3 的两条都亮；s3 还没跑 → 到交付那条不亮
+  parallelLayout.edges.filter((edge) => edge.active).length === 4,
+  `${parallelLayout.edges.filter((edge) => edge.active).length} 条点亮`,
+);
+check(
+  "画布：并行波次画出圈定框",
+  parallelLayout.groups.length === 1 && parallelLayout.groups[0].label === "并行协作区",
+  JSON.stringify(parallelLayout.groups),
+);
+
 const parallel = renderToStaticMarkup(<CollaborationGraph graph={parallelGraph} />);
-check("并行波次可渲染", parallel.includes("collab-row parallel"), parallel.slice(0, 300));
-check("并行汇入口径写进连线", parallel.includes("并行汇入"));
-check("并行波次口径为含并行波次", parallel.includes("含并行波次"));
+check("并行波次渲染出圈定框", parallel.includes("cv-group") && parallel.includes("并行协作区"));
+check(
+  "圈定框包住圆下面的标签，不切一半",
+  (() => {
+    const box = parallelLayout.groups[0];
+    // 只看圈在框里那一行的节点：`box.y` 相对行中心下偏了 12px
+    const inRow = parallelLayout.nodes.filter(
+      (node) => node.kind === "agent" && Math.abs(node.y - (box.y - 12)) < 1,
+    );
+    const bottoms = inRow.map((node) => node.y + node.size / 2 + 20 + 16);
+    return (
+      inRow.length === 2 &&
+      bottoms.every((bottom) => bottom <= box.y + box.height / 2)
+    );
+  })(),
+  JSON.stringify(parallelLayout.groups[0]),
+);
+
+// 等待态下底部那行得指「下一步是谁」，不能退回到最后一个跑完的（那正是最容易看错的时候）
+const partialCanvas = renderToStaticMarkup(
+  <CollabCanvas open graph={parallelGraph} onClose={() => undefined} />,
+);
+check("底部一行在等待态指向下一步", partialCanvas.includes("下一步：报告生成 Agent"));
 
 check(
   "空链路给空态而不是空白",
@@ -270,7 +383,7 @@ check(
         completed: new Set(),
       })}
     />,
-  ).includes("协作关系"),
+  ).includes("协作链路"),
 );
 
 /* -------------------------------------------------------------------------- */
@@ -299,6 +412,7 @@ try {
   check("全屏画布可渲染", false, cause instanceof Error ? cause.message : String(cause));
 }
 
+check("画布用宽档画法", canvas.includes("cv-canvas wide"));
 check("画布列出对话编号", canvas.includes("对话 1") && canvas.includes("对话 2"));
 check("画布标出当前对话", canvas.includes("collab-conversation current"));
 check("画布显示本次任务原文", canvas.includes("统计 128/2680 的占比并说明含义"));
@@ -308,9 +422,17 @@ check("画布悬停详情常驻：分配到的任务", canvas.includes("分配�
 check("画布悬停详情常驻：阶段产出与截断", canvas.includes("阶段产出") && canvas.includes("已截断"));
 check("画布悬停详情常驻：本阶段工具调用", canvas.includes("本阶段工具调用"));
 check(
-  "画布连线带工具链路与入参出参",
-  canvas.includes("工具链路：calculator ×1") && canvas.includes("入参") && canvas.includes("出参"),
+  "连线上的工具链胶囊带入参出参",
+  canvas.includes("cv-edge-chip") && canvas.includes("calculator ×1") && canvas.includes("入参") && canvas.includes("出参"),
+  "连线要能回答「这条数据是怎么被加工出来的」",
 );
+check(
+  "底部一行报全跑完时的最后一步",
+  canvas.includes("全部阶段已完成：报告生成 Agent"),
+  canvas.slice(canvas.indexOf("cv-terminal"), canvas.indexOf("cv-terminal") + 120),
+);
+check("底部一行标注是串行还是并行", canvas.includes("串行流水线"));
+check("画布不再铺图例说明", !canvas.includes("collab-canvas-legend") && !canvas.includes("这次对话的具体协作工作流"));
 check(
   "画布未打开时不渲染",
   renderToStaticMarkup(<CollabCanvas open={false} graph={collabGraph} onClose={() => undefined} />) === "",

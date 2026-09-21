@@ -8,241 +8,246 @@
  */
 
 /* -------------------------------------------------------------------------- */
-/* 协作链路：波内并行、波间串行                                                 */
+/* 协作画布：节点是圆点，连线是贝塞尔箭头                                        */
+/*                                                                             */
+/* 画法照 Jasper-zh/Multi-Agent-Playground 的 `GraphViewer.vue`：同一个盒子里   */
+/* 绝对定位的圆节点 + 同尺寸 SVG 边，两端各自退到圆周上。灰虚线 = 要走的边，      */
+/* 蓝实线 = 已经走通的边——进度靠颜色区分，不靠文字说明。                        */
+/*                                                                             */
+/* `overflow: visible`：悬停面板会浮到画布外，这里若裁掉，中间那几行的面板       */
+/* 就永远看不见了（行距 104px 装不下 260px 的面板）。                            */
 /* -------------------------------------------------------------------------- */
 
-.collab-graph {
-  display: grid;
-  min-width: 0;
-}
-
-.collab-wave {
-  display: grid;
-  min-width: 0;
-}
-
-.collab-row {
-  display: grid;
-  gap: 8px;
-  min-width: 0;
-}
-
-.collab-row.parallel {
-  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
-}
-
-/* 波与波之间的串行连接：一条竖线 + 口径标注。 */
-.collab-link {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding-left: 15px;
-}
-
-/* 波与波之间的连接：一条竖线 + 串/并行口径 + **上游这一步的工具链路**。 */
-.collab-link {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 0 3px 15px;
-}
-
-.collab-link-rule {
-  width: 1px;
-  height: 14px;
-  background: #cfdde1;
-}
-
-.collab-link.parallel .collab-link-rule {
-  background: #e0c48d;
-}
-
-.collab-link small {
+.cv-empty {
+  margin: 0;
   color: var(--cfg-ink-4);
-  font-size: 9.5px;
+  font-size: 10.5px;
+  line-height: 1.6;
 }
 
-.collab-link-tools {
+.cv-canvas {
+  position: relative;
+  width: 100%;
+  border: 1px solid var(--cfg-line-faint);
+  border-radius: var(--cfg-radius);
+  background-color: var(--cfg-surface-soft);
+  background-image: radial-gradient(circle, rgba(15, 23, 42, 0.07) 1px, transparent 1px);
+  background-size: 20px 20px;
+}
+
+.cv-canvas.wide { background-size: 26px 26px; }
+
+.cv-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.cv-svg-base { z-index: 0; }
+
+.cv-edge {
+  fill: none;
+  stroke: #cbd5e1;
+  stroke-width: 1.8;
+  stroke-dasharray: 4 4;
+}
+
+.cv-edge.active {
+  stroke: #3b82f6;
+  stroke-width: 2.4;
+  stroke-dasharray: none;
+}
+
+/* 并行波次的圈定框：并行关系是画出来的，不再写一句「含并行波次」。 */
+.cv-group {
+  position: absolute;
+  z-index: 1;
+  border: 1.5px solid rgba(59, 130, 246, 0.26);
+  border-radius: 22px;
+  background: linear-gradient(180deg, rgba(239, 246, 255, 0.92), rgba(248, 250, 252, 0.94));
+}
+
+.cv-group-head {
+  position: absolute;
+  left: 15px;
+  top: 9px;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 1px 6px;
-  border: 1px solid var(--cfg-line-soft);
-  border-radius: 999px;
-  background: var(--cfg-surface-soft);
-  color: #63808d;
-  font-size: 9.5px;
-  font-weight: 600;
-}
-
-/* -------------------------------------------------------------------------- */
-/* Agent 卡片：侧栏紧凑态与全屏画布共用同一份渲染                              */
-/* -------------------------------------------------------------------------- */
-
-.collab-card {
-  position: relative;
-  display: grid;
-  gap: 6px;
-  min-width: 0;
-  padding: 9px 10px;
-  border: 1px solid var(--cfg-line);
-  border-radius: var(--cfg-radius-sm);
-  background: var(--cfg-surface);
-  transition:
-    border-color var(--cfg-ease),
-    background var(--cfg-ease),
-    box-shadow var(--cfg-ease);
-}
-
-.collab-card.pending { opacity: .72; }
-.collab-card.skipped { opacity: .58; }
-.collab-card.running { border-color: #e6d3ac; background: #fffdf8; }
-.collab-card.completed { border-color: #cfe4d5; background: #fbfefc; }
-.collab-card.failed { border-color: #e8c7c0; background: #fffbfa; }
-
-.collab-card:focus-visible {
-  border-color: var(--cfg-accent-soft);
-  outline: none;
-}
-
-.collab-card-head {
-  display: flex;
-  align-items: center;
   gap: 8px;
-  min-width: 0;
 }
 
-.collab-card-mark {
-  display: grid;
-  place-items: center;
-  flex: 0 0 auto;
-  width: 22px;
-  height: 22px;
-  border-radius: 6px;
-  background: #eef4f5;
-  color: #6f8790;
-}
+.cv-group-head b { color: #3f5f86; font-size: 10.5px; font-weight: 700; }
 
-.collab-card-mark.completed { background: #e8f4ec; color: #478166; }
-.collab-card-mark.running { background: #fdf3e2; color: #c99542; }
-.collab-card-mark.failed { background: #fbecea; color: #b4635a; }
-
-.collab-card-title {
-  display: grid;
-  flex: 1;
-  gap: 1px;
-  min-width: 0;
-}
-
-.collab-card-title b {
-  overflow: hidden;
-  color: var(--cfg-ink);
-  font-size: 11.5px;
-  font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.collab-card-title small {
-  overflow: hidden;
-  color: var(--cfg-ink-4);
-  font-size: 9px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.collab-card-model {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-width: 0;
-  margin: 0;
-  color: #4d6975;
-  font-size: 10.5px;
-}
-
-.collab-card-model > span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.collab-card-model em {
-  flex: 0 0 auto;
-  padding: 1px 5px;
-  border-radius: 4px;
-  background: #eef4f5;
-  color: #6f8790;
+.cv-group-head i {
+  color: #93a8c2;
   font-size: 9px;
   font-style: normal;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
-.collab-card-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-  margin: 0;
+/* 连线上的工具链胶囊：挂在上游那一段而不是节点里。 */
+.cv-edge-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
 }
 
-.collab-chip {
-  padding: 1px 6px;
-  border: 1px solid var(--cfg-line-soft);
-  border-radius: 999px;
-  color: #63808d;
-  font-size: 9.5px;
+.cv-edge-slot {
+  position: absolute;
+  pointer-events: auto;
+  transform: translate(-50%, -50%);
 }
 
-.collab-chip.override {
-  border-color: #d8c48f;
-  background: #fdf9ef;
-  color: #8a6f31;
-}
-
-.collab-chip i { font-style: normal; font-weight: 700; }
-
-.collab-card-usage {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin: 0;
-}
-
-.collab-card-usage > span { display: grid; gap: 1px; }
-.collab-card-usage small { color: var(--cfg-ink-4); font-size: 8.5px; }
-.collab-card-usage b { color: #4d6975; font-size: 11px; font-weight: 600; }
-
-.collab-card-nodata,
-.collab-card-tools,
-.collab-card-note {
-  margin: 0;
-  color: #6f8790;
-  font-size: 9.5px;
-  line-height: 1.5;
-}
-
-.collab-card-tools {
+.cv-edge-chip {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  padding: 2px 7px;
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  border-radius: 999px;
+  background: var(--cfg-surface);
+  color: #3f5f86;
+  font-size: 9.5px;
+  font-weight: 600;
+  white-space: nowrap;
 }
 
+.cv-edge-chip:focus-visible { outline: 2px solid var(--cfg-accent); outline-offset: 2px; }
+
+.cv-node {
+  position: absolute;
+  z-index: 3;
+  display: grid;
+  place-items: center;
+  border: 2px solid #e2e8f0;
+  border-radius: 999px;
+  background: #fff;
+  color: #8fa3b0;
+}
+
+.cv-node.kind-agent { color: #2563eb; }
+
+.cv-canvas.wide .cv-node.kind-agent { cursor: grab; }
+
+.cv-node.visited { border-color: #a8c9f0; }
+
+.cv-node.running {
+  border-color: #2563eb;
+  background: #3b82f6;
+  color: #fff;
+}
+
+.cv-node.failed {
+  border-color: #dfb3ac;
+  background: #fffbfa;
+  color: #b4635a;
+}
+
+/* 悬停时抬到最上层：不然面板会被下一行的节点盖住半边。 */
+.cv-node:hover,
+.cv-node:focus-within { z-index: 12; }
+
+.cv-node:focus-visible { outline: 2px solid var(--cfg-accent); outline-offset: 2px; }
+
+.cv-ring {
+  position: absolute;
+  inset: -5px;
+  border: 2px solid rgba(59, 130, 246, 0.55);
+  border-radius: 999px;
+  animation: cv-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes cv-pulse {
+  0%, 100% { opacity: 0.9; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(1.06); }
+}
+
+.cv-dot { width: 9px; height: 9px; border-radius: 999px; background: #94a3b8; }
+.cv-node.visited .cv-dot { background: #7fb1ea; }
+.cv-node.running .cv-dot { background: #fff; }
+
+/* 名字与「模型 · Token」挂在圆下方：圆里只放得下一个图标，字必须出来。
+   必须自带底色——连线是纵向下来的，正好从这两行字中间穿过去；而文字本身不遮光，
+   只靠层级压不住，会看到箭头从笔画缝隙里透出来。 */
+.cv-name,
+.cv-meta {
+  position: absolute;
+  left: 50%;
+  overflow: hidden;
+  max-width: 96px;
+  padding: 1px 5px;
+  border-radius: 6px;
+  background: var(--cfg-surface);
+  text-align: center;
+  text-overflow: ellipsis;
+  transform: translateX(-50%);
+  white-space: nowrap;
+}
+
+.cv-name {
+  top: 100%;
+  margin-top: 5px;
+  color: var(--cfg-ink-2);
+  font-size: 9.5px;
+  font-weight: 600;
+}
+
+.cv-meta {
+  top: 100%;
+  margin-top: 18px;
+  color: var(--cfg-ink-4);
+  font-size: 8.5px;
+}
+
+.cv-canvas.wide .cv-name { max-width: 150px; font-size: 10.5px; }
+.cv-canvas.wide .cv-meta { max-width: 150px; margin-top: 20px; font-size: 9px; }
+
+.cv-expand {
+  position: absolute;
+  z-index: 14;
+  top: 6px;
+  right: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border: 1px solid var(--cfg-line);
+  border-radius: 999px;
+  background: var(--cfg-surface);
+  color: var(--cfg-ink-3);
+  font: inherit;
+  font-size: 9.5px;
+  cursor: pointer;
+  transition: border-color var(--cfg-ease), color var(--cfg-ease);
+}
+
+.cv-expand:hover { border-color: var(--cfg-accent-soft); color: var(--cfg-accent); }
+
 /* -------------------------------------------------------------------------- */
-/* 悬停详情                                                                    */
+/* 悬停面板                                                                    */
 /*                                                                             */
-/* 常驻 DOM、靠 CSS 显示：一来键盘 Tab 能拿到同一份内容，二来离屏冒烟可以直接     */
-/* 断言这些文本真的渲染了——如果改成 JS hover 状态，冒烟就只能测到「默认隐藏」。  */
+/* 用 CSS `:hover` / `:focus-within` 常驻在 DOM 里，不引入 JS hover 状态：       */
+/* 键盘 Tab 能拿到同样的内容，离屏冒烟也能断言这些文本确实渲染了。面板是节点的  */
+/* DOM 后代，视觉上浮到节点外也不影响 `:hover` 的判定（祖先链仍匹配）。          */
 /* -------------------------------------------------------------------------- */
 
-.collab-hover {
+.cv-pop-slot { position: absolute; z-index: 14; pointer-events: none; }
+
+.cv-pop {
   position: absolute;
-  z-index: 12;
-  top: calc(100% + 6px);
-  left: 0;
+  z-index: 14;
   display: none;
-  gap: 8px;
-  width: min(360px, 78vw);
-  padding: 10px 11px;
+  gap: 0;
+  width: 264px;
+  max-height: 280px;
+  overflow: auto;
+  padding: 9px 10px;
   border: 1px solid var(--cfg-line);
   border-radius: var(--cfg-radius-sm);
   background: var(--cfg-surface);
@@ -250,18 +255,48 @@
   color: var(--cfg-ink-2);
   font-size: 10px;
   line-height: 1.55;
+  pointer-events: auto;
+  text-align: left;
+  transform: translateX(-50%);
 }
 
-.collab-card:hover > .collab-hover,
-.collab-card:focus-within > .collab-hover,
-.collab-link:hover > .collab-hover,
-.collab-link:focus-within > .collab-hover {
+.cv-pop-node { left: 0; }
+
+/* 侧栏面板更矮：它只放参数与 Token，不需要那么高的滚动区。 */
+.cv-canvas.dense .cv-pop { max-height: 190px; }
+
+.cv-pop-edge {
+  bottom: calc(100% + 8px);
+  left: calc(50% + 0px);
+}
+
+.cv-node:hover .cv-pop,
+.cv-node:focus-within .cv-pop,
+.cv-edge-chip:hover .cv-pop,
+.cv-edge-chip:focus-within .cv-pop { display: grid; }
+
+.cv-pop-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: -1px 0 7px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--cfg-line-faint);
+}
+
+.cv-pop-head b { color: var(--cfg-ink); font-size: 11px; font-weight: 600; }
+.cv-pop-head span { color: var(--cfg-ink-4); font-size: 9px; }
+
+.cv-pop-block {
   display: grid;
+  gap: 4px;
+  min-width: 0;
 }
 
-.collab-hover-block { display: grid; gap: 4px; min-width: 0; }
+.cv-pop-block + .cv-pop-block { margin-top: 8px; }
 
-.collab-hover-block h5 {
+.cv-pop-block h5 {
   display: flex;
   align-items: center;
   gap: 5px;
@@ -271,7 +306,7 @@
   font-weight: 600;
 }
 
-.collab-hover-block h5 i {
+.cv-pop-block h5 i {
   padding: 0 4px;
   border-radius: 3px;
   background: #fdf9ef;
@@ -280,19 +315,21 @@
   font-style: normal;
 }
 
-.collab-hover-block dl { display: grid; gap: 2px; margin: 0; }
-.collab-hover-block dl > div { display: flex; justify-content: space-between; gap: 10px; }
-.collab-hover-block dt {
+.cv-pop-block dl { display: grid; gap: 2px; margin: 0; }
+.cv-pop-block dl > div { display: flex; justify-content: space-between; gap: 10px; }
+
+.cv-pop-block dt {
   flex: 1;
   overflow: hidden;
   color: var(--cfg-ink-3);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.collab-hover-block dd { margin: 0; color: var(--cfg-ink-2); font-weight: 600; }
-.collab-hover-block dl > div.override dt { color: #8a6f31; }
 
-.collab-hover-block pre {
+.cv-pop-block dd { margin: 0; color: var(--cfg-ink-2); font-weight: 600; }
+.cv-pop-block dl > div.override dt { color: #8a6f31; }
+
+.cv-pop-block pre {
   overflow: auto;
   max-height: 130px;
   margin: 0;
@@ -305,91 +342,36 @@
   white-space: pre-wrap;
 }
 
-.collab-hover-block ul { display: grid; gap: 4px; margin: 0; padding: 0; list-style: none; }
-.collab-hover-block li {
+.cv-pop-block ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cv-pop-block li {
   display: grid;
   gap: 2px;
   padding: 5px 6px;
   border-radius: 6px;
   background: var(--cfg-surface-soft);
 }
-.collab-hover-block li b { color: var(--cfg-ink); font-size: 10px; }
-.collab-hover-block li span { color: var(--cfg-ink-3); font-size: 9px; }
-.collab-hover-block li.failed { background: #fbecea; }
-.collab-hover-block li em { color: #b4635a; font-size: 9.5px; font-style: normal; }
 
-.collab-hover-note { margin: 0; color: var(--cfg-ink-4); }
+.cv-pop-block li b { color: var(--cfg-ink); font-size: 10px; }
+.cv-pop-block li span { color: var(--cfg-ink-3); font-size: 9px; }
+.cv-pop-block li.failed { background: #fbecea; }
+.cv-pop-block li em { color: #b4635a; font-size: 9.5px; font-style: normal; }
 
-.collab-expand { justify-self: start; margin-bottom: 8px; }
-
-.collab-foot {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  margin: 8px 0 0;
-  color: var(--cfg-ink-4);
-  font-size: 9.5px;
-  line-height: 1.5;
-}
-
-.collab-legend {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-  margin: 12px 0 0;
-  padding-top: 10px;
-  border-top: 1px solid var(--cfg-line-faint);
-  color: #8c9ca2;
-  font-size: 9.5px;
-}
-
-.collab-legend span {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-}
-
-.collab-legend i {
-  display: block;
-  width: 7px;
-  height: 7px;
-  border-radius: 2px;
-}
-
-.collab-legend i.done {
-  background: #7fb894;
-}
-
-.collab-legend i.doing {
-  background: #e0b56d;
-}
-
-.collab-legend i.wait {
-  background: #cfd8db;
-}
-
-.collab-legend .collab-mode {
-  margin-left: auto;
-  padding: 2px 6px;
-  border: 1px solid var(--cfg-line);
-  border-radius: 5px;
-  color: #6b838f;
-}
-
-.collab-empty {
-  margin: 0;
-  color: var(--cfg-ink-4);
-  font-size: 10.5px;
-  line-height: 1.6;
-}
+.cv-pop-note { margin: 0; color: var(--cfg-ink-4); }
 
 /* -------------------------------------------------------------------------- */
-/* 全屏协作画布                                                                */
+/* 全屏画布                                                                    */
 /*                                                                             */
 /* 用 `position: fixed`：侧栏 `.inspector` 是 `position:absolute; z-index:8` 且  */
 /* `overflow:auto`，fixed 子元素既不受它裁剪、也不受它的层叠上下文限制（祖先没有   */
-/* transform），所以画布能盖住整屏与执行台（后者 z-index:4）。                    */
+/* transform），所以画布能盖住整屏与执行台（后者 z-index:4）。第四个网格行留给    */
+/* 底部那行「当前节点」，画布本体滚它自己，不把这一行顶出屏幕。                   */
 /* -------------------------------------------------------------------------- */
 
 .collab-overlay {
@@ -397,8 +379,7 @@
   z-index: 40;
   inset: 0;
   display: grid;
-  grid-template-rows: auto auto 1fr;
-  gap: 0;
+  grid-template-rows: auto auto 1fr auto;
   background: #f4f8f9;
   color: var(--cfg-ink);
 }
@@ -422,12 +403,7 @@
 
 .collab-canvas-title b { font-size: 13px; font-weight: 600; }
 
-.collab-canvas-title small {
-  color: var(--cfg-ink-4);
-  font-size: 10px;
-}
-
-.collab-canvas-actions { display: flex; gap: 8px; }
+.collab-canvas-title small { color: var(--cfg-ink-4); font-size: 10px; }
 
 .collab-conversations {
   display: flex;
@@ -439,27 +415,17 @@
   background: var(--cfg-surface);
 }
 
-.collab-conversations-label {
+.collab-conversation {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  margin-right: 4px;
-  color: var(--cfg-ink-4);
-  font-size: 10px;
-}
-
-.collab-conversation {
-  display: grid;
-  gap: 2px;
-  max-width: 190px;
-  padding: 6px 9px;
+  gap: 7px;
+  padding: 5px 9px;
   border: 1px solid var(--cfg-line);
   border-radius: var(--cfg-radius-sm);
   background: var(--cfg-surface-soft);
   color: inherit;
   cursor: pointer;
   font: inherit;
-  text-align: left;
   transition: border-color var(--cfg-ease), background var(--cfg-ease);
 }
 
@@ -472,88 +438,51 @@
 
 .collab-conversation b { color: var(--cfg-ink); font-size: 10.5px; font-weight: 600; }
 
-.collab-conversation small {
+.collab-canvas-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow: auto;
+  padding: 16px 20px 20px;
+}
+
+/* 画布外层框：`flex:1` 拿到网格行剩下的高度，画布按这个数把行距摊开。
+   框自己**不裁**——悬停面板要能浮到画布外（中间那几行放不下 280px 的面板）。 */
+.cv-frame {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.cv-task {
+  flex: 0 0 auto;
   overflow: hidden;
-  color: var(--cfg-ink-4);
-  font-size: 9px;
+  margin: 0;
+  color: var(--cfg-ink-2);
+  font-size: 11.5px;
+  line-height: 1.5;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.collab-canvas-body {
-  overflow: auto;
-  padding: 16px 20px 40px;
-}
+.cv-note { flex: 0 0 auto; margin: 0; color: var(--cfg-ink-3); font-size: 11px; }
 
-.collab-canvas-task {
-  max-width: 900px;
-  margin-bottom: 14px;
-  padding: 10px 12px;
-  border: 1px solid var(--cfg-line);
-  border-radius: var(--cfg-radius);
-  background: var(--cfg-surface);
-}
-
-.collab-canvas-task p {
-  margin: 4px 0 0;
-  color: var(--cfg-ink-2);
-  font-size: 11.5px;
-  line-height: 1.6;
-}
-
-.collab-canvas-note {
-  max-width: 900px;
-  margin: 0 0 14px;
-  color: var(--cfg-ink-3);
-  font-size: 11px;
-  line-height: 1.6;
-}
-
-.collab-canvas-graph {
-  display: grid;
-  max-width: 1100px;
-  gap: 2px;
-}
-
-/* 画布上卡片并排、波次之间留白更宽，读起来才像一张图而不是一列列表。 */
-.collab-canvas-graph .collab-row {
-  gap: 14px;
-  align-items: stretch;
-}
-
-.collab-canvas-graph .collab-row.parallel {
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-}
-
-.collab-canvas-graph .collab-row:not(.parallel) {
-  grid-template-columns: minmax(240px, 340px);
-}
-
-.collab-canvas-graph .collab-wave {
-  gap: 4px;
-}
-
-.collab-canvas-graph .collab-card {
-  padding: 12px 13px;
-  gap: 8px;
-}
-
-.collab-canvas-graph .collab-link {
-  padding: 6px 0 6px 18px;
-}
-
-.collab-canvas-legend {
+.cv-terminal {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
-  max-width: 1100px;
-  margin: 18px 0 0;
-  padding-top: 12px;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 20px;
   border-top: 1px solid var(--cfg-line-faint);
-  color: var(--cfg-ink-4);
+  background: var(--cfg-surface);
+  color: var(--cfg-ink-3);
+  font-family: "JetBrains Mono", Consolas, monospace;
   font-size: 10.5px;
-  line-height: 1.6;
+}
+
+.cv-terminal-mode {
+  color: var(--cfg-ink-4);
+  font-family: inherit;
+  letter-spacing: 0.06em;
 }
 
 /* -------------------------------------------------------------------------- */

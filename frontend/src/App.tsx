@@ -1703,10 +1703,6 @@ function Inspector({
             协作链路
           </span>
         </div>
-        <p className="inspector-copy">
-          节点是 Agent 卡片：各自的模型、参数与 Token 消耗。连线记录上游那一步用过的工具。
-          想看某个 Agent 具体干了什么，在执行台卡片上点开。
-        </p>
         <CollaborationGraph graph={graph} onExpand={() => setCanvasOpen(true)} />
       </section>
       {workflow && (
