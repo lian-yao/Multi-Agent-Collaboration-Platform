@@ -1123,6 +1123,22 @@ node_modules/.bin/esbuild rendercheck/config-smoke.tsx ... && node "$TEMP/config
 （`wf-preview-earlier` 是补出来的更早一次已完结对话），切到「对话 1」时它的
 `GET /workflows/{id}` / `/stages` / `/tool-calls` 三条也都有应答——不然预览里的历史对话会是空白。
 
+**线上验证**（`docker compose up -d --build backend frontend` 重建后，两镜像 Built、
+容器 healthy；入口是 **5173** 的 nginx 反代 `/api`）：
+
+- `GET /api/v1/sessions/{id}/workflows` 对一条有 **3 条**工作流的会话回
+  `total=3`，顺序与创建时间一致（16:17:45 → 16:23:36 → 16:23:39），即「对话 1 / 2 / 3」
+  在真实数据上成立，不只是单测里造出来的；三条的 `session_id` 全部等于被查询的会话。
+  未知会话回 `404 SESSION_NOT_FOUND`（不是空列表——「草稿态」与「不存在」是两件事）。
+- 前端容器里核到了新产物：`index-tFSw4r53.css` 含 `.collab-card` / `.collab-overlay` /
+  `.collab-hover` / `.collab-link-tools`，`index-DIwFFPx_.js` 含「展开全屏画布」「工具链路」
+  「collab-canvas」——**部署里的界面确实换了，不是只在源码里**。
+- **采样标签的实测口径**（直接查库，不是推断）：
+  `select metric_name, labels from metrics where labels->>'workflow_id' = '961af452-…'` 回的标签是
+  `{"role": "collector", "model": "gpt-5.5", "stage": "collect", "workflow_id": "…"}`；
+  另查 `where labels ? 'agent_id'` → **全库 0 条**。这就是 §5.5 那处漂移的实证：
+  `agent_id` 从来不存在，Token 只能靠 `role` 归到 Agent 头上。
+
 **4. 边界（如实记录）**
 
 - **卡片不再是执行轨迹的入口**：点了不跳 §5.17 弹窗。执行台卡片已经承担那个入口，两块视图都能
