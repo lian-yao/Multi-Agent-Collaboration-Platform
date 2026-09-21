@@ -249,9 +249,12 @@
 .cv-pop-slot.is-left { right: 100%; padding-right: 16px; }
 
 .cv-pop {
+  /* 面高上限。声明成变量是为了让专有变体能在**不重复这个数**的前提下再收窄它：
+     内联写 `max-height` 会连同这条上限一起顶掉（本轮踩过：可容高度 532 把 520 覆盖了）。 */
+  --cv-pop-max: 520px;
   display: none;
   gap: 0;
-  max-height: 520px;
+  max-height: var(--cv-pop-max);
   overflow: auto;
   padding: 9px 10px;
   border: 1px solid var(--cfg-line);
@@ -267,13 +270,20 @@
 
 .cv-pop-node { width: 380px; }
 
+/* 工具链浮窗与节点浮窗同一套规矩：**贴胶囊侧面**。
+   胶囊钉在画布中线上，向上弹（`bottom:100%`）会正好压住上游那一串节点——实测会把「任务」
+   端子与上游 Agent 一起盖掉。竖直居中于胶囊，面高取「设计上限」与「可容高度
+   `--cv-pop-fit`（内联给）」的较小值，两条约束各归其位。 */
 .cv-pop-edge {
   position: absolute;
-  bottom: calc(100% + 8px);
-  left: 50%;
-  width: 300px;
-  transform: translateX(-50%);
+  top: 50%;
+  width: 340px;
+  max-height: min(var(--cv-pop-max), var(--cv-pop-fit, var(--cv-pop-max)));
+  transform: translateY(-50%);
 }
+
+.cv-pop-edge.is-right { left: calc(100% + 10px); }
+.cv-pop-edge.is-left { right: calc(100% + 10px); }
 
 .cv-node:hover .cv-pop,
 .cv-node:focus-within .cv-pop,
@@ -409,6 +419,15 @@
 .collab-canvas-title b { font-size: 13px; font-weight: 600; }
 
 .collab-canvas-title small { color: var(--cfg-ink-4); font-size: 10px; }
+
+/* 图标与文字要落在同一条中线上：`.cfg-quiet` 是块级按钮，而 lucide 的 `svg` 默认
+   `vertical-align: baseline`，图标会比文字高出 2px（实测中线偏差 −2）。侧栏那份
+   `.sidebar-user-menu-head .cfg-quiet` 早就这么修过，这里是同一处对齐。 */
+.collab-canvas-head .cfg-quiet {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
 
 .collab-conversations {
   display: flex;

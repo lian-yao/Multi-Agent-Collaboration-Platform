@@ -22,7 +22,7 @@
  * **节点不可拖**：这是一张「过程可视化」，位置本身就在表达流程顺序，不是可编辑的画板。
  * 能拖只会让人以为拖动能改变什么，而它什么都不会改变。
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { Bot, CircleAlert, LoaderCircle, Maximize2, Pause, Wrench } from "lucide-react";
 import { Status } from "../components/Status";
 import type { CollabGraph, CollabNode, CollabToolCall } from "./collaboration";
@@ -434,13 +434,34 @@ function NodeDetail({ node }: { node: CollabNode }) {
  *
  * 挂在上游那一段而不是节点里：读者要问的是「这条数据是怎么被加工出来的」，
  * 答案属于交接动作本身。没有工具就不画胶囊——空标签只会让图更吵。
+ *
+ * 浮窗与节点浮窗同一套规矩：**贴侧面**。胶囊落在画布中线上，向上弹会正好盖住上游那一串
+ * 节点——而链路正是这张图要给人看的东西。竖直方向靠 `--cv-pop-fit` 夹：面竖直居中于胶囊，
+ * 所以面高只要不超过「胶囊到画布上下沿距离的两倍」，就必然不溢出（不必去量面的实际高度）。
+ *
+ * 这里给的只是**可容高度**这一个约束，不是面高上限——上限（520px）留在样式表里，由 CSS
+ * 的 `min()` 把两者取小。直接往内联 `max-height` 上写数值会静默顶掉那条设计上限。
  */
-function EdgeChip({ edge }: { edge: PlacedEdge }) {
+function EdgeChip({
+  edge,
+  side,
+  fitHeight,
+}: {
+  edge: PlacedEdge;
+  /** 胶囊落在画布哪半边决定翻向：右半边就往左弹，免得顶出画布。 */
+  side: "left" | "right";
+  /** 由胶囊在画布里的竖直位置算出的可容高度（px），见上面的规矩。 */
+  fitHeight: number;
+}) {
   return (
     <span className="cv-edge-chip" tabIndex={0} aria-label={`${edge.title} 的工具链路`}>
       <Wrench size={9} />
       {edge.toolSummary}
-      <div className="cv-pop cv-pop-edge" role="tooltip">
+      <div
+        className={`cv-pop cv-pop-edge is-${side}`}
+        style={{ "--cv-pop-fit": `${fitHeight}px` } as CSSProperties}
+        role="tooltip"
+      >
         <header className="cv-pop-head">
           <b>{edge.title}</b>
           <span>工具调用</span>
@@ -600,7 +621,11 @@ export function CollaborationCanvas({
                   marginLeft: clampChip(edge.mid.x) - edge.mid.x,
                 }}
               >
-                <EdgeChip edge={edge} />
+                <EdgeChip
+                  edge={edge}
+                  side={edge.mid.x > w / 2 ? "left" : "right"}
+                  fitHeight={Math.max(180, 2 * Math.min(edge.mid.y, h - edge.mid.y) - 20)}
+                />
               </span>
             ))}
         </div>

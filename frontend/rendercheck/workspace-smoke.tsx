@@ -443,6 +443,11 @@ check(
   "连线要能回答「这条数据是怎么被加工出来的」",
 );
 check(
+  "工具链浮窗同样贴胶囊侧面",
+  canvas.includes("cv-pop-edge is-right") || canvas.includes("cv-pop-edge is-left"),
+  "胶囊钉在画布中线上，居中向上弹会把上游那一串节点整个盖掉",
+);
+check(
   "底部一行报全跑完时的最后一步",
   canvas.includes("全部阶段已完成：报告生成 Agent"),
   canvas.slice(canvas.indexOf("cv-terminal"), canvas.indexOf("cv-terminal") + 120),
@@ -975,6 +980,38 @@ try {
     "侧栏档的面板规则已删除",
     !canvasStyles.includes(".cv-canvas.dense .cv-pop"),
     "侧栏不再有悬停浮层，留着这条规则会让「侧栏不给面板」变成口头约定",
+  );
+  check(
+    "工具链浮窗不再挂在胶囊正上方",
+    canvasStyles.includes(".cv-pop-edge.is-right") &&
+      canvasStyles.includes(".cv-pop-edge.is-left") &&
+      !canvasStyles.includes("bottom: calc(100% + 8px)"),
+    "`bottom:100%` 是居中向上弹；胶囊在中线上，那样必盖住上游节点",
+  );
+  check(
+    "浮窗的两条高度约束取小而不是互相顶掉",
+    canvasStyles.includes("--cv-pop-max: 520px") &&
+      canvasStyles.includes("min(var(--cv-pop-max), var(--cv-pop-fit"),
+    "内联写 max-height 会静默顶掉 520px 这条设计上限（本轮实测被顶成 532px）",
+  );
+  // 关掉「块级按钮里 svg 按 baseline 坐」这处 2px 偏差。断言切片到规则块内再查属性，
+  // 只查全文 contains 会被文件里别处的同名属性蒙过去。
+  const closeRule = canvasStyles.slice(canvasStyles.indexOf(".collab-canvas-head .cfg-quiet"));
+  const closeBlock = closeRule.slice(0, closeRule.indexOf("}"));
+  check(
+    "关闭按钮的图标与文字同中线",
+    closeBlock.includes("inline-flex") && closeBlock.includes("align-items: center"),
+    "lucide 的 svg 默认 vertical-align:baseline，块级按钮里图标会比文字高 2px",
+  );
+  // 侧栏被会话标题顶宽：`.sidebar` 是 `.app-shell` 的 flex item，`min-width:auto` 会让
+  // 内容的最小宽度压过 `flex-basis`（实测 214 → 1093px）。同样只认**基础块内**那一条，
+  // 后面还有三处 `.sidebar` 覆盖定义，查全文会假绿。
+  const sidebarBase = styles.slice(styles.indexOf(".sidebar {"));
+  const sidebarBlock = sidebarBase.slice(0, sidebarBase.indexOf("}"));
+  check(
+    "侧栏宽度不被会话标题顶宽",
+    sidebarBlock.includes("min-width:0") || sidebarBlock.includes("min-width: 0"),
+    "缺这条，长会话标题会把 214px 的侧栏撑到 1000px 开外",
   );
 
   // 构建期出过一次「CSS 规则被压缩器静默丢掉」的事故（只打 WARNING、退出码仍是 0），

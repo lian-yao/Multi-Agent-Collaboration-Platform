@@ -106,6 +106,12 @@ svg {
 .sidebar {
   display:flex;
   flex:0 0 216px;
+  /* 必须显式写 0：`.app-shell` 是 flex 行容器，侧栏是它的 item，而 item 的
+     `min-width:auto` 会把**内容的最小宽度**顶在 `flex-basis` 之上。当前任务标题是
+     `white-space:nowrap`，一旦会话标题很长，侧栏就从 214px 被撑到 1000px 开外
+     （2026-09-21 实测 214 → 1093）。子项自己的 `min-width:0` 救不了这一层——那只
+     影响 flex 分配，不改变容器的 min-content。 */
+  min-width:0;
   flex-direction:column;
   padding:24px 14px 18px;
   color:#b6c7ce;
