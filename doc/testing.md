@@ -232,15 +232,22 @@ node_modules/.bin/esbuild rendercheck/workspace-smoke.tsx --bundle --platform=no
 不在方块里**）、`AgentTuningPanel`（六个覆盖字段 + 层次来源 + 保存/清除入口 + 已绑定
 模型回显）与 `ModelSection`（两条模型、特化徽标、开关、批量引入入口）。
 
-`workspace-smoke`（ADR-018）覆盖工作台三块新视图，同样是「显式 props 驱动」那一类：
+`workspace-smoke`（ADR-018 + ADR-031）覆盖工作台**四块**视图，同样是「显式 props 驱动」那一类：
 `GraphCanvas` / `layoutCollaboration`（ADR-028：串行 / 并行波次两种排布的**坐标**与首尾端子、
 弧线确为三次贝塞尔、连线激活口径、悬停详情与工具胶囊、`minHeight` 撑高与**不满压**，
 以及侧栏紧凑档不写任务与产出）、`AgentStageModal`（身份与绑定、`pending` 说
 「等待前置阶段」而不是 workflow 词汇「排队中」、角色未就绪时的降级、明示推理过程尚未
-对外暴露）与 `TaskUsagePanel` + `groupUsage`（**同一指标多次采样并排列出、断言不求和**）。
+对外暴露）、`RunActivity`（对话流内联执行轨迹：跑完的步骤收成一行且摘要仍带阶段名与工具次数、
+执行中只摊开正在跑的那一步、失败调用连着原因、轨迹缺席时转述服务端给的原因且整条链路
+只重复一次）与 `TaskUsagePanel` + `groupUsage`（**同一指标多次采样并排列出、断言不求和**）。
+另有 `Markdown`（ADR-031：标题 / 加粗 / 行内代码 / 表格滚动容器 / 围栏代码块语言角标 /
+任务列表只读勾选框六类结构，且断言**正文里不再出现未渲染的 `**` 与 `| ---`**——
+只查元素存在会漏掉「记号原样吐出」这个真正的病根）与 `Disclosure`（展开态带
+`aria-expanded` + `aria-controls`、收起态**不写**指向空元素的 `aria-controls`）。
 另有一组读源文件的静态断言，固定「假选择已删除」：`styles.css` 不含 `.decision-*`、
 `App.tsx` 不含「主决策 / 自动分配」、卡片点击走 `setDetailStage` 而非 `setInspectorOpen`、
-`WorkflowInspection` 已从 `Inspection.tsx` 删除。
+`WorkflowInspection` 已从 `Inspection.tsx` 删除；并固定「正文不再走 `<p>{content}</p>`」、
+「`.run-event` 规则已清干净」、「轨迹渲染只有一份实现（弹窗与对话流同调 `TraceParts`）」。
 
 副路由（2026-09-15 增加，`components/PageTabs.tsx`）另有三类断言：
 `role="tablist"` / `role="tab"` 语义与 `aria-selected`、只有选中项 `tabindex="0"`、
@@ -1490,6 +1497,105 @@ Windows 下 `file://` 的**盘符会混进 pathname**，于是 `GET /api/v1/...`
 - 角色池只有三个（`RoleId`），池外角色会让整份计划作废并回退固定三步。
 - 前端**没有**编排模式开关；默认 `static`（`app/config.py:65`），要看动态画布需服务端配置或请求体字段。
 - 未跑全量 pytest：Docker Desktop 未启动（同前几轮）。
+
+### 4.15 对话流 Markdown 正文、渐进揭示与内联执行轨迹（2026-09-21，成员 D）
+
+**1. 用户反馈与病根**
+
+反馈原话：「当前的文本输出缺少流式渲染，很多符号并没有相应渲染，效果不是很好，同时缺少在相应位置
+展开/收起思维连，还有具体工具输出的地方，按照主流 agent 的实现方法完善」。两处病根：
+
+- `App.tsx::MessageBubble` 正文是 `<p>{message.content}</p>`。模型按 Markdown 组织输出，
+  记号（`**` `##` `|`）原样吐出——**结构全丢**，不是观感问题。
+- 执行轨迹只在执行台弹窗（§5.17）与记录页，对话流只剩一行 `.run-event` 进度文本。
+  要在对话里理解「这一步为什么得出这个结论」，得跑到另一块面板对时间线。
+
+先追问确认了三个分歧点（都撞上已有的、已冻结的约束），三项均取推荐项：
+Markdown 用成熟库而不是自研；流式只做**前端呈现层**而不是后端起 SSE；
+「思维链」展示**真实的 ReAct 行动链**而不是去落盘模型 reasoning
+（后者要改 ADR-018、§5.17、本文件并动 A/B 线）。
+
+**2. 改了什么**
+
+| 文件 | 内容 |
+| --- | --- |
+| `frontend/src/components/Markdown.tsx` | 新增。GFM 渲染；`pre`/`code`/`table`/`input`/`a` 五个自定义渲染器；不挂 `rehype-raw` |
+| `frontend/src/components/useStreamText.ts` | 新增。渐进揭示：按总时长（320–1800ms）反推步长；文本变长从断点续；非浏览器与 reduced-motion 降级为全文 |
+| `frontend/src/components/Disclosure.tsx` | 新增。受控折叠块（原生 `<details>` 的状态父组件改不了） |
+| `frontend/src/workspace/RunActivity.tsx` | 新增。对话流内联执行轨迹；正在跑的步骤默认摊开；跑完收成一行 |
+| `frontend/src/workspace/TraceParts.tsx` | 新增。`ToolCallBlock` 抽出来给弹窗与对话流共用（原先只有弹窗有） |
+| `frontend/src/App.tsx` | `MessageBubble` 走 Markdown；`RunActivity` 按 `reportIndex` 插在提问与答复之间；`revealed` 集合决定谁播动画 |
+| `frontend/src/workspace/collaboration.ts` | 导出 `stageMetaFor`（阶段 id 优先、角色兜底） |
+| `frontend/src/workspace/AgentStageModal.tsx` | 工具调用改调共享实现，删掉本地那份 |
+| `frontend/src/styles.css` | Markdown 版式 / 折叠块 / 执行活动卡片；**移除** `.run-event` |
+| `frontend/vite.config.ts` | markdown 栈拆独立 chunk |
+| `frontend/package.json` | `+ react-markdown@^10.1.0`、`+ remark-gfm@^4.0.1` |
+| `doc/decisions/031-conversation-stream-rendering.md` | 新增 ADR：把 ADR-018 的「三块视图」扩成四块，改按**时间面**划边界 |
+| `doc/api.md` §7 | 四块视图对照表 + 对话流细则；顺带修掉一处悬空引用（原文写「见 §7.1」，无此小节） |
+
+**3. 验证**
+
+```bash
+npm --prefix frontend run build
+# 通过：tsc --noEmit && vite build，无 500 kB 警告
+# 产物 index-Bv3Mc4mw.css 91.70 kB / markdown-pr2ruGPi.js 166.03 kB / index-CbrzEpDA.js 422.69 kB
+```
+
+- `rendercheck/workspace-smoke.tsx` → **201/201**（159 → 201，+42；含 Markdown 六类结构、
+  折叠块可达性、执行活动卡片四种状态、以及「对话流与弹窗同一套小标题」的防漂移断言）
+- `rendercheck/config-smoke.tsx` → **77/77**（无回归）
+- `rendercheck/preview.tsx` 等三个文件单独过 tsc：只剩既有的 `node:fs` / `process`
+  找不到声明的噪音（项目不依赖 `@types/node`），本轮新增代码零报错。
+- 产物样式完整性：按**出现次数**（不是行数，压缩后只有一行）核对 `md-body` 37、
+  `run-activity` 21、`md-table-wrap` 6、`disclosure-head` 3、`md-caret` 2、`run-step-tools` 1 ——
+  全部存活，没有被压缩器丢掉。
+
+**4. 实渲取证（CDP + 真实浏览器，客户端渲染）**
+
+`renderToStaticMarkup` 量不到宽度、也不跑 effect，验证不了版式与动画，所以走 CDP 驱动
+headless Chrome 打开离线预览页 `file://.../ui-preview.html`，点到「执行中」的会话后取证：
+
+| 断言 | 实测 |
+| --- | --- |
+| 正文里没有未渲染的记号 | `.conversation-transcript` 的 `innerText` 匹配 `/\*\*|\| ---/` → **false** |
+| 提交一条含七类结构的消息后 | 用户气泡内出现 `H2` / `STRONG` / `CODE.md-code` / `TABLE` / `UL` / `LI`×2 / `BLOCKQUOTE` / `CODE.md-code` |
+| 气泡底色迁移 | `.md-body` 的 `background` = `rgb(237,243,245)`（= `#edf3f5`），内层 `p` 为 `transparent`（否则 Markdown 下会「一段一个气泡」） |
+| 内联卡片几何 | `.run-activity` = **760×506**（拿到了真实宽度，不是 0），无横向溢出 |
+| 默认展开面 | 3 个折叠块、**只 1 个展开**（正在跑的那一步） |
+| 摘要不丢信息 | 收起的步骤仍带「信息收集 / 2 次工具调用 / 已完成」 |
+| 状态着色 | 已完成 → `tone-green` `rgb(47,143,107)`；执行中 → `tone-accent` `rgb(63,127,147)` |
+| 工具入参出参 | 展开后 2 个 `.ws-trace-step`、2 个 `details[open]` |
+| 渐进揭示 | 覆盖媒体特性后 0.55s 时 **62/70 字**仍在增长，`::after` 光标 7×14px、`animation-name: md-caret`；随后自动收尾到全文 70 字 |
+| 页面报错 | **0** |
+
+**5. 踩到的坑**
+
+- **headless Chrome 默认上报 `prefers-reduced-motion: reduce`**，直接把渐进揭示的降级分支
+  打开：`animation-name` 量到 `none`、`.is-streaming` 一直不出现。**看起来像动画根本没实现。**
+  要验动画必须 `Emulation.setEmulatedMedia` 显式覆盖成 `no-preference`（脚本已按这个来）。
+  反过来，这条也顺带证明了降级分支真的生效——在 reduced-motion 下正文是立即全文。
+- **CDP 脚本每次调用都重新导航**，跨调用攒状态是白费：点开的下拉、展开的步骤全丢。
+  必须把「点击 → 等待 → 取证 → 截图」放进**同一个连接**里顺序执行。另外每个
+  `Runtime.evaluate` 共享全局作用域，同名 `const` 第二次声明会 `SyntaxError`
+  （本轮踩到一次，`Identifier 'b' has already been declared`）——用 IIFE 包起来。
+- **npm 装 `react-markdown` 遇到 `ECONNRESET` 重试**：多个包的 `cache revalidated` 耗时
+  30–40s，首次安装（无 pipe、`--loglevel=http`）约 3 分钟。不是挂死，是慢；
+  命令里不要 `| tail`，否则中途看不到任何输出，无法区分「慢」和「挂」。
+- **引入 markdown 栈把主包推过 500 kB**：402 kB → 589 kB，Vite 开始告警。
+  在 `vite.config.ts` 里把这一栈拆成独立 chunk（422.69 + 166.03 kB）恢复无告警。
+
+**6. 边界（如实记录）**
+
+- **渐进揭示是呈现效果，不是流式传输。** 后端没有事件流，助手正文是工作流终态一次性落库的
+  （`app/workflows/pipeline.py::finalize_activity`）。要真正的流式语义，需 **B** 在
+  `app/workflows` 于阶段推进/工具调用处发布事件、**D** 新增只读事件流端点；
+  且 LLM 逐 token 输出受 Dapr 活动边界限制，现实上限是「按阶段/工具粒度推送」。
+- **展示的是真实的 ReAct 行动链，不是模型思维链。** 模型内部推理没有落盘，服务端也不提供；
+  界面上不编造。要展示真思维链需 **C** 落库 reasoning + **A** 透传，并同步改 ADR-018、
+  §5.17 与本文件中「不假装有思维链」那条断言。
+- **只跑了前端门禁**：未跑全量 pytest（Docker Desktop 未启动，同前几轮）。
+- `rendercheck/ui-preview.html` 的 jsdom 自检脚本（`verify_preview.mjs`）不在仓库里
+  （项目刻意不引前端测试依赖），本轮改用 CDP 实跑替代，覆盖更强。
 
 ## 5. 失败处理约定
 - 任一用例失败：先复现，再定位，修复后将失败模式固化为新的测试或本文档约束；

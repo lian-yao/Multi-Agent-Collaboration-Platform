@@ -63,6 +63,20 @@ function metaForRole(stages: StageMeta[], role: string): StageMeta {
   );
 }
 
+/**
+ * 按「阶段 id 优先、角色兜底」解析一条步骤的元信息。
+ *
+ * 两条链路拿到的标识不是同一个东西：静态链路给的是阶段名（`collect`），动态链路给的是
+ * 计划步骤 id（`s1`），而它的角色在 `plan[].role` 上。调用方（对话流内联轨迹、执行台）
+ * 若各自判断「这个 id 认不认识」，就会出现「动态步骤显示成 s1」和「显示成收集 Agent」
+ * 两种口径并存的观感问题。所以判断只放在这里。
+ */
+export function stageMetaFor(stages: StageMeta[], id: string, role?: string): StageMeta {
+  return stages.some((stage) => stage.id === id)
+    ? metaForStage(stages, id)
+    : metaForRole(stages, role || id);
+}
+
 /* -------------------------------------------------------------------------- */
 /* 状态词汇（执行台与画布共用）                                                */
 /* -------------------------------------------------------------------------- */

@@ -14,12 +14,12 @@
  * 视图本体只吃显式 props（`AgentTraceView` 可单独离屏渲染），数据由容器拉取，
  * 便于 `frontend/rendercheck` 直接挂载。
  */
-import { Bot, ChevronRight, ExternalLink, Wrench } from "lucide-react";
+import { Bot, ChevronRight, ExternalLink } from "lucide-react";
 import { Modal, formatTime } from "../config/shared";
-import { Status, toolCallStatusText } from "../components/Status";
-import { isTruncated, payloadText } from "./collaboration";
-import type { Agent } from "../types/api";
-import type { StageToolCall, StageTraceItem } from "../types/api";
+import { Status } from "../components/Status";
+/** 「一次工具调用」的渲染在 `TraceParts.tsx`：对话流内联轨迹要用同一份，两处各写一份必漂移。 */
+import { ToolCallBlock } from "./TraceParts";
+import type { Agent, StageTraceItem } from "../types/api";
 import "../config/config.css";
 import "./workspace.css";
 
@@ -37,48 +37,8 @@ export type AgentStageDetail = {
   updatedAt?: string;
 };
 
-/** 工具入参 / 出参的可读文案与截断判断在 `collaboration.ts`——协作画布也要用同一套，
- *  两处各写一份会出现「弹窗说已截断、画布当成全部」的错位。 */
-
-function ToolCallStep({ call }: { call: StageToolCall }) {
-  const tone =
-    call.status === "succeeded" ? "green" : call.status === "failed" ? "rose" : "amber";
-  return (
-    <article className={`ws-trace-step ${call.status}`}>
-      <div className="ws-trace-step-head">
-        <span className={`ws-trace-mark ${tone}`}>
-          <Wrench size={12} />
-        </span>
-        <b>{call.tool_name || "未命名工具"}</b>
-        <span className="ws-trace-chip">
-          {toolCallStatusText[call.status] ?? call.status}
-        </span>
-      </div>
-      {call.error && (
-        <p className="ws-trace-error" role="alert">
-          {call.error}
-        </p>
-      )}
-      <details className="ws-trace-io">
-        <summary>入参与出参</summary>
-        <dl>
-          <div>
-            <dt>入参</dt>
-            <dd>
-              <pre>{payloadText(call.input)}</pre>
-            </dd>
-          </div>
-          <div>
-            <dt>出参{isTruncated(call.output) && "（已截断）"}</dt>
-            <dd>
-              <pre>{payloadText(call.output)}</pre>
-            </dd>
-          </div>
-        </dl>
-      </details>
-    </article>
-  );
-}
+/* 工具入参 / 出参的可读文案与截断判断在 `collaboration.ts`——协作画布与对话流内联轨迹
+ * 都要用同一套，各写一份会出现「弹窗说已截断、别处当成全部」的错位。 */
 
 /**
  * 轨迹主体：只吃 trace / 三态标志，不拉数据。
@@ -144,7 +104,7 @@ export function AgentTraceView({
         {trace.tool_calls.length ? (
           <div className="ws-trace-list">
             {trace.tool_calls.map((call, index) => (
-              <ToolCallStep key={call.call_id || `${call.tool_name}-${index}`} call={call} />
+              <ToolCallBlock key={call.call_id || `${call.tool_name}-${index}`} call={call} />
             ))}
           </div>
         ) : (

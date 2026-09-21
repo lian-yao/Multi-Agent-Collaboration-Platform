@@ -42,6 +42,10 @@ import {
   type AgentStageDetail,
 } from "../src/workspace/AgentStageModal";
 import { formatStamp } from "../src/config/shared";
+import { Markdown } from "../src/components/Markdown";
+import { Disclosure } from "../src/components/Disclosure";
+import { RunActivity } from "../src/workspace/RunActivity";
+import { ToolCallBlock } from "../src/workspace/TraceParts";
 import { TaskUsagePanel, groupUsage, usageFor } from "../src/workspace/TaskUsage";
 import { MessageAttachmentList, PendingFileChips } from "../src/workspace/AttachmentList";
 import {
@@ -969,6 +973,291 @@ check(
 );
 
 /* -------------------------------------------------------------------------- */
+/* 消息正文：Markdown 渲染（components/Markdown.tsx）                           */
+/* -------------------------------------------------------------------------- */
+
+// 覆盖「模型真的会写出来」的五种结构。断言里刻意查**记号是否消失**，而不只是查元素是否存在——
+// 病根是原先 `<p>{content}</p>` 把 `**` `##` `|` 原样吐出来，只查 `<h2>` 存在会漏掉这一点。
+const MD_SAMPLE = [
+  "## 结论",
+  "",
+  "占比 **4.78%**，低于阈值，见 `128/2680`。",
+  "",
+  "| 项目 | 数值 |",
+  "| --- | --- |",
+  "| 退货 | 128 |",
+  "",
+  "- [x] 已核对",
+  "- [ ] 待补充",
+  "",
+  "```python",
+  'print("hi")',
+  "```",
+  "",
+  "> 引用一段",
+].join("\n");
+
+let md = "";
+try {
+  md = renderToStaticMarkup(<Markdown>{MD_SAMPLE}</Markdown>);
+  check("Markdown 可渲染", md.length > 200, `长度 ${md.length}`);
+} catch (cause) {
+  check("Markdown 可渲染", false, cause instanceof Error ? cause.message : String(cause));
+}
+check("标题渲染成 h2 而不是带井号的文本", md.includes("<h2") && !md.includes("## "), md.slice(0, 200));
+check("加粗渲染成 strong", md.includes("<strong>4.78%</strong>"));
+check("行内代码单独成码", md.includes("md-code") && md.includes("128/2680"));
+check(
+  "表格带自己的横向滚动容器",
+  md.includes('class="md-table-wrap"') && md.includes("<table") && md.includes("退货"),
+  "整段正文一起滚会把上面的段落推出视野",
+);
+check("代码块带语言角标", md.includes('data-lang="python"') && md.includes("<pre"), md.slice(-300));
+check("GFM 任务列表的勾选框只读", md.includes('type="checkbox"') && md.includes("disabled"));
+check("引用块渲染成 blockquote", md.includes("<blockquote") && md.includes("引用一段"));
+check(
+  "正文里不该再出现未渲染的 Markdown 记号",
+  !md.includes("**") && !md.includes("| ---"),
+  md.slice(0, 300),
+);
+// 离屏渲染不跑 effect，也不该播放渐进揭示——若初始值写 0 就会渲染出空正文，
+// 冒烟与首帧都会拿到空白。这条同时锁住「非浏览器环境降级为全文」。
+check(
+  "离屏渲染直接给全文、不播动画",
+  md.includes("占比") && md.includes("引用一段") && !md.includes("is-streaming"),
+  "非浏览器环境必须降级为立即全文",
+);
+
+/* -------------------------------------------------------------------------- */
+/* 折叠块（components/Disclosure.tsx）                                          */
+/* -------------------------------------------------------------------------- */
+
+const openBox = renderToStaticMarkup(
+  <Disclosure id="d-open" title="数据分析 Agent" open onToggle={() => undefined}>
+    <p>正文</p>
+  </Disclosure>,
+);
+check(
+  "展开态带 aria-expanded 与 aria-controls",
+  openBox.includes('aria-expanded="true"') && openBox.includes('aria-controls="d-open"'),
+  openBox.slice(0, 200),
+);
+check("展开态渲染正文", openBox.includes("正文") && openBox.includes("disclosure-body"));
+
+const shutBox = renderToStaticMarkup(
+  <Disclosure id="d-shut" title="数据分析 Agent" open={false} onToggle={() => undefined}>
+    <p>正文</p>
+  </Disclosure>,
+);
+check(
+  "收起态不渲染正文，也不写指向空元素的 aria-controls",
+  !shutBox.includes("正文") &&
+    shutBox.includes('aria-expanded="false"') &&
+    !shutBox.includes("aria-controls"),
+  "指向不存在的 id 会让人以为内容只是被隐藏了",
+);
+check(
+  "折叠块是按钮而不是不可达的 div",
+  shutBox.includes("<button") && shutBox.includes("disclosure-head"),
+);
+
+/* -------------------------------------------------------------------------- */
+/* 对话流内联执行轨迹（workspace/RunActivity.tsx）                              */
+/* -------------------------------------------------------------------------- */
+
+let doneRun = "";
+try {
+  doneRun = renderToStaticMarkup(
+    <RunActivity
+      workflow={collabWorkflow}
+      traces={collabTraces}
+      stages={collabStages}
+      agents={collabAgents}
+      completed={new Set(["collect", "analyze", "report"])}
+    />,
+  );
+  check("执行活动卡片可渲染", doneRun.length > 300, `长度 ${doneRun.length}`);
+} catch (cause) {
+  check("执行活动卡片可渲染", false, cause instanceof Error ? cause.message : String(cause));
+}
+check("卡片报出任务终态与进度", doneRun.includes("任务已完成") && doneRun.includes("已完成 3 个阶段"));
+check(
+  "三个 Agent 各自成一行",
+  ["信息收集 Agent", "数据分析 Agent", "报告生成 Agent"].every((n) => doneRun.includes(n)),
+);
+check(
+  "跑完的步骤收成一行，不铺开正文",
+  doneRun.includes("run-steps") && !doneRun.includes("disclosure-body"),
+  "整屏铺开等于把「过程」又变回「流水账」",
+);
+check(
+  "摘要行仍写清阶段名与工具次数",
+  doneRun.includes("run-step-label") && doneRun.includes("1 次工具调用"),
+  "收起后这三样必须还在，否则收起就是信息丢失",
+);
+check(
+  "卡片不谎称有思维链",
+  !doneRun.includes("思维链") &&
+    doneRun.includes("模型内部的隐藏推理没有落盘"),
+  "编排层只落盘行动与结论，模型内部推理没有落盘（app/api/stage_trace.py）",
+);
+
+// 正在跑的那一步必须自动摊开：人要看的就是它。
+const runningRun = renderToStaticMarkup(
+  <RunActivity
+    workflow={{
+      ...collabWorkflow,
+      status: "running",
+      current_step: "analyze",
+      checkpoint: { status: "running", current_step: "analyze", completed_steps: ["collect"] },
+    }}
+    traces={collabTraces}
+    stages={collabStages}
+    agents={collabAgents}
+    completed={new Set(["collect"])}
+  />,
+);
+check(
+  "执行中只摊开正在跑的那一步",
+  (runningRun.match(/disclosure-body/g) ?? []).length === 1,
+  `摊开了 ${(runningRun.match(/disclosure-body/g) ?? []).length} 步`,
+);
+check(
+  "摊开的正文写明输入来自哪一步、并给出这一步的产出",
+  runningRun.includes("分配到的任务（来自collect阶段）") &&
+    runningRun.includes("该比例说明退货在总量中占比偏低"),
+  runningRun.slice(0, 400),
+);
+// 同一份字段在两处用两套词，读的人会以为它们是两件事——这正是本仓库反复要避免的漂移。
+// 两条渲染路径同时断言，避免「只在其中一处改了措辞」。
+check(
+  "对话流与执行台弹窗用同一套小标题",
+  ["分配到的任务", "执行轨迹", "阶段产出"].every(
+    (label) => traceModal.includes(label) && runningRun.includes(label),
+  ),
+  `弹窗缺 ${["分配到的任务", "执行轨迹", "阶段产出"].filter((l) => !traceModal.includes(l))} / 对话流缺 ${["分配到的任务", "执行轨迹", "阶段产出"].filter((l) => !runningRun.includes(l))}`,
+);
+check("执行中的那一步标成「执行中」", runningRun.includes("执行中"));
+// 摊开的那一步没有工具调用时说清「直接由模型产出结论」，而不是留一个空列表。
+check(
+  "没有工具调用的步骤给出说明而不是空列表",
+  runningRun.includes("没有调用工具") && !runningRun.includes("ws-trace-list"),
+  runningRun.slice(0, 400),
+);
+check("阶段产出按 Markdown 渲染", runningRun.includes("md-body"));
+
+// 失败的工具调用：这条最该被读到，必须连着原因一起出来。
+const failedRun = renderToStaticMarkup(
+  <RunActivity
+    workflow={{
+      ...collabWorkflow,
+      status: "running",
+      current_step: "collect",
+      checkpoint: { status: "running", current_step: "collect", completed_steps: [] },
+    }}
+    traces={{
+      ...collabTraces,
+      items: [
+        {
+          ...collabTraces.items[0],
+          output: null,
+          tool_calls: [
+            {
+              call_id: "c-9",
+              tool_name: "sql_query",
+              status: "failed",
+              input: { sql: "select 1" },
+              output: null,
+              error: "SandboxViolation: 只读沙箱拒绝该语句",
+            },
+          ],
+        },
+      ],
+    }}
+    stages={collabStages}
+    agents={collabAgents}
+    completed={new Set()}
+  />,
+);
+check(
+  "失败调用连着原因一起显示",
+  failedRun.includes("SandboxViolation") && failedRun.includes("失败"),
+);
+// 工具调用的入参出参折叠入口由 TraceParts 提供：这一段是「它到底干了什么」的答案。
+check(
+  "工具调用带入参与出参入口",
+  failedRun.includes("入参与出参") && failedRun.includes("sql_query") && failedRun.includes("select 1"),
+);
+check(
+  "还没产出时说清还没跑到，而不是留白",
+  failedRun.includes("产出尚未写入"),
+  failedRun.slice(0, 400),
+);
+
+// 动态链路不落盘逐步骤轨迹：原因说一次就够，不要每步重复一遍。
+const gapRun = renderToStaticMarkup(
+  <RunActivity
+    workflow={{
+      ...collabWorkflow,
+      status: "running",
+      current_step: "s2",
+      checkpoint: {
+        mode: "dynamic",
+        status: "running",
+        current_step: "s2",
+        completed_steps: ["s1"],
+        plan: [
+          { id: "s1", role: "collector", depends_on: [], status: "completed" },
+          { id: "s2", role: "analyst", depends_on: ["s1"], status: "pending" },
+        ],
+      },
+    }}
+    traces={{
+      workflow_id: "w-collab",
+      mode: "dynamic",
+      task: "统计 128/2680 的占比",
+      availability: "not_integrated",
+      reason: "本次执行走的是动态编排链路，它当前不落盘逐步骤执行轨迹。",
+      items: [],
+    }}
+    stages={collabStages}
+    agents={collabAgents}
+    completed={new Set(["s1"])}
+  />,
+);
+check(
+  "整条链路没有轨迹时原因只出现一次",
+  (gapRun.match(/不落盘逐步骤执行轨迹/g) ?? []).length === 1,
+  `出现 ${(gapRun.match(/不落盘逐步骤执行轨迹/g) ?? []).length} 次`,
+);
+check(
+  "轨迹缺席也不留白：步骤仍按计划声明出来",
+  gapRun.includes("信息收集 Agent") &&
+    gapRun.includes("数据分析 Agent") &&
+    gapRun.includes("run-note"),
+  gapRun.slice(0, 400),
+);
+
+// 单条工具调用的渲染搬到了 TraceParts，弹窗与对话流共用一份：
+// 两处各写一份必然出现「弹窗标了已截断、对话流把预览当成全部」。
+const sharedStep = renderToStaticMarkup(
+  <ToolCallBlock
+    call={{
+      call_id: "c-shared",
+      tool_name: "read_session_file",
+      status: "succeeded",
+      input: { name: "huge.csv" },
+      output: { truncated: true, bytes: 9000, preview: "x" },
+      error: null,
+    }}
+  />,
+);
+check(
+  "共享的工具调用块保留截断标记",
+  sharedStep.includes("已截断") && sharedStep.includes("huge.csv"),
+);
+
+/* -------------------------------------------------------------------------- */
 /* 静态断言：假选择已删除、职责边界已写进注释                                   */
 /* -------------------------------------------------------------------------- */
 
@@ -1124,6 +1413,23 @@ try {
     ".message-attachment-thumb",
     // 原件留档后条目主体是 <a>（ADR-024）：没有这条规则会退化成蓝字下划线。
     "a.message-attachment",
+    // 消息正文的 Markdown 版式：少一条就会出现「某类结构退化成浏览器默认样式」，
+    // 而这种退化不会报错，只是看着不对。
+    ".md-body",
+    ".md-body blockquote",
+    ".md-code",
+    ".md-pre",
+    ".md-table-wrap",
+    ".md-body.is-streaming",
+    // 折叠块与对话流内联执行轨迹。
+    ".disclosure-head",
+    ".disclosure-body",
+    ".disclosure.is-open",
+    ".run-activity",
+    ".run-activity-head",
+    ".run-steps",
+    ".run-step-tools",
+    ".run-note",
   ];
   const missingClasses = requiredClasses.filter((sel) => !styles.includes(sel));
   check(
@@ -1138,6 +1444,66 @@ try {
     styles.includes('.message-attachment[data-kind="text"]') &&
       styles.includes('.composer-file[data-kind="image"]'),
     "类型在 data-kind 上，用 .message-attachment.text 之类的选择器永远命不中",
+  );
+
+  // —— 消息正文渲染（Markdown + 渐进揭示）——
+  // 病根是 `<p>{content}</p>` 把 `**` `##` `|` 原样吐出来。断言直接钉住那句旧写法，
+  // 否则「Markdown 组件写好了但没接上」这种半成品会静默通过。
+  check(
+    "消息正文走 Markdown 渲染",
+    app.includes("components/Markdown") && app.includes("<Markdown stream={animate}>"),
+    "App.tsx 里没有 Markdown 入口",
+  );
+  check(
+    "正文不再直接塞进 <p>",
+    !app.includes("<p>{message.content}</p>"),
+    "旧的纯文本写法还在，记号就还是会原样吐出来",
+  );
+
+  const streamSrc = readFileSync("src/components/useStreamText.ts", "utf8");
+  check(
+    "渐进揭示在非浏览器环境与减少动效时降级为全文",
+    streamSrc.includes("typeof window ===") && streamSrc.includes("prefers-reduced-motion"),
+    "少了任一条，离屏渲染会拿到空正文、或用户声明的减少动效被忽略",
+  );
+  check(
+    "渐进揭示写明它是呈现效果而不是流式传输",
+    streamSrc.includes("呈现效果") && streamSrc.includes("不是传输协议"),
+    "边界不写下来，下一次会有人把它当成「前端已经在收 token」",
+  );
+  check(
+    "长文按总时长反推步长",
+    streamSrc.includes("MAX_DURATION_MS") && streamSrc.includes("MS_PER_CHAR"),
+    "按固定步长推进会让数千字的报告打十几秒",
+  );
+
+  const runSrc = readFileSync("src/workspace/RunActivity.tsx", "utf8");
+  check(
+    "执行活动卡片不伪造思维链",
+    runSrc.includes("不伪造思维链") && !runSrc.includes("思维链："),
+    "口径同 doc/api.md §5.17：模型内部隐藏推理没有落盘",
+  );
+  check(
+    "轨迹渲染只有一份实现",
+    runSrc.includes('from "./TraceParts"') &&
+      readFileSync("src/workspace/AgentStageModal.tsx", "utf8").includes('from "./TraceParts"'),
+    "弹窗与对话流各写一份，必然出现「这边标已截断、那边当成全部」",
+  );
+  check(
+    "执行活动插在报告之前而不是整段对话末尾",
+    app.includes("index === reportIndex") && app.includes("reportIndex < 0"),
+    "过程要出现在结果的上一个位置，排到末尾会看起来像另一个任务",
+  );
+  check(
+    "渐进揭示只给新到达的消息",
+    app.includes("const revealed = useRef<Set<string>>(new Set())") &&
+      app.includes("isFresh("),
+    "历史会话整屏逐字重放，读的人会以为任务在重新执行",
+  );
+  check(
+    "旧的 run-event 条已被执行活动卡片取代",
+    !app.includes("run-event") && !/\.run-event\s*\{/.test(styles),
+    "残留的规则说明旧的那条进度文本没删干净",
   );
 } catch (cause) {
   check("读取源文件做静态断言", false, cause instanceof Error ? cause.message : String(cause));

@@ -1,4 +1,5 @@
 import {
+  Fragment,
   FormEvent,
   useCallback,
   useEffect,
@@ -7,7 +8,6 @@ import {
   useState,
 } from "react";
 import {
-  Activity,
   Bot,
   Check,
   ChevronDown,
@@ -52,6 +52,7 @@ import {
 import { api } from "./api/client";
 import { Status, statusText } from "./components/Status";
 import { InlineConfirm } from "./components/InlineConfirm";
+import { Markdown } from "./components/Markdown";
 import { formatStamp } from "./config/shared";
 import { ConfigPage } from "./config/ConfigPage";
 import { AgentPanel } from "./config/AgentPanel";
@@ -59,6 +60,7 @@ import { RecordsPage, type RecordTabId } from "./records/RecordsPage";
 import { AgentStageModal, type AgentStageDetail } from "./workspace/AgentStageModal";
 import { CollaborationGraph } from "./workspace/CollaborationGraph";
 import { CollabCanvas, type CollabConversation } from "./workspace/CollabCanvas";
+import { RunActivity } from "./workspace/RunActivity";
 import { groupUsage, TaskUsagePanel, useWorkflowMetrics } from "./workspace/TaskUsage";
 import {
   buildCollaboration,
@@ -951,6 +953,22 @@ function Workspace({
   const filePicker = useRef<HTMLInputElement>(null);
   const followLatest = useRef(true);
   const [currentMessage, setCurrentMessage] = useState("");
+  /* ---------------------------------------------------------------------- */
+  /* 渐进揭示的适用面（`components/useStreamText.ts`）                        */
+  /*                                                                        */
+  /* 只给**本次会话里新到达**的消息播放。历史会话整屏逐字重放，读的人会以为任务   */
+  /* 在重新执行——那是把「呈现效果」误当成「执行进度」的典型后果。              */
+  /* ---------------------------------------------------------------------- */
+  const revealed = useRef<Set<string>>(new Set());
+  // 首帧之前 `hydrated` 为 false，所以首次装载的整屏消息一律不算「新到达」。
+  const hydrated = useRef(false);
+  useEffect(() => {
+    hydrated.current = true;
+  }, []);
+  useEffect(() => {
+    for (const item of messages) revealed.current.add(item.id);
+  }, [messages]);
+  const isFresh = (id: string) => hydrated.current && !revealed.current.has(id);
   // 执行台卡片点开的是「单个 Agent 的阶段详情」，与右侧任务级侧栏解耦。
   const [detailStage, setDetailStage] = useState<StageId | null>(null);
   // 动态链路的节点 id 是计划步骤（s1/s2…），不属于固定的 `StageId` 集合，
@@ -1020,6 +1038,14 @@ function Workspace({
   // 整条链路都没有分阶段轨迹（目前只有动态编排）时，原因说在弹窗主体里，
   // 而不是让每个阶段各自显示一句「暂无记录」。
   const traceGap = traces && !traces.items.length ? (traces.reason ?? "") : "";
+
+  // 本次执行的报告正文落在哪一条消息上（服务端在终态写入，`agent_run_id` 是唯一关联键）。
+  // `-1` = 还没跑完，此时执行活动卡片挂在整段对话的末尾。
+  const reportIndex = workflow
+    ? messages.findIndex(
+        (m) => m.role === "assistant" && m.agent_run_id === workflow.agent_run_id,
+      )
+    : -1;
 
   useEffect(() => {
     if (followLatest.current && stream.current)
@@ -1092,32 +1118,30 @@ function Workspace({
             >
               {messages.length ? (
                 <div className="conversation-transcript">
-                  {messages.map((m) => (
-                    <MessageBubble key={m.id} message={m} />
-                  ))}
-                  {workflow && (
-                    <div className="run-event" role="status">
-                      {workflow.status === "running" ? (
-                        <LoaderCircle size={16} className="spin" />
-                      ) : (
-                        <Activity size={16} />
+                  {messages.map((m, index) => (
+                    <Fragment key={m.id}>
+                      {/* 执行活动摆在「提问之后、答复之前」——过程要出现在结果的**上一个位置**，
+                          而不是被排到整段对话的最末尾（那样它看起来像另一个任务）。 */}
+                      {index === reportIndex && workflow && (
+                        <RunActivity
+                          workflow={workflow}
+                          traces={traces}
+                          stages={STAGE_META}
+                          agents={agents}
+                          completed={completed}
+                        />
                       )}
-                      <div>
-                        <b>任务{statusText[workflow.status]}</b>
-                        <span>
-                          {planSteps(workflow).length
-                            ? `自动编排 · 计划 ${planSteps(workflow).length} 步，已完成 ${completed.size} 步`
-                            : `已完成 ${completed.size} 个阶段`}
-                          {" · 可在下方查看执行状态"}
-                        </span>
-                        {workflow.status === "completed" &&
-                          !messages.some(
-                            (m) =>
-                              m.role === "assistant" &&
-                              m.agent_run_id === workflow.agent_run_id,
-                          ) && <span>当前接口尚未返回报告正文。</span>}
-                      </div>
-                    </div>
+                      <MessageBubble message={m} stream={isFresh(m.id)} />
+                    </Fragment>
+                  ))}
+                  {workflow && reportIndex < 0 && (
+                    <RunActivity
+                      workflow={workflow}
+                      traces={traces}
+                      stages={STAGE_META}
+                      agents={agents}
+                      completed={completed}
+                    />
                   )}
                 </div>
               ) : (
@@ -1474,8 +1498,19 @@ function Welcome({
     </div>
   );
 }
-function MessageBubble({ message }: { message: Message }) {
+/**
+ * 一条消息。
+ *
+ * 正文走 Markdown 渲染（`components/Markdown.tsx`）：模型按 Markdown 组织输出，原先
+ * 直接塞进 `<p>` 会把 `**` `##` `|` 这类记号原样吐出来，结构全丢。
+ *
+ * `stream` 只在**首次渲染**时被采纳：父组件把消息 id 记进「已播放」集合后，下一次渲染
+ * 会把它算成 `false`，若跟着走，正在播放的动画会中途跳成全文。
+ */
+function MessageBubble({ message, stream = false }: { message: Message; stream?: boolean }) {
   const user = message.role === "user";
+  // 自己发的消息是本地回显的，逐字打一遍只是延迟自己刚写完的字。
+  const animate = useRef(user ? false : stream).current;
   return (
     <article
       id={"message-" + message.id}
@@ -1496,7 +1531,9 @@ function MessageBubble({ message }: { message: Message }) {
           <time>{time(message.created_at)}</time>
         </div>
         {/* 只带附件不带文字的消息是合法的（截图提问），此时不渲染空的正文段落。 */}
-        {message.content ? <p>{message.content}</p> : null}
+        {message.content ? (
+          <Markdown stream={animate}>{message.content}</Markdown>
+        ) : null}
         <MessageAttachmentList items={message.attachments ?? []} />
       </div>
     </article>
