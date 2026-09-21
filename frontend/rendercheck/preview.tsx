@@ -89,22 +89,29 @@ const realFetch: typeof fetch | null =
 globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
   const raw = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
   const url = new URL(raw, globalThis.location?.href ?? "http://localhost/");
+  // **Windows 下 `file://` 打开时必踩**：`new URL("/api/v1/agents", location.href)` 在盘符路径下
+  // 解析成 `file:///C:/api/v1/agents`，pathname 是 `/C:/api/v1/agents`，于是种子里
+  // 每一条 `/api/v1/...` 都查不到 —— 整页空数据，界面上只剩一句
+  // 「预览未收录：GET /C:/api/v1/agents」。双击打开 HTML 正是本预览的用法（见文件头，
+  // 也是评审时唯一会被用到的方式），所以这里统一剥掉盘符前缀。
+  // HTTP 下 pathname 本来就是 `/api/...`，这条替换是空操作。
+  const pathname = url.pathname.replace(/^\/[A-Za-z]:(?=\/)/, "");
   const method = (init?.method ?? "GET").toUpperCase();
-  const key = `${method} ${url.pathname}`;
+  const key = `${method} ${pathname}`;
   const payload = (): Record<string, unknown> =>
     init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : {};
 
   // 会话删除：不真的落库，但把它从种子列表里摘掉，这样「删掉的那一行真的消失」
   // 可以在预览里肉眼确认（评审的是行内二次确认的交互，不是持久化）。
-  if (method === "DELETE" && url.pathname.startsWith("/api/v1/sessions/")) {
-    const id = decodeURIComponent(url.pathname.slice("/api/v1/sessions/".length));
+  if (method === "DELETE" && pathname.startsWith("/api/v1/sessions/")) {
+    const id = decodeURIComponent(pathname.slice("/api/v1/sessions/".length));
     const list = seed["GET /api/v1/sessions"] as { items?: { id: string }[] } | undefined;
     if (list?.items) list.items = list.items.filter((item) => item.id !== id);
     return jsonResponse(null);
   }
 
   // 附件登记：就地在内存里造一条，让「选文件 → chip（上传中 → 已就绪）」这段能真走通。
-  if (method === "POST" && url.pathname === "/api/v1/attachments") {
+  if (method === "POST" && pathname === "/api/v1/attachments") {
     const body = payload();
     const name = typeof body.name === "string" && body.name ? body.name : "未命名";
     const kind = classifyLocal(name);
@@ -133,25 +140,25 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     return jsonResponse(created, 201);
   }
 
-  if (method === "DELETE" && url.pathname.startsWith("/api/v1/attachments/")) {
-    registry.delete(decodeURIComponent(url.pathname.slice("/api/v1/attachments/".length)));
+  if (method === "DELETE" && pathname.startsWith("/api/v1/attachments/")) {
+    registry.delete(decodeURIComponent(pathname.slice("/api/v1/attachments/".length)));
     return jsonResponse(null);
   }
 
   // 发消息：把这条消息真的推进该会话的消息表，否则前端发完立刻重拉 GET /messages，
   // 刚发出去的那条会人间蒸发——评审时会以为是 bug。
-  if (method === "POST" && /^\/api\/v1\/sessions\/[^/]+\/messages$/.test(url.pathname)) {
+  if (method === "POST" && /^\/api\/v1\/sessions\/[^/]+\/messages$/.test(pathname)) {
     const body = payload();
     const ids = Array.isArray(body.attachment_ids) ? (body.attachment_ids as string[]) : [];
     const attached = ids
       .map((id) => registry.get(id))
       .filter((item): item is Attachment => Boolean(item));
-    const store = seed[`GET ${url.pathname}`] as { items: Message[] } | undefined;
+    const store = seed[`GET ${pathname}`] as { items: Message[] } | undefined;
     const messageId = `m-preview-${(store?.items.length ?? 0) + 1}`;
     if (store) {
       store.items.push({
         id: messageId,
-        session_id: decodeURIComponent(url.pathname.split("/")[4] ?? ""),
+        session_id: decodeURIComponent(pathname.split("/")[4] ?? ""),
         role: "user",
         content: typeof body.content === "string" ? body.content : "",
         agent_run_id: null,
@@ -163,7 +170,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     return jsonResponse(
       {
         message_id: messageId,
-        session_id: decodeURIComponent(url.pathname.split("/")[4] ?? ""),
+        session_id: decodeURIComponent(pathname.split("/")[4] ?? ""),
         agent_run_id: "run-preview",
         workflow_id: "wf-preview",
         status: "accepted",
@@ -179,7 +186,7 @@ globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
 
   // 变更类请求（新建 / 保存 / 删除）预览不模拟落库，回一个空成功体，
   // 免得点一下「保存」就弹红字把版式评审带偏。
-  if (method !== "GET" && url.pathname.startsWith("/api/v1/config/")) return jsonResponse({});
+  if (method !== "GET" && pathname.startsWith("/api/v1/config/")) return jsonResponse({});
 
   // 未收录的同源路径：明确 404，方便发现漏配的路由
   if (!realFetch || url.origin === (globalThis.location?.origin ?? "")) {

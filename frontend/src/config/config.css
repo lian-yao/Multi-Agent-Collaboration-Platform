@@ -1577,10 +1577,17 @@
 
 
 
+/* 角色图标位（agentGlyph.tsx 的 AgentGlyph）：底与色仍走 .cfg-monogram 的 tint，
+ * 内容从「显示名首字」换成按 role 解析的角色图标。font-size 是给文字用的，现在只放
+ * svg 故一并去掉；svg 再单列 display:block，免得踩 lucide 默认 vertical-align:baseline
+ * 那处基线偏移（同一坑在侧栏会话菜单与全屏画布头上都栽过）。 */
 .cfg-agent-avatar {
   width:34px;
-  height:34px;
-  font-size:14px
+  height:34px
+}
+
+.cfg-agent-avatar svg {
+  display:block
 }
 
 

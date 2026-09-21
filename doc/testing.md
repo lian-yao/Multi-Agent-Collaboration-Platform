@@ -190,7 +190,7 @@ Provider 配置面板的验证步骤（ADR-017 之后：`frontend/src/config/` �
 | 页面 | 组件 | 分区 / 验证要点 |
 | --- | --- | --- |
 | 工具与配置 | `config/ConfigPage.tsx` | 放写配置的三个分区 + 一个**只读**的执行边界，见下表；四个分区用 `components/PageTabs.tsx` 副路由切换，标题与副路由左对齐（**不整页居中**） |
-| Agent 团队 | `App.tsx::AgentTeamPage` → `config/AgentPanel.tsx` | 角色路由：一次 `GET /config/agents` 取回角色与 `available_models`；角色**一行多个方块**，方块只显示摘要（名字 / `role · 状态` / 生效模型 / Temperature / 覆盖项数），点击方块在网格下方展开 `AgentTuningPanel` 编辑，再点一次或「收起」关掉；`override_keys` 高亮「已覆盖」字段；「清除全部覆盖」发 6 个 `null`；`activeAgentId` 只做当前阶段高亮 |
+| Agent 团队 | `App.tsx::AgentTeamPage` → `config/AgentPanel.tsx` | 角色路由：一次 `GET /config/agents` 取回角色与 `available_models`；角色**一行多个方块**，方块只显示摘要（**角色图标**（按 `role` 解析，ADR-029）/ 名字 / `role · 状态` / 生效模型 / Temperature / 覆盖项数），点击方块在网格下方展开 `AgentTuningPanel` 编辑，再点一次或「收起」关掉；`override_keys` 高亮「已覆盖」字段；「清除全部覆盖」发 6 个 `null`；`activeAgentId` 只做当前阶段高亮 |
 | 任务记录 | `records/RecordsPage.tsx`（容器与行渲染在 `records/Inspection.tsx`） | 四分区副路由：`runs` 运行记录、`calls` 工具调用（§5.5）、`metrics` 指标采样（§5.6）、`sessions` 历史会话（§5.13）。采样有 Workflow 时按 `workflow_id` 取并轮询（终态停），无 Workflow 时退回全局采样；历史会话调 `GET /api/v1/sessions` 分页列出，点选按 `latest_workflow_id` 恢复执行台并回工作台；`Records` 统一「加载中 / 失败 / 未接入 / 无记录 / 有数据」五态，分页仅在多页时出现 |
 
 「工具与配置」页的分区（前三个可写，第四个只读）：
@@ -391,12 +391,26 @@ python frontend/rendercheck/build-preview.py      # 产出 rendercheck/ui-previe
   `rendercheck` 里的夹具不会在构建时报错。2026-09-17 给 `Attachment` 加 `has_original` 时，就是靠
   这条命令才发现 `preview.tsx` 的夹具漏了它（漏了会让预览里新上传的附件全部退化成「没有下载
   入口」的形态，而这恰恰是要评审的东西）。
+- **`file://` 下 Windows 的盘符会混进 `pathname`（2026-09-21 修）**。mock 用
+  `new URL("<请求路径>", location.href).pathname` 查种子表，而 `file:///C:/Users/.../ui-preview.html`
+  下 `/api/v1/agents` 会解析成 `file:///C:/api/v1/agents`，`pathname` 变成 **`/C:/api/v1/agents`**
+  —— 种子里一条都命中不了，整页空数据，界面上只剩「预览未收录：GET /C:/api/v1/agents」。
+  已按 `^\/[A-Za-z]:(?=\/)/` 剥掉盘符前缀（HTTP 下是空操作）。
+  **这个缺口藏了很久**：离线自检（jsdom）用的 `location` 是 HTTP 形状，`pathname` 本来就对；
+  而「双击打开」这条真实用法从来没被自动检查覆盖。**声明的用法与自动检查的用法不一致，
+  缺口就会一直留着** —— 改完预览后请用 CDP 打开 `file://` 实跑一遍（见 §4.11 的「取证手段」），
+  不要只用 jsdom 自检通过就收工。
 - 产物 `ui-preview.html` 与中间产物 `.preview-bundle.*` 已进 `.gitignore`，不入库。
 
 预览产物本身可以离线自检（`jsdom` 挂载 + 点一遍侧栏、副路由、四个配置分区、会话生命周期，
 以及 2026-09-17 新增的欢迎卡与附件：三张卡在且竖排居中、**先手动切「固定三步」再点卡片**
 验证模式被切回「自动编排」、切开会话后气泡里的**四种**附件形态（图片 / 文档 / 解析失败 /
 无原件的历史行）与「有原件的才是链接」，共 45 项断言）。
+
+> **别把它当成预览页的完整验收。** jsdom 里的 `location` 是 HTTP 形状，`file://` 特有的问题
+> （盘符混进 `pathname`，见上一节）它照不到；而「双击 HTML」才是这个预览的真实用法。
+> 改过 `preview.tsx` 就走一遍 CDP + `file://` 实跑（2026-09-21 实测：仅 jsdom 自检通过时，
+> 预览页在浏览器里是**整页空数据**）。
 这条链路**不进仓库**，因为项目刻意不引前端测试依赖；本机想跑就临时装：
 
 ```bash
@@ -1374,6 +1388,66 @@ chrome --headless=new --remote-debugging-port=9333 --user-data-dir=<temp> --wind
 - 竖直可容高度有下限 `180px`（`Math.max(180, …)`）：胶囊极靠上下沿时宁可靠滚动，也不压成一条。
 - 面高上限 520px 仍有一处 JS 镜像 `POP_H`（node 浮窗的竖直夹取用），两处需一起改；
   胶囊浮窗已改走 `--cv-pop-max` 变量，不再有第二份数字。
+
+### 4.13 角色图标按 role 解析，另修好预览页在 file:// 下整页空数据（2026-09-21，成员 D）
+
+**需求**（用户原话）
+
+> agent 配置的 icon 似乎是默认显示名称的第一个文本？这样很丑，和协作画布图节点的机器人
+> icon 保持一致，也添加一些可能会用到的 icon。
+
+**1. 首字方块换成角色图标**
+
+配置页角色卡的头像位原先渲染 `agent.name.slice(0, 1)`（「信」「数」「报」）。新增
+`frontend/src/components/AgentGlyph.tsx` 作为**唯一**的判断处：先按 `role` 全表匹配语义，
+再按显示名，最后回退机器人；配置页（卡片 + 弹窗头）与协作画布 `NodeGlyph` 都调它。
+决策与口径见 ADR-029。
+
+画布侧只换「角色」那一档，状态档不变——顺序是 `failed` → `paused` → `running` → 角色图标。
+实测（CDP，线上 5173 与预览页各跑一遍）：
+
+| 位置 | 信息收集 | 数据分析 | 报告生成 | 自定义「任务规划」 |
+| --- | --- | --- | --- | --- |
+| 配置页角色卡 | `lucide-file-search` | `lucide-chart-line` | `lucide-file-text` | `lucide-list-checks` |
+| 侧栏 / 全屏画布节点 | 同上 | 同上 | 同上（seed 里该步 `running` → 让位给转圈） | — |
+
+每个图标在 34px 方块里 17×17、居中偏差 **dx = dy = 0**，头像位 `textContent` 为空
+（即那一格不再有文字）。`running` 的节点实测是 `lucide-loader-circle` 且带 `spin`，
+证明「状态优先于角色」在真浏览器里成立。
+
+**2. 冒烟断言**
+
+- `config-smoke` **69 → 77**：卡片头像位是 `<svg>` 且不含汉字、analyst → 折线图、六条
+  `role → 图标键` 用例（含 `summarizer` / `translator` / `reviewer`）、`role` 优先于显示名、
+  两轮回退（按显示名 → 机器人）、每个图标键都能渲染出图形、**键与图形一一对应**
+  （两键共用一张图是静默错配，只能这样发现）。
+- `workspace-smoke` **151 → 154**：侧栏节点三个角色图标齐、执行中的节点画转圈且带 `spin`、
+  同一张图里已跑完与未开始的节点各带自己的角色图标。
+
+**3. 顺带发现并修好：预览页在 `file://` 下整页空数据**
+
+用 CDP 打开 `rendercheck/ui-preview.html` 复验时，页面自己报了
+`连接异常 · 预览未收录：GET /C:/api/v1/agents` —— **种子里一条都没命中**。根因在
+`rendercheck/preview.tsx` 的 mock：
+
+```ts
+const url = new URL("/api/v1/agents", location.href);  // file:///C:/Users/.../ui-preview.html
+url.pathname                                            // → "/C:/api/v1/agents"
+```
+
+Windows 下 `file://` 的**盘符会混进 pathname**，于是 `GET /api/v1/...` 永远查不到；
+而「双击打开」正是这个预览页的既定用法（见 `build-preview.py` 文件头，也是评审时唯一会
+用到的方式）。修法是按 `^\/[A-Za-z]:(?=\/)/` 剥掉盘符前缀——HTTP 下是空操作。
+
+**这条为什么一直没被发现**：该预览页的离线自检（jsdom，见 §3.3）用的是 HTTP 形状的
+`location`，`pathname` 本来就是 `/api/...`；而「双击打开」这条使用路径从来没有被自动检查
+覆盖过。**声明的用法和自动检查的用法不一致**，缺口就一直留着。
+
+**4. 边界（如实记录）**
+
+- 关键词表不完整：新角色不进表就回退机器人（不会画错，只是不够贴切）。
+- 15 张图标进包，JS 419.13 → **424.97 kB**（CSS 86.25 kB）；`lucide-react` 按图标 tree-shake。
+- 没做后端 `icon` 字段：那要动 `agent_registry` 的库表与 §5.7 的响应契约，否决理由见 ADR-029。
 
 ## 5. 失败处理约定
 - 任一用例失败：先复现，再定位，修复后将失败模式固化为新的测试或本文档约束；

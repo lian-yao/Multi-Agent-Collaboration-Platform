@@ -15,6 +15,7 @@ import {
   type NoticeState,
 } from "./shared";
 import { InlineConfirm } from "../components/InlineConfirm";
+import { AgentGlyph } from "../components/AgentGlyph";
 
 const REASONING_LABELS: Record<string, string> = {
   none: "无推理",
@@ -90,7 +91,9 @@ function buildAgentPatch(agent: Agent, form: AgentForm): Record<string, unknown>
   return patch;
 }
 
-const monogramOf = (agent: Agent): string => agent.name.slice(0, 1);
+// 头像位原先在这里取显示名首字当 monogram（`agent.name.slice(0, 1)`）。现在改由
+// `AgentGlyph` 按 role 解析角色图标 —— 单字中文方块认不出是谁，而且同一个 Agent
+// 在协作画布上画的是机器人，两处对不上。解析口径集中在 `components/AgentGlyph.tsx`。
 
 /**
  * 单个角色卡片（网格里一行多个）。
@@ -122,8 +125,8 @@ export function AgentRoleCard({
         title={`配置「${agent.name}」的模型绑定与参数`}
       >
         <span className="cfg-agent-top">
-          <span className={`cfg-monogram cfg-agent-avatar tint-${active ? "green" : "blue"}`} aria-hidden="true">
-            {monogramOf(agent)}
+          <span className={`cfg-monogram cfg-agent-avatar tint-${active ? "green" : "blue"}`}>
+            <AgentGlyph role={agent.role} name={agent.name} size={17} />
           </span>
           <span className="cfg-agent-title">
             <span className="cfg-agent-name">
@@ -321,8 +324,8 @@ export function AgentTuningPanel({
       }
     >
       <div className="cfg-agent-modal-head">
-        <span className={`cfg-monogram cfg-agent-avatar tint-${active ? "green" : "blue"}`} aria-hidden="true">
-          {monogramOf(agent)}
+        <span className={`cfg-monogram cfg-agent-avatar tint-${active ? "green" : "blue"}`}>
+          <AgentGlyph role={agent.role} name={agent.name} size={17} />
         </span>
         <div>
           <Chip tone="blue">{agent.role}</Chip>

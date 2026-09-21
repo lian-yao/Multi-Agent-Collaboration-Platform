@@ -323,6 +323,19 @@ Token 采样按阶段记录（total 1020 / 1344 / 3051）。踩坑与决策见�
   `.cv-pop` 的 520px 上限**静默顶成 532px**，改为 `min(--cv-pop-max, --cv-pop-fit)`。
   `npm run build` 通过（CSS 86.23 kB / JS 419.13 kB）；`workspace-smoke` **151/151**（146 → 151）；
   前端镜像已重建。详见 `doc/testing.md` §4.12、ADR-028 决策 9。
+- 2026-09-21（同日五续：角色图标按 role 解析，另修好预览页在 file:// 下整页空数据）：
+  「Agent 团队」页角色卡的头像位原先渲染显示名首字（`agent.name.slice(0, 1)` →「信」「数」「报」），
+  既认不出是谁，又和协作画布的机器人不同形。新增 `frontend/src/components/AgentGlyph.tsx`
+  作为**唯一**判断处（先按 `role` 匹配语义 → 再按显示名 → 最后回退机器人），配置页（卡片 + 弹窗头）
+  与画布 `NodeGlyph` 共用，一致性由结构保证；画布上**状态优先于角色**，`failed`/`paused`/`running`
+  仍画各自的图形。关键词表 15 个键、顺序即优先级。CDP 实测：三个内置角色 +
+  自定义「任务规划 Agent」各得其图（`file-search` / `chart-line` / `file-text` / `list-checks`），
+  图标在 34px 方块里居中偏差 **dx = dy = 0**，`running` 节点让位给转圈（`spin`）。
+  顺带发现并修好 `rendercheck/preview.tsx` 的一个真 bug：`file://` 下 Windows 盘符混进
+  `pathname`（`/C:/api/v1/agents`），种子里**一条都命中不了**，预览页整页空数据 ——
+  而「双击打开」正是它的既定用法。`npm run build` 通过（CSS 86.25 kB / JS 424.97 kB）；
+  `config-smoke` **77/77**（69 → 77）、`workspace-smoke` **154/154**（151 → 154）；
+  前端镜像已重建。详见 `doc/testing.md` §4.13、ADR-029。
 - 注意事项：数据库读取用例使用 SQLite 内存表与注入目录数据，MCP 用例走内存协议往返而非
   跨进程 stdio，因此不代表真实 PostgreSQL、真实 MCP Server 或浏览器端到端验收。
   E-04/E-05 的 Web 侧与部署脚本已在本轮补上实跑证据（见上两条），

@@ -1315,6 +1315,8 @@ POST /api/v1/agents/{agent_id}/run
      （名字、`role · 状态`、生效模型、Temperature、覆盖项数，以及「当前阶段」标记）；
      编辑表单在 `AgentTuningPanel` 里，点开方块后挂在网格下方，同一时刻只编辑一个角色。
      网格里不放输入项——六个输入框会把同一行的其它方块顶变形。
+     方块左上角的 34px 图标位放**角色图标**（按 `role` 解析，见 ADR-029），不再放显示名首字；
+     解析器与协作画布节点共用，见「全站版式与控件复用」的 `AgentGlyph` 一条。
   3. 「任务记录」`frontend/src/records/RecordsPage.tsx` —— 执行结果的**观测**数据。
      内部再分三个副路由，分区依据是「记录产生的位置」而不是数据类型：
      `runs` 运行记录（当前会话最近一次执行的终态与检查点）、
@@ -1329,6 +1331,13 @@ POST /api/v1/agents/{agent_id}/run
     旧 `.cfg-tabs` / `.cfg-tab` 已废弃，不要再新增。
   - 状态胶囊与状态文案唯一来源是 `components/Status.tsx`（`Status`、`statusText`、
     `toolCallStatusText`），不要在页面里各写一份映射。
+  - **Agent 角色图标的唯一来源是 `components/AgentGlyph.tsx`**（`AgentGlyph`、
+    `agentIconKey`、`AGENT_ICON_GLYPHS`），配置页角色方块与协作画布节点都调它。
+    口径：先按 `role` 匹配语义、再按显示名、最后回退机器人（`Bot`）；关键词表
+    `AGENT_ICON_RULES` **顺序即优先级**。加图标往表里加一行即可，不要在视图里另做映射
+    （两个视图各画各的，一致性会慢慢消失——这就是原先「配置页画首字、画布画机器人」
+    的成因，见 ADR-029）。画布上**状态优先于角色**：`failed` / `paused` / `running`
+    画各自的图形，其余才画角色图标。
   - **危险操作的行内二次确认一律用 `components/InlineConfirm.tsx`**（`InlineConfirm`
     触发式、`InlineConfirmBar` 直接渲染确认条），**全站禁止 `window.confirm` /
     `alert` / `prompt`**。原生对话框由宿主提供：内置预览的 sandbox iframe（无

@@ -23,8 +23,9 @@
  * 能拖只会让人以为拖动能改变什么，而它什么都不会改变。
  */
 import { useEffect, useRef, useState, type CSSProperties } from "react";
-import { Bot, CircleAlert, LoaderCircle, Maximize2, Pause, Wrench } from "lucide-react";
+import { CircleAlert, LoaderCircle, Maximize2, Pause, Wrench } from "lucide-react";
 import { Status } from "../components/Status";
+import { AgentGlyph } from "../components/AgentGlyph";
 import type { CollabGraph, CollabNode, CollabToolCall } from "./collaboration";
 import "./workspace.css";
 
@@ -349,12 +350,17 @@ export function useElementSize<T extends HTMLElement>(enabled = true) {
   return [ref, size] as const;
 }
 
+/**
+ * 圆面里的图形。**状态优先于角色**：执行中 / 失败 / 暂停是人要立刻看见的信号，
+ * 此时不画角色图标。停在待命或已完成时画角色图标（与配置页同一套解析，
+ * 见 `components/AgentGlyph.tsx`），不再一律画机器人。
+ */
 function NodeGlyph({ node, size }: { node: PlacedNode; size: number }) {
   if (node.kind !== "agent") return <span className="cv-dot" />;
   if (node.status === "failed") return <CircleAlert size={size} />;
   if (node.status === "paused") return <Pause size={size} />;
   if (node.status === "running") return <LoaderCircle size={size} className="spin" />;
-  return <Bot size={size} />;
+  return <AgentGlyph role={node.node?.agentId ?? ""} name={node.label} size={size} />;
 }
 
 /**

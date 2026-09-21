@@ -33,6 +33,7 @@ import { RecordsPage } from "../src/records/RecordsPage";
 import { PageTabs } from "../src/components/PageTabs";
 import { InlineConfirm, InlineConfirmBar } from "../src/components/InlineConfirm";
 import { ProviderMark } from "../src/config/providerIcons";
+import { AgentGlyph, agentIconKey, AGENT_ICON_GLYPHS, FALLBACK_AGENT_ICON, type AgentIconKey } from "../src/components/AgentGlyph";
 import { resolveKnownContextTokens } from "../src/config/modelCapabilities";
 import { draftProblem, draftToPayload, parseMcpImport, type McpImportDraft } from "../src/config/mcpConfig";
 import { entriesToRecord, recordToEntries, samePairs } from "../src/config/KeyValueFields";
@@ -134,6 +135,68 @@ check(
   "表单不在方块里",
   !card.includes("清除全部覆盖") && !card.includes("层次来源") && !card.includes("绑定与调参"),
   "表单应放进弹窗，不在卡片网格里",
+);
+
+/* ---- 角色头像：按 role 解析图标（components/AgentGlyph.tsx），配置页与协作画布共用 ---- */
+
+const avatarMarkup =
+  card.match(/class="cfg-monogram cfg-agent-avatar[^"]*"[^>]*>([\s\S]*?)<\/span>/)?.[1] ?? "";
+check(
+  "角色头像位画图标，不再塞显示名首字",
+  avatarMarkup.includes("<svg") && !/[\u4e00-\u9fff]/.test(avatarMarkup),
+  `头像位内容：${avatarMarkup || "（没切到样式块）"}`,
+);
+check(
+  "头像图标与 role 对上（analyst → 折线图）",
+  avatarMarkup.includes("lucide-chart-line"),
+  avatarMarkup.slice(0, 160),
+);
+
+const iconCases: [string, string, AgentIconKey][] = [
+  ["collector", "信息收集 Agent", "search"],
+  ["analyst", "数据分析 Agent", "chart"],
+  ["reporter", "报告生成 Agent", "report"],
+  ["summarizer", "摘要 Agent", "summary"],
+  ["translator", "翻译 Agent", "translate"],
+  ["reviewer", "审核 Agent", "review"],
+];
+check(
+  "role 语义键决定图标（内置三角色 + 常见自定义角色）",
+  iconCases.every(([role, name, expected]) => agentIconKey(role, name) === expected),
+  iconCases.map(([r, n, e]) => `${r}→${agentIconKey(r, n)}（应为 ${e}）`).join("；"),
+);
+check(
+  "role 优先于显示名，改显示名不会换图标",
+  agentIconKey("summarizer", "信息收集 Agent") === "summary",
+  `实际 ${agentIconKey("summarizer", "信息收集 Agent")}`,
+);
+check(
+  "role 匹配不到就看显示名，都匹配不到回退机器人",
+  agentIconKey("agent-7", "报告生成 Agent") === "report" && agentIconKey("agent-7") === FALLBACK_AGENT_ICON,
+  `实际 ${agentIconKey("agent-7")} / ${agentIconKey("agent-7", "报告生成 Agent")}`,
+);
+
+const iconKeys = Object.keys(AGENT_ICON_GLYPHS) as AgentIconKey[];
+const iconClasses = iconKeys.map((key) => {
+  const Glyph = AGENT_ICON_GLYPHS[key];
+  return renderToStaticMarkup(<Glyph size={16} />).match(/lucide-[a-z0-9-]+/g)?.[0] ?? "";
+});
+check(
+  "每张角色图标都能渲染出图形",
+  iconClasses.every((name) => name.startsWith("lucide-")),
+  iconClasses.filter((name) => !name.startsWith("lucide-")).join("、"),
+);
+check(
+  "图标键与图形一一对应，没有两键共用一张图",
+  new Set(iconClasses).size === iconKeys.length,
+  `键 ${iconKeys.length} 个、图形 ${new Set(iconClasses).size} 张`,
+);
+check(
+  "三种内置角色渲染出三张不同图形",
+  renderToStaticMarkup(<AgentGlyph role="collector" size={17} />) !==
+    renderToStaticMarkup(<AgentGlyph role="analyst" size={17} />) &&
+    renderToStaticMarkup(<AgentGlyph role="analyst" size={17} />) !==
+      renderToStaticMarkup(<AgentGlyph role="reporter" size={17} />),
 );
 
 /* ---- 角色配置面板（props 驱动）：表单在这里 ---- */

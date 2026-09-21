@@ -281,6 +281,15 @@ check(
   "侧栏画出三个 Agent 节点",
   ["信息收集 Agent", "数据分析 Agent", "报告生成 Agent"].every((name) => serial.includes(name)),
 );
+// 圆面图形与配置页共用 components/AgentGlyph.tsx 的解析：三个角色各拿自己的图标，
+// 而不是清一色机器人。断言 icon 的 kebab 类名——键与图形错配是静默的，只有这样才能发现。
+check(
+  "侧栏节点画的是角色图标（收集 / 分析 / 报告各一）",
+  serial.includes("lucide-file-search") &&
+    serial.includes("lucide-chart-line") &&
+    serial.includes("lucide-file-text"),
+  "圆面图形应与配置页角色卡一致，见 components/AgentGlyph.tsx",
+);
 check("侧栏标出首尾端子", serial.includes(">任务<") && serial.includes(">交付<"));
 check(
   "侧栏节点记下模型与 Token",
@@ -304,6 +313,31 @@ check(
 );
 check("侧栏给出全屏画布入口", serial.includes("全屏画布"));
 check("侧栏不弹执行轨迹", !serial.includes("查看信息收集 Agent的"), serial.slice(0, 200));
+
+/* 状态优先于角色：正在跑的那一格画转圈，不让角色图标把状态盖掉 */
+const runningGraph = buildCollaboration({
+  stages: collabStages,
+  agents: collabAgents,
+  workflow: {
+    ...collabWorkflow,
+    status: "running",
+    current_step: "analyze",
+    checkpoint: { status: "running", current_step: "analyze", completed_steps: ["collect"] },
+  },
+  completed: new Set(["collect"]),
+  traces: collabTraces,
+});
+const running = renderToStaticMarkup(<CollaborationGraph graph={runningGraph} />);
+check(
+  "执行中的节点画转圈而不是角色图标",
+  running.includes("lucide-loader-circle") && running.includes("spin"),
+  "状态是人要立刻看见的信号，不能被角色图标盖掉",
+);
+check(
+  "同一张图里已跑完与未开始的节点各带自己的角色图标",
+  running.includes("lucide-file-search") && running.includes("lucide-file-text"),
+  "只有执行中那一格让位给状态",
+);
 
 /* 并行：同层步骤算同一波，画成一个圈定框而不是写一句「并行」 */
 const parallelGraph = buildCollaboration({
