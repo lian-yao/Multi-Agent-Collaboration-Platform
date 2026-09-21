@@ -20,6 +20,16 @@
   （ADR-017、ADR-018）、Agent 角色目录与自定义角色 CRUD 已合入；Redis 会话/长期记忆实现与
   「外部 MCP Server 并入流水线工具注册表」也已合入，但记忆**尚未接入编排**。
   进度、缺口与实测结果见 [doc/roadmap.md](doc/roadmap.md) 与 [doc/testing.md](doc/testing.md) §4.4。
+- 后续追加（2026-09-17）：动态编排图**并列新增、默认关闭**（ADR-019，`dynamic` 由规划节点
+  按任务分配角色，`static` 仍走固定三步）；执行边界只读可见（ADR-020）；聊天框支持引入
+  图片与文档附件，走 `image_url` / 内联正文送进模型（ADR-021，`doc/api.md` §5.16）；
+  首页引导卡改为「任务原型」并显式体现协作形态（ADR-022）；**代码执行沙箱在部署环境真正可用**
+  （ADR-023，安全代价与关闭方式见下文「一键部署 → 执行边界（沙箱）」）；附件原件一律留档，
+  已发送的图片与文档都能下载原件（ADR-024）；**Agent 可按需读回本次会话的附件**
+  （ADR-025：会话级只读工具，不放宽沙箱策略、不给沙箱挂卷）。
+- 评测与度量（`doc/evals/`）：视觉能力评测集（10 例，答案机器可判）与
+  「静态 vs 动态编排」净收益 A/B，都用真实模型跑，用法见两节各自的报告与
+  [doc/testing.md](doc/testing.md) §4.5。
 - Python 环境由 UV 管理，实际环境以 `pyproject.toml + uv.lock` 为准。
 
 ## 技术栈
@@ -40,9 +50,9 @@
 ├── AGENTS.md                 # Agent 工作入口与硬性约束
 ├── app/                      # FastAPI 后端与编排层
 ├── frontend/                 # Web 可视化界面（React + Vite）
-├── tests/                    # 单元、集成、端到端测试
+├── tests/                    # 单元、集成、端到端测试（fixtures/ 里是真实库生成的附件固件）
 ├── deploy/                   # Docker 与 Dapr 部署资源
-├── scripts/                  # 本地开发脚本
+├── scripts/                  # 本地开发脚本、附件固件生成、视觉与编排评测
 ├── examples/                 # 示例场景（规划）
 ├── doc/                      # 项目文档
 │   ├── 15 AI Native多智能体协作平台.md
@@ -51,9 +61,11 @@
 │   ├── conventions.md
 │   ├── api.md
 │   ├── data-model.md
+│   ├── orchestration.md
 │   ├── testing.md
 │   ├── deployment.md
 │   ├── roadmap.md
+│   ├── evals/                # 评测报告（视觉能力、编排净收益）
 │   └── decisions/
 ├── pyproject.toml            # 依赖与工具配置
 └── uv.lock                   # 环境锁定文件
@@ -106,6 +118,25 @@ cd deploy
 检查都打印 `is healthy`（只看「容器起来了」不算通过）。完整演示步骤与浏览器核对清单见
 [doc/deployment.md](doc/deployment.md) 的「演示与验收」。
 
+### 执行边界（沙箱）
+
+「代码执行」工具把模型生成的代码放进一次性容器里跑（`network_disabled` + `read_only` +
+`user=nobody` + `cap_drop=ALL` + 内存/CPU/进程数上限，超时即 kill）。容器是 backend 通过
+**宿主机的** Docker 守护进程创建的**兄弟容器**，因此 backend 挂载了 `/var/run/docker.sock`：
+
+- **安全代价（务必知情）**：这等于把宿主机的 root 等价权限间接交给 backend 容器。要防的是
+  模型生成的代码——它拿不到套接字（先过语言层策略，再进无权、只读、无网的一次性容器）；
+  但一旦 **API 进程本身**被攻破，宿主机就跟着暴露。**不要把 8000 端口放到不可信网络。**
+- 沙箱镜像由 `SANDBOX_IMAGE` 指定，compose 里指向**本项目自建镜像**：离线/内网拉不到
+  `python:3.12-slim`，而 compose 一定会把自建镜像构建出来。能连外网时可以删掉那行，
+  回落代码默认的官方 slim 镜像（更小、不含本项目代码）。
+- 宿主机套接字不在默认路径时用 `SANDBOX_DOCKER_SOCKET` 覆盖（例如 Podman 的
+  `/run/podman/podman.sock`）。
+- 不想开：删掉 backend 的卷挂载并设 `SANDBOX_BACKEND=denied`。工具会以 `SandboxUnavailable`
+  失败，**不会**降级成宿主进程执行。
+- 当前是否可用、为什么不可用，在「工具与配置 → 执行边界」只读可见（ADR-020、`doc/api.md`
+  §5.15）。完整决策与实机验收见 [ADR-023](doc/decisions/023-sandbox-deploy-docker-socket.md)。
+
 停止服务：
 
 ```powershell
@@ -122,4 +153,5 @@ cd deploy
 - 测试：[doc/testing.md](doc/testing.md)
 - 部署：[doc/deployment.md](doc/deployment.md)
 - 路线图：[doc/roadmap.md](doc/roadmap.md)
+- 评测报告：[doc/evals/](doc/evals)（视觉能力、静态 vs 动态编排净收益）
 - 决策记录：[doc/decisions](doc/decisions)

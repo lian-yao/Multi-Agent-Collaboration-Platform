@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Clock3, Gauge, Wrench, ChevronRight, History, MessagesSquare, Trash2 } from "lucide-react";
 import { PageTabs, type PageTab } from "../components/PageTabs";
 import { Status } from "../components/Status";
+import { InlineConfirm } from "../components/InlineConfirm";
 import { EmptyState, describeError, formatTime } from "../config/shared";
 import { api } from "../api/client";
 import type { SessionSummary, Workflow } from "../types/api";
@@ -113,7 +114,8 @@ function SessionHistory({
   sessionId,
 }: {
   onOpen: (session: SessionSummary) => void;
-  onDelete: (session: SessionSummary) => void;
+  /** 必须可等待：删除**成功之后**才重拉列表，否则会删完立刻拉到旧数据（§5.14）。 */
+  onDelete: (session: SessionSummary) => Promise<void>;
   sessionId: string | null;
 }) {
   const [items, setItems] = useState<SessionSummary[]>([]);
@@ -204,24 +206,25 @@ function SessionHistory({
                   <ChevronRight size={14} />
                 </span>
               </button>
-              <button
-                type="button"
-                className="record-run-delete"
-                aria-label={`删除会话：${item.title}`}
-                title="删除此会话"
-                onClick={() => {
-                  if (
-                    window.confirm(
-                      `确定删除会话「${item.title || "（暂无消息）"}」？\n该会话的消息与运行记录将一并删除，且不可恢复。`,
-                    )
-                  ) {
-                    onDelete(item);
-                    void load(page);
-                  }
+              <InlineConfirm
+                label={`删除会话「${item.title || "（暂无消息）"}」`}
+                confirmLabel="删除"
+                triggerClassName="record-run-delete"
+                triggerLabel={`删除会话：${item.title}`}
+                triggerTitle="删除此会话，消息与运行记录一并删除且不可恢复"
+                slotClassName="record-run-delete-slot"
+                size="sm"
+                onConfirm={() => {
+                  // 先删再拉：原来是 onDelete 与 load 并发，存在「删完立刻重拉、拿回旧列表」
+                  // 的竞态（表现为记录还在）。删掉本页最后一条时回退一页，不停在空页上。
+                  void (async () => {
+                    await onDelete(item);
+                    await load(items.length === 1 && page > 1 ? page - 1 : page);
+                  })();
                 }}
               >
                 <Trash2 size={15} />
-              </button>
+              </InlineConfirm>
             </div>
           ))}
         </div>
@@ -308,7 +311,7 @@ export function RecordsPage({
   sessionId: string | null;
   onOpenRun: () => void;
   onOpenSession: (session: SessionSummary) => void;
-  onDeleteSession: (session: SessionSummary) => void;
+  onDeleteSession: (session: SessionSummary) => Promise<void>;
 }) {
   const active = RECORD_TABS.find((item) => item.id === tab) ?? RECORD_TABS[0];
 

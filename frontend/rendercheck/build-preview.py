@@ -73,13 +73,38 @@ def flatten() -> dict:
          "created_at": S.iso(-10), "updated_at": S.iso(-10)},
     ]
 
+    # 附件（ADR-021 / ADR-024）：第一条用户消息带四种形态，好让气泡里的
+    # 「图片缩略图 / 文档条目 / 解析失败 / 无原件的历史行」一次看全。
+    # 图片的正文地址在 `preview.tsx` 里被换成内联 SVG（预览页取不到真的字节）。
+    # `has_original` 为 False 的那条代表原件留档策略（ADR-024）之前落库的行：
+    # 它**不该**有打开原件的入口，正好和另外三条形成对照。
     messages = [
         {"id": "m-1", "session_id": SESSION_ID, "role": "user",
          "content": "帮我调研 2026 年多智能体协作平台的开源方案，并输出一份对比报告。",
-         "agent_run_id": None, "status": "done", "created_at": S.iso(-320)},
+         "agent_run_id": None, "status": "done", "created_at": S.iso(-320),
+         "attachments": [
+             {"id": "att-preview-image", "session_id": SESSION_ID, "message_id": "m-1",
+              "name": "架构草图.png", "mime": "image/png", "size_bytes": 184320,
+              "kind": "image", "status": "ready", "error": None, "has_original": True,
+              "created_at": S.iso(-320)},
+             {"id": "att-preview-doc", "session_id": SESSION_ID, "message_id": "m-1",
+              "name": "竞品功能对照表.xlsx", "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+              "size_bytes": 47104, "kind": "document", "status": "ready", "error": None,
+              "has_original": True, "created_at": S.iso(-320)},
+             {"id": "att-preview-failed", "session_id": SESSION_ID, "message_id": "m-1",
+              "name": "现场访谈扫描件.pdf", "mime": "application/pdf", "size_bytes": 2400256,
+              "kind": "document", "status": "failed",
+              "error": "未能从 PDF 中可靠提取文本（可能是扫描件）。",
+              "has_original": True, "created_at": S.iso(-320)},
+             {"id": "att-preview-legacy", "session_id": SESSION_ID, "message_id": "m-1",
+              "name": "会议速记.txt", "mime": "text/plain", "size_bytes": 1840,
+              "kind": "text", "status": "ready", "error": None, "has_original": False,
+              "created_at": S.iso(-320)},
+         ]},
         {"id": "m-2", "session_id": SESSION_ID, "role": "assistant",
          "content": "已拆分为「信息收集 → 数据分析 → 报告生成」三步，前两步已完成，正在生成报告。",
-         "agent_run_id": RUN_ID, "status": "done", "created_at": S.iso(-300)},
+         "agent_run_id": RUN_ID, "status": "done", "created_at": S.iso(-300),
+         "attachments": []},
     ]
 
     tools = [
@@ -92,8 +117,24 @@ def flatten() -> dict:
     for m in S.MODELS:
         models_by_provider.setdefault(m["provider_id"], []).append(m)
 
+    # 会话历史工作流（§5.18）：侧栏协作画布与全屏画布上「对话 N」的编号来源。
+    # 先把静态 workflow 放进 STATE，复用与实时 stub 同一个种子函数——它会再补一条
+    # 更早的已完结对话，预览里因此能看到两个对话编号，且切到「对话 1」也有数据。
+    S.STATE["workflows"][WORKFLOW_ID] = workflow
+    S.STATE["tool_calls"][WORKFLOW_ID] = tool_calls
+    # 动态编排的一条对话（ADR-019）：`checkpoint.plan` 带 `depends_on` → 画布画
+    # 「扇出 → 并行 → 汇聚」。必须放在 `session_workflows` 之前——「对话 N」的编号
+    # 就是这个列表算出来的，晚放它会少一条。
+    dynamic = S.new_dynamic_workflow(SESSION_ID)
+    dynamic_id = dynamic["id"]
+    history = S.session_workflows(SESSION_ID)["items"]
+    early_id = history[0]["id"]
+
     table: dict = {
         "POST /api/v1/sessions": session,
+        # 编号就是这个列表的下标 + 1，顺序必须与真实接口同口径（创建时间升序）。
+        f"GET /api/v1/sessions/{SESSION_ID}/workflows": {
+            "items": history, "total": len(history)},
         # 侧栏「当前任务」下拉 + 记录页「历史会话」分区共用：当前会话摘要 + 两条演示历史。
         "GET /api/v1/sessions": {
             "items": [
@@ -115,9 +156,12 @@ def flatten() -> dict:
         f"DELETE /api/v1/sessions/s-history-1": None,
         f"DELETE /api/v1/sessions/s-history-2": None,
         f"GET /api/v1/sessions/{SESSION_ID}/messages": {"items": messages},
+        # 这两个字段是必填的：前端读 `accepted.unattached_attachment_ids.length`，
+        # 少了就在「发送成功」之后抛 TypeError（预览里点一次发送就能复现）。
         f"POST /api/v1/sessions/{SESSION_ID}/messages": {
             "message_id": "m-3", "session_id": SESSION_ID, "agent_run_id": RUN_ID,
             "workflow_id": WORKFLOW_ID, "status": "accepted",
+            "attachments": [], "unattached_attachment_ids": [],
         },
         f"POST /api/v1/sessions/{SESSION_ID}/pause": {
             "session": {**session, "status": "paused"}, "workflow": {**workflow, "status": "paused"}},
@@ -138,6 +182,21 @@ def flatten() -> dict:
             "created_at": S.iso(-86300), "updated_at": S.iso(-86300), "completed_at": S.iso(-86200)},
         f"GET /api/v1/workflows/{WORKFLOW_ID}": workflow,
         f"GET /api/v1/workflows/{WORKFLOW_ID}/tool-calls": S.page(tool_calls),
+        # 「对话 1」是种子里补出来的更早一次对话：切过去时这三条得答得上，
+        # 否则全屏画布会空掉——预览页于是看不出「历史对话也各有自己的工作流」。
+        f"GET /api/v1/workflows/{early_id}": history[0],
+        f"GET /api/v1/workflows/{early_id}/tool-calls": S.page([]),
+        f"GET /api/v1/workflows/{early_id}/stages": S.stage_traces(early_id, done=S.STEPS),
+        # 阶段执行轨迹（§5.17）：执行台卡片弹窗的数据源。按「三步都已跑完」给种子，
+        # 弹窗打开时就能看到完整的输入 → 工具调用 → 产出。
+        f"GET /api/v1/workflows/{WORKFLOW_ID}/stages":
+            S.stage_traces(WORKFLOW_ID, done=S.STEPS),
+        # 动态编排那条对话：画布的形状来自 `checkpoint.plan`（`/stages` 对它返回
+        # `not_integrated`，详情区只能给说明），这三条答得上才能切过去看并行画布。
+        f"GET /api/v1/workflows/{dynamic_id}": dynamic,
+        f"GET /api/v1/workflows/{dynamic_id}/tool-calls":
+            S.page(S.STATE["tool_calls"][dynamic_id]),
+        f"GET /api/v1/workflows/{dynamic_id}/stages": S.stage_traces(dynamic_id),
         "GET /api/v1/metrics": S.page(S.metrics_for(WORKFLOW_ID)),
         "GET /api/v1/agents": {"items": S.AGENTS},
         "GET /api/v1/providers": {"items": S.PROVIDERS},
@@ -145,6 +204,8 @@ def flatten() -> dict:
         "GET /api/v1/config/provider": S.PROVIDER_CONFIG,
         "PUT /api/v1/config/provider": S.PROVIDER_CONFIG,
         "GET /api/v1/config/provider-presets": S.PRESETS,
+        # 执行边界（§5.15）：只读分区，预览按真实部署给「不可用 + 原因」。
+        "GET /api/v1/config/sandbox": S.SANDBOX_STATUS,
         "GET /api/v1/config/providers": {"items": S.PROVIDERS, "total": len(S.PROVIDERS)},
         "GET /api/v1/config/models": {"items": S.MODELS, "total": len(S.MODELS)},
         "GET /api/v1/config/mcp/servers": {"items": S.MCP_SERVERS, "total": len(S.MCP_SERVERS)},

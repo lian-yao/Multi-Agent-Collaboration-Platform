@@ -288,6 +288,7 @@ M5 闭环后又有两批改动合入 `master`，当时都未回填本文件的�
     ——这批用例 monkeypatch 了 `AgentSettings` / `list_agent_configs`，却没有屏蔽库里的
     *活的* Provider 覆盖。显式 `PUT` 全 `null` 清除覆盖后 8 条立即恢复通过（38 passed），
     全量回到 **371 passed / 7 skipped**。
+
 - 2026-09-16（合入 PR #9 与 C-1 后，本机 compose 全栈在跑）：`uv run pytest -q` →
   **606 passed / 5 failed / 7 skipped，17.01s**（共收集 618 例；上面 371 例是
   2026-09-15 的快照，PR #9 的注册表用例与 C-1 的记忆/沙箱/stdio 用例都未计入）。
@@ -488,6 +489,252 @@ M5 闭环后又有两批改动合入 `master`，当时都未回填本文件的�
   （见上文两条），**依赖模型的链路已于 2026-09-15 用 `gpt-5.5` 补跑通过**（同见上两条），
   **浏览器端渲染仍是人工核对项**（前端门禁为类型检查 + 构建，未引入浏览器自动化）。
 
+- 2026-09-17（动态编排与执行边界落地）：`uv run pytest -q -p no:cacheprovider` →
+  **618 passed / 7 skipped / 0 failed**（7 skipped 为需要 compose 的 `tests/e2e/test_live_e2e.py`；
+  隔离存储：`DATABASE_URL=…localhost:5433/macp_test REDIS_URL=redis://localhost:6380/15`，
+  避免被库里的活 Provider 覆盖污染，见 `doc/testing.md` §1）。
+  新增 `tests/unit/test_dynamic_pipeline.py`（43 例）、`tests/unit/test_workflow_dynamic.py`（13 例）、
+  `tests/integration/test_api.py` 增 4 例（编排模式透传与 422、沙箱状态只读与 405、探测失败原因）。
+  前端：`npm run build` 通过；`config-smoke` **69/69**、`workspace-smoke` **44/44**、
+  `ui-preview.html` 的 jsdom 自检 **30/30**（含「切到执行边界 → 拉到状态并渲染限额」与
+  「分区内可编辑控件数为 0」）。
+  **本轮的验证边界**：动态编排只有单元级证据，未接真实模型跑过端到端；
+  「动态是否比静态好」没有任何度量（`doc/orchestration.md` §3.3 列为档 3 前置条件）。
+- 2026-09-17（多模态附件与欢迎区引导卡落地，同一日稍后）：同样的隔离存储跑法 →
+  **669 passed / 7 skipped / 0 failed**（在上一条 618 的基础上新增附件 48 例与
+  「附件只进根步骤」3 例）。前端：`npm run build` 通过（3163 modules，
+  `index-*.css` 78.39 kB / `index-*.js` 402.67 kB）；`config-smoke` **69/69**、
+  `workspace-smoke` **75/75**（44 → 75）、`ui-preview.html` 的 jsdom 自检 **42/42**（30 → 42）。
+  **本轮的验证边界**：容器未重建，附件在真实后端上的「拖文件 → chip → 发送 → 气泡」
+  全链路未联调；图片理解未接真实视觉模型；PDF 只覆盖构造样本。详见 `doc/testing.md` §4.4。
+- 2026-09-17（D9-10 收尾，同一日第三轮）：同样的隔离存储跑法 →
+  **724 passed / 7 skipped / 0 failed**（在上一条 682 的基础上新增 42 例：真实附件夹具 13、
+  会话文件工具 19、附件回读列 4、PDF `/ToUnicode` 6）。两个真实模型评测：
+  视觉能力 **10/10**（`doc/evals/vision.md`）、静态 vs 动态编排净收益
+  （`doc/evals/orchestration-ab.md`）。**本轮的验证边界**：两次评测都是单轮小样本；
+  动态链路仍没有走 compose 的端到端回归；多字体 PDF 与扫描件 OCR 仍未做。
+  详见 `doc/testing.md` §4.5。
+- 2026-09-20（登记 MCP Server 接入编排层 ADR-026 + 扫描版 PDF 走页面图像 ADR-027）：
+  **全量回归未跑**——本机 Docker Desktop 处于停止状态（PostgreSQL 5433 / Redis 6380 /
+  网关 3000 全不可达，且失败形态是 `TimeoutError` 而不是 `ConnectionRefused`，硬跑会把
+  用例卡满 TCP 超时）。只跑了**不依赖存储**的那部分：附件与编排相关 **173 例**
+  （含本轮新增的渲染 13 例）、附件接口契约 **10 例**，全绿。前端 `npm run build` 通过；
+  `config-smoke` **69/69**、`workspace-smoke` **80/80**（78 → 80，新增两条降级说明文案断言）。
+  **本轮的验证边界**：依赖真实 PG 的 `tests/unit/test_mcp_registry.py`（Server CRUD）与
+  全量基线（724 passed / 7 skipped）都要等 Docker 起来补跑；**backend 镜像未重建**，
+  pypdfium2 只有在重建后才进容器。详见 `doc/testing.md` §4.6、§4.7。
+- 2026-09-21（阶段执行轨迹接口 §5.17 + 协作侧栏改为「配置与用量画布」ADR-028）：
+  Docker 起来后先补跑上一轮欠的全量回归 → **768 passed / 7 skipped / 0 failed in 14.41s**
+  （隔离存储 `macp_test` + `redis/15`；上一轮因 Docker 停摆而没跑的
+  `tests/unit/test_mcp_registry.py` 这次跑过，ADR-026 的回归缺口关闭）。
+  新增两个只读接口：`GET /workflows/{id}/stages`（§5.17，9 + 4 例）、
+  `GET /sessions/{id}/workflows`（§5.18，5 例）。前端 `npm run build` 通过
+  （CSS 86.76 kB / JS 417.37 kB）；`config-smoke` **69/69**、`workspace-smoke` **121/121**
+  （90 → 121）、预览页 **42 条路由**。**线上端到端跑过一遍**：`docker compose up -d --build
+  backend frontend` 重建后，任务「用计算器算出 128/2680…」→ workflow `961af452-…` 终态
+  `completed`，`GET /stages` 逐阶段读得出产出、上游接线与一次真实的 `calculator` 调用
+  （`128/2680 → 0.04776119402985075`），镜像里 `dist/assets/*.css` 也核到了新样式——
+  不是拿单测替身糊的。顺带修掉一处**文档漂移**：§5.5 原写采样标签含 `agent_id`，
+  实际编排层两条链路都只传 `role`，照原文实现的前端把三个 Agent 的 Token 合并成了一个
+  `model` 分组（看起来像"数据丢了"，其实是读法错了）。详见 `doc/testing.md` §4.8、§4.9。
+- 2026-09-21（同日续：协作画布重写为节点图）：用户判定上一版「当前根本就不是画布」（卡片 + 横向连线
+  是表不是图），并给出参考项目 `Jasper-zh/Multi-Agent-Playground`。本轮照其画法重写：**圆节点 +
+  弧线连线**（新增 `frontend/src/workspace/GraphCanvas.tsx`，`CollaborationGraph.tsx` 收成薄封装，
+  `.collab-*` 换成 `.cv-*`）。前端 `npm run build` 通过（CSS 85.95 kB / JS 420.11 kB）；
+  `workspace-smoke` **141/141**（121 → 141，卡片断言换成几何断言）。**未跑后端全量**
+  （本轮无后端改动）。详见 `doc/testing.md` §4.10、ADR-028。
+- 2026-09-21（同日三续：节点图交互按用户评审动刀）：四条意见全部采纳 —— 悬停浮层只在全屏给、
+  改贴节点侧面（原来挂正下方压住链路）、内容按「分配到的任务 → 阶段产出 → 工具调用 → 生效参数
+  → Token 消耗」重排并放大到 380×520、**节点拖动整个删掉**（过程可视化，拖了不改变任何东西）。
+  前端 `npm run build` 通过（CSS 85.97 kB / JS 418.99 kB）；`workspace-smoke` **146/146**
+  （141 → 146）。顺带修掉一条**恒真断言**（否定式断言读错文件，见 §4.11 教训）。
+  **线上用 CDP 驱动真浏览器实测了可见性**：侧栏浮层元素 0 个、宽档三个浮层均 380 宽且
+  在节点右侧 14px、竖直全部落在视口内（192–665 / 218–710 / 270–790）。详见 `doc/testing.md` §4.11。
+- 2026-09-21（同日四续：浮层规则补全到工具链胶囊，另收两条容器层的账）：二轮只把**节点**浮层
+  挪到侧面，**胶囊浮层仍居中向上弹** —— 实测它把「任务」端子与上游 Agent 一起盖住，改为
+  `.cv-pop-edge.is-left/.is-right` 贴侧面，压住的节点从 2 个降到 **0**；竖直改用「算可容高度」
+  （面居中于胶囊，面高 ≤ 到上下沿距离的两倍即不溢出），不再去量面高。同时修关闭按钮图标比
+  文字高 2px（`display:block` + svg `vertical-align:baseline` → `inline-flex`，偏差 −2 → 0）、
+  以及侧栏被长会话标题从 **214px 顶到 1093px** 的老账（根因是 `.sidebar` 作为 flex item 的
+  `min-width:auto`，治本是给容器写 `min-width:0`）。自查还发现内联 `max-height` 把
+  `.cv-pop` 的 520px 上限**静默顶成 532px**，改为 `min(--cv-pop-max, --cv-pop-fit)`。
+  `npm run build` 通过（CSS 86.23 kB / JS 419.13 kB）；`workspace-smoke` **151/151**（146 → 151）；
+  前端镜像已重建。详见 `doc/testing.md` §4.12、ADR-028 决策 9。
+- 2026-09-21（同日五续：角色图标按 role 解析，另修好预览页在 file:// 下整页空数据）：
+  「Agent 团队」页角色卡的头像位原先渲染显示名首字（`agent.name.slice(0, 1)` →「信」「数」「报」），
+  既认不出是谁，又和协作画布的机器人不同形。新增 `frontend/src/components/AgentGlyph.tsx`
+  作为**唯一**判断处（先按 `role` 匹配语义 → 再按显示名 → 最后回退机器人），配置页（卡片 + 弹窗头）
+  与画布 `NodeGlyph` 共用，一致性由结构保证；画布上**状态优先于角色**，`failed`/`paused`/`running`
+  仍画各自的图形。关键词表 15 个键、顺序即优先级。CDP 实测：三个内置角色 +
+  自定义「任务规划 Agent」各得其图（`file-search` / `chart-line` / `file-text` / `list-checks`），
+  图标在 34px 方块里居中偏差 **dx = dy = 0**，`running` 节点让位给转圈（`spin`）。
+  顺带发现并修好 `rendercheck/preview.tsx` 的一个真 bug：`file://` 下 Windows 盘符混进
+  `pathname`（`/C:/api/v1/agents`），种子里**一条都命中不了**，预览页整页空数据 ——
+  而「双击打开」正是它的既定用法。`npm run build` 通过（CSS 86.25 kB / JS 424.97 kB）；
+  `config-smoke` **77/77**（69 → 77）、`workspace-smoke` **154/154**（151 → 154）；
+  前端镜像已重建。详见 `doc/testing.md` §4.13、ADR-029。
+- 注意事项：数据库读取用例使用 SQLite 内存表与注入目录数据，MCP 用例走内存协议往返而非
+  跨进程 stdio，因此不代表真实 PostgreSQL、真实 MCP Server 或浏览器端到端验收。
+  E-04/E-05 的 Web 侧与部署脚本已在本轮补上实跑证据（见上两条），
+  **依赖模型的链路已于 2026-09-15 用 `gpt-5.5` 补跑通过**（同见上两条），
+  **浏览器端渲染仍是人工核对项**（前端门禁为类型检查 + 构建，未引入浏览器自动化）；
+  全量 `uv run pytest` 隐含需要一个可达的 PostgreSQL 与 Redis，且**在 Provider 覆盖
+  写库后会因测试隔离缺口转红**（见上一条）。
+
 ### 范围说明
 
 - D3-D4 不含动态并行分派、依赖 DAG 与人工介入（HITL），后续版本单独评估。
+
+### 后续演进：动态编排已落地（2026-09-17）
+
+「按任务动态分配 Agent」已从文档变成代码，**并列新增、默认关闭**（ADR-019）：
+
+| 项 | 状态 |
+| --- | --- |
+| 规划节点（LLM 出计划 + 非法计划整份回退固定三步） | 已落地 `app/orchestration/dynamic_graph.py` |
+| 按依赖就绪度调度、失败只连坐下游（含传递闭包） | 已落地 |
+| Dapr 侧规划活动 + 按步骤拆子 Workflow（`{wf}:dyn:{step_id}`） | 已落地 `app/workflows/dynamic.py` |
+| 模式开关 `AGENT_ORCHESTRATION_MODE` + 单次请求覆盖（§4.4） | 已落地 |
+| 波内并行（fan-out / fan-in）、结果聚合 | **未做**，属档 3 |
+| 反思循环、记忆注入、HITL 审批 | **未做**，属档 3 |
+| 动态 vs 静态的评测数据（完成率 / 时延 / Token / 净收益） | **首版已产出**（`scripts/orchestration_ab.py` → `doc/evals/orchestration-ab.md`），仍是单次采样、4 个任务的小样本；完整评测集属档 3 |
+
+档 3（真·多智能体自主协作）的目标形态、需动的模块与边界、前置条件与不建议现在做的事，
+见 `doc/orchestration.md` §3。一句话概括优先级：**先有评测集，再谈并行与反思**——
+没有「动态相对静态的净收益」这组数，后面每一层都是在猜。
+
+顺带落地的一项可观测性缺口：「代码执行沙箱在部署环境不可用」此前只能翻容器日志，
+现在有只读的 `GET /api/v1/config/sandbox`（§5.15）与「工具与配置 → 执行边界」分区
+（ADR-020）。**沙箱本身也已在部署里真正可用**（ADR-023）：backend 挂上宿主机套接字、
+`SANDBOX_IMAGE` 指到本项目自建镜像；实机验收结果见 ADR-023 的「影响」一节。
+
+### 后续演进：多模态附件与欢迎区引导卡（2026-09-17，成员 D）
+
+用户提出两点：「三个预设卡片改成能体现平台意图识别与动态调度的内容」、「聊天框要能引入多模态
+文件，便于图片理解与文档理解」。两点分别落地为 ADR-022 与 ADR-021；
+
+同一天的第二轮把两条「未做」补掉了（ADR-023 / ADR-024）：
+
+| 项 | 状态 |
+| --- | --- |
+| 附件登记 → 抽取 → 只在根步骤注入（`app/attachments/`、`attachments` 表、§5.16） | 已落地 |
+| 附件类型白名单与三层限额，前后端同一口径 | 已落地 |
+| 图片走 `image_url` content block，文本与文档内联进提示词 | 已落地 |
+| 「只发一张截图、不打字」的契约支持（`content` 解除 `min_length`） | 已落地 |
+| 前端：选文件即上传、拖拽、粘贴收图、chip 三态、气泡附件条目 | 已落地 |
+| 欢迎区三张卡改为「任务原型」，点卡同时切「自动编排」 | 已落地（ADR-022） |
+| 沙箱在部署环境真正可用（挂套接字 + `cap_drop=ALL` + 遮住 `/app` + 精确的不可用原因） | 已落地（ADR-023） |
+| 「已发送文档的原件下载」 | 已落地（ADR-024：原件一律留档 + `has_original`） |
+| 附件的真实后端联调（重建镜像 + 真模型全链路） | 已落地：静态与动态两条链路各跑通一次 |
+| 图片理解接真实视觉模型的回归 | 已落地：模型读截图答出「执行边界 / docker 不可用」 |
+| **让 Agent 自己读文件** | 已落地（ADR-025）：会话级只读工具 `list_session_files` / `read_session_file`，**不放宽沙箱策略、不挂卷** |
+| 「Agent 沙箱里的代码读宿主文件」 | **仍未做**，且是**刻意不做**：沙箱已持宿主 Docker 控制权，再挂卷是风险叠加 |
+
+这一轮把「模型能看见你传的文件」这条通路打通了，但它与「Agent 能自己去读文件」是两条不同的
+路：前者不需要沙箱，后者最后一轮由 ADR-025 用**读附件表**的会话级工具补上——
+按需读回本次会话里的任意一份附件，不改沙箱策略，也不给沙箱挂任何宿主目录。
+
+### 后续演进：把「未做」逐条做成「有数」（2026-09-17，成员 D 收尾）
+
+上一轮末尾登记了四条「仍未做」。这一轮不再新增功能面，只把这几条**从「没有证据」变成
+「有证据」**，外加修一条既有低效。完整命令、数字与失败边界见 `doc/testing.md` §4.5。
+
+| 上一轮的状态 | 本轮结果 |
+| --- | --- |
+| PDF 只有手工拼的字节样本 | `tests/fixtures/attachments/` 加了 6 份**真实库产出**的文件（fpdf2 / python-docx / openpyxl），并由 U-14 逐份断言。能力上也补了 PDF 的 **`/ToUnicode` 解码**：内嵌子集字体的正文现在读得出来 |
+| CID 字体 PDF 一律判 failed | 单字体子集**已能读出**；**两套字体码冲突时仍然拒绝**——按「能解就用」会产出通顺但完全错误的句子，比读不出来更糟 |
+| 视觉能力只证明通路通 | `scripts/vision_eval.py`：10 个答案唯一的用例走真实链路，**10/10 通过**，报告 `doc/evals/vision.md` |
+| Agent 无法自己读文件 | ADR-025：会话级只读工具按需读回附件。**沙箱策略与挂载一个字节没动**，第 3 条能力（沙箱代码读宿主文件）仍是刻意不做 |
+| `list_attachments_for_messages` 白读 `data` 列 | 改为显式列元信息 + 库侧 `data IS NOT NULL`，U-16 编译语句钉住 |
+| 动态编排净收益无度量 | `scripts/orchestration_ab.py` + `doc/evals/orchestration-ab.md`：成本（token / 调用次数）与产出（步骤数 / 必备内容命中）一起量 |
+
+顺带量出一个**必须知道的环境事实**：本机网关在紧接着上一次请求结束就发下一次时必然失败
+（500 `do_request_failed`），隔 6 秒再发就成功，**新建客户端也一样**——是网关侧节流，
+不是我们的连接复用。第一次跑批因此 8 个组合全灭，且失败形态是「静态必在第 2 步、动态必在
+第 1 步失败」，看起来像某一步有 bug。两个评测脚本现在都用「相邻调用强制间隔 + 只对报错
+重试」处理它，并把**等待时间与模型纯耗时分开记**。
+
+### 后续演进：MCP 注册表接入编排层（2026-09-19，成员 D）
+
+上一轮结束时，全仓只剩一处「文档承诺了、界面展示了、功能却没接上」：配置页允许登记外部
+MCP Server 并点「发现」，`mcp_server_registry` 表与 §5.11 目录都齐了，但**编排层从不读那张
+表**，Agent 永远只有内置的四个工具。这一轮把它接上（[ADR-026](decisions/026-registry-servers-in-orchestration.md)）。
+
+| 项目 | 结果 |
+| --- | --- |
+| 登记并「发现」的 Server 对 Agent 无效 | `RegistryServersToolRegistry` 把启用 Server 的**已发现**工具合成进工具集；重名时内置优先，`tool_options.disabled` 真生效 |
+| 目录从哪来 | 取 `discovered` 缓存，**不重新握手**——与 §5.11「目录是配置的函数」同一条语义，因此列工具不产生任何超时 |
+| 配置改动何时生效 | 配置面（增删改 / 发现 / 列配置）主动刷新进程内快照，**不需要重启进程** |
+| `allowAutoExecution` | **仍然不消费**：它要表达的是「调用前需要人工确认」，而 HITL 还没做。硬解释成「不暴露给模型」会让用户以为自己设的是审批——不给假开关 |
+
+**实现过程中被实测打回来一版**，记在这里因为它是个通用教训：第一版让 `list_tools()`
+每次现读 `mcp_server_registry`。存储正常时看不出问题；本机 Docker Desktop 停掉之后，
+到 `5433` 的失败形态是 `TimeoutError`（包被静默丢弃）而不是 `ConnectionRefused`，
+于是**每次**工具枚举都卡满一个 TCP 超时——95 个用例从「几十秒」变成 15 分钟跑不完。
+「读不到配置」的正确含义是「没有额外工具」，不是「整条流水线停摆」。所以改成
+**进程内快照 + 配置面刷新 + 失败不重试**，并给单元测试加了对应的隔离
+（`memory_mcp_registry`，与既有的 `memory_redis` 同一条约定：单测不连真实 PostgreSQL）。
+
+**本轮验证边界**：Docker Desktop 已停（PostgreSQL / Redis / 网关全不可达），所以**全量回归
+未跑**，依赖真实 PG 的 `tests/unit/test_mcp_registry.py`（Server CRUD，正是本轮改到的对象）
+**未验证**。13 例新增用例与 95 例相关回归（不依赖存储）全绿，详情见 `doc/testing.md` §4.6。
+
+### 后续演进：扫描版 PDF 走页面图像，不引 OCR（2026-09-20，成员 D）
+
+上一轮结束时，附件链路还剩一个真实的洞：**抽不出正文的 PDF（扫描件、字体子集码冲突）
+对模型是零内容**——字节在库里、文件名在清单里、气泡上挂着那个附件，但它对回答毫无贡献。
+待办清单里那条叫「扫描件 OCR」。这一轮的回答是：**不做 OCR，把页面渲成图交给视觉模型**
+（[ADR-027](decisions/027-scanned-pdf-page-images.md)）。
+
+| 上一轮的状态 | 本轮结果 |
+| --- | --- |
+| 扫描件 / 码冲突 PDF 一律 `failed`，模型看不到内容 | 渲成页面 PNG 走**已经付过成本的** `image_url` 通路；`status` 变 `ready` + 一句降级说明，前端把这句说明显示出来 |
+| 「不做 OCR」是范围选择 | 补上**技术理由**：OCR 识别错一个字产出的是一句通顺但错误的话（本项目在字体码冲突上已经因为同一个理由拒绝过一次）；版面（表格线、印章、勾选）在纯文本输出里会丢 |
+| 渲染器怎么选 | pypdfium2（BSD-3 / Apache-2.0，wheel 自带 pdfium，直接从字节渲染不落临时文件）；**PyMuPDF 是 AGPL，不引** |
+| 上限口径 | 5 页 / 单页 1.2 MB / 合计 4 MB / 长边 2000px / 1.7 倍（≈122 dpi，对齐视觉模型的输入分辨率）。超限**丢页并如实报告**；不拼长图——拼起来每页只剩约 300px 高，文字全糊 |
+| 新依赖 | 只加一个：**不引 Pillow、不依赖 numpy**（后者只是传递依赖，写进去就会"本地能跑、镜像里炸"）。pdfium 给的是裸 RGB 缓冲，PNG 容器用标准库拼 |
+
+两份原本读不出正文的真实夹具（`scanned-invoice.pdf`、`two-font-heading.pdf`）渲出来的图
+**肉眼完全可读**。后者尤其能说明问题：标题 `Two Font Heading` 与正文
+`The body uses a second embedded font subset.` 都清清楚楚，而文本通路出于正确性**刻意**不给
+——渲染不是 OCR 的降级品，它是另一条独立通路。
+
+**本轮验证边界**：Docker Desktop 仍未启动 → 全量回归仍未跑（同上一轮）。已跑的四组：
+附件与编排相关 **173 例**、附件接口契约 **10 例**、前端 `npm run build` 与
+`workspace-smoke` **80/80**。**backend 镜像未重建**，pypdfium2 要重建后才进容器。
+详情见 `doc/testing.md` §4.7。
+
+### 后续演进：多智能体拓扑支持面盘点，与画布并行能力的可验证化（2026-09-21，成员 D）
+
+评审时对着 LangGraph 官方那六种多智能体拓扑图问「能不能智能识别并编排各种架构」。
+本轮的答复是**把边界写清楚**（[ADR-030](decisions/030-multi-agent-topology-support.md)），
+并把画布的并行能力补成**可验证**的——这一点之前既没有测试守，预览页也看不到。
+
+| 六种拓扑 | 现状 | 说明 |
+| --- | --- | --- |
+| Single Agent | **已支持** | `app/orchestration/graph.py` |
+| Custom（DAG 子集） | **已支持** | planner 产出的依赖 DAG：同波并行、跨波串行 |
+| 静态三步流水线 | **已支持** | Custom 的退化情形（`pipeline.py`） |
+| Supervisor（监督者） | **半套** | 只有开头的「一次性规划」，没有 handoff 与二次决策 |
+| Hierarchical / Network / Agent as tools | **未实现** → 档 3 | 需要第二层 / 运行期改图 / Agent 互调 |
+| 反思回路 / HITL | **未实现** → 档 3 | 全仓 `reflect\|revision\|评审` 零命中；`pause` 是整实例暂停 |
+
+**本轮交付**：
+
+- `workspace-smoke` 新增「扇出 → 并行 → 汇聚」三波形状断言（154 → **159**）。画布**没有**
+  「串行节点」的专有分支这件事，从此由断言守着；数据形状与后端
+  `dynamic_checkpoint_summary` 逐字段对齐（`id` / `role` / `depends_on` / `status`）；
+- 预览页新增一条**动态编排对话**（`preview_seed.py` 的 `DYNAMIC_PLAN` +
+  `build-preview.py` 的三条路由，路由 42 → **45**）：切到「对话 3」即可看到「并行协作区」，
+  不需要起后端、不需要真实模型；
+- 预览与后端同口径：动态链路 `/stages` 仍是 `not_integrated`（`doc/api.md` §5.17），
+  所以动态画布**形状齐、详情空**——不把「未集成」显示成「没跑」。
+
+**仍未做**（本轮明确不动，见 `doc/orchestration.md` §3）：执行层并行（属 A，前置是
+`results` 并发安全合并）、前端编排模式开关（默认 `static`，`app/config.py`）、
+Supervisor 的 handoff 与二次规划（属 A）。
+
+**验证边界**：改动集中在 `frontend/rendercheck/`，已跑 `workspace-smoke` **159/159**、
+`config-smoke` 与 `npm run build`；动态并行画布用无头 Chrome 按真实组件 + 真实样式实渲截图确认。
+详情见 `doc/testing.md` §4.14。
+

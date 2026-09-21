@@ -3,6 +3,7 @@ import type {
   AgentConfigList,
   AgentConfigUpdate,
   AgentRegistryCreate,
+  Attachment,
   DataPage,
   McpCompactToolList,
   McpDiscovery,
@@ -20,6 +21,7 @@ import type {
   ModelRegistryCreate,
   ModelRegistryList,
   ModelRegistryUpdate,
+  OrchestrationMode,
   Provider,
   ProviderConfig,
   ProviderConfigUpdate,
@@ -29,11 +31,13 @@ import type {
   ProviderRegistryDetail,
   ProviderRegistryList,
   ProviderRegistryUpdate,
+  SandboxStatus,
   Session,
   SessionSummary,
   Tool,
   ToolCall,
   Workflow,
+  WorkflowStageTrace,
 } from "../types/api";
 
 /** 带 HTTP 状态与错误码的接口错误，便于区分 404（未登记）/ 409（重复）/ 422（取值）。 */
@@ -142,14 +146,52 @@ export const api = {
     ),
   getToolCalls: (id: string, page = 1) =>
     json<DataPage<ToolCall>>(`/api/v1/workflows/${encodeURIComponent(id)}/tool-calls?page=${page}&page_size=20`),
+  /**
+   * 逐阶段执行轨迹（`doc/api.md` §5.17）：执行台卡片弹窗的数据源。
+   *
+   * 与工具调用链路的区别：那条是「整个任务调了哪些工具」，这条是「**哪个 Agent**
+   * 收到什么、调了什么、产出了什么」。两者不互相替代。
+   */
+  getWorkflowStages: (id: string) =>
+    json<WorkflowStageTrace>(`/api/v1/workflows/${encodeURIComponent(id)}/stages`),
+  /**
+   * 会话里每一次对话各自跑出的协作工作流（`doc/api.md` §5.18）。
+   *
+   * **升序**返回，编号即下标 + 1，与历史列表里的「任务 N」同口径。全屏协作画布靠它
+   * 列出「对话 1 / 2 / 3」并回看某一次具体是怎么协作的。
+   */
+  getSessionWorkflows: (id: string) =>
+    json<{ items: Workflow[]; total: number }>(
+      `/api/v1/sessions/${encodeURIComponent(id)}/workflows`,
+    ),
   getAgent: (id: string) => json<Agent>(`/api/v1/agents/${id}`),
   getMessages: async (id: string) =>
     (await json<{ items: Message[] }>(`/api/v1/sessions/${id}/messages?page=1&page_size=100`)).items,
-  sendMessage: (id: string, content: string) =>
+  sendMessage: (
+    id: string,
+    content: string,
+    options: { attachmentIds?: readonly string[]; orchestrationMode?: OrchestrationMode } = {},
+  ) =>
     json<MessageAccepted>(`/api/v1/sessions/${id}/messages`, {
       method: "POST",
-      body: JSON.stringify({ content }),
+      body: JSON.stringify({
+        content,
+        attachment_ids: options.attachmentIds ?? [],
+        // 省略而不是传 null：省略代表「用服务端配置」，这是与后端约定的两种不同语义。
+        ...(options.orchestrationMode ? { orchestration_mode: options.orchestrationMode } : {}),
+      }),
     }),
+
+  /* ---------------------------------------------------------------------- */
+  /* §5.16 附件（ADR-021）                                                    */
+  /* ---------------------------------------------------------------------- */
+
+  uploadAttachment: (name: string, mime: string, dataBase64: string) =>
+    json<Attachment>("/api/v1/attachments", body({ name, mime, data_base64: dataBase64 })),
+  deleteAttachment: (id: string) =>
+    noContent(`/api/v1/attachments/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  /** 消息气泡里的图片/下载链接直接指这个地址，不再走 client 把字节搬进内存。 */
+  attachmentContentUrl: (id: string) => `/api/v1/attachments/${encodeURIComponent(id)}/content`,
   getWorkflow: (id: string) => json<Workflow>(`/api/v1/workflows/${id}`),
   pauseSession: (id: string) =>
     json<{ session: Session; workflow: Workflow | null }>(`/api/v1/sessions/${id}/pause`, { method: "POST" }),
@@ -172,6 +214,12 @@ export const api = {
   /* ---------------------------------------------------------------------- */
 
   getProviderPresets: () => json<ProviderPresetCatalog>("/api/v1/config/provider-presets"),
+
+  /* ---------------------------------------------------------------------- */
+  /* §5.15 执行边界（沙箱状态，只读；无写接口）                               */
+  /* ---------------------------------------------------------------------- */
+
+  getSandboxStatus: () => json<SandboxStatus>("/api/v1/config/sandbox"),
 
   /* ---------------------------------------------------------------------- */
   /* §5.9 Provider 注册表                                                    */

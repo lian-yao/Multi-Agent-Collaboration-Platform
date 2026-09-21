@@ -29,6 +29,7 @@ from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
 
 from app.agents.roles import RoleId, get_role
+from app.attachments import AttachmentPayload, build_human_content
 from app.config import AgentSettings, get_settings
 from app.memory import SessionMessage
 from app.observability.instrumentation import observed_stage
@@ -103,6 +104,16 @@ def role_for_stage(stage: PipelineStage | str) -> RoleId:
 def pipeline_roles() -> tuple[RoleId, ...]:
     """按流水线顺序返回固定团队的三个角色 id。"""
     return tuple(role_for_stage(stage) for stage in PIPELINE_STEPS)
+
+
+def _stage_label(stage: PipelineStage | str) -> str:
+    """把阶段归一化成字符串标签：静态链路传 `PipelineStage`，动态链路传步骤 id。
+
+    两者在观测字段（日志 / 指标 / 调用 ID 派生）里都是纯文本，这里统一取值，
+    避免调用方各自判断「这个 stage 是枚举还是字符串」。
+    """
+
+    return stage.value if isinstance(stage, PipelineStage) else stage
 
 
 def graph_node_order() -> tuple[str, ...]:
@@ -203,14 +214,15 @@ def _invoke_role(
     llm: BaseChatModel,
     caller: ToolCaller | None,
     *,
-    stage: PipelineStage,
+    stage: PipelineStage | str,
     role: RoleId,
 ) -> Any:
     """执行角色节点：接入注册表时按模型请求调用工具，否则单次调用模型。"""
 
+    stage_label = _stage_label(stage)
     if caller is None or not caller.has_tools():
         return _ensure_text_response(
-            llm, messages, llm.invoke(messages), stage=stage, role=role
+            llm, messages, llm.invoke(messages), stage=stage_label, role=role
         )
 
     try:
@@ -218,7 +230,7 @@ def _invoke_role(
     except (AttributeError, NotImplementedError):
         # 模型不支持工具调用时退回普通对话，不阻断流水线。
         return _ensure_text_response(
-            llm, messages, llm.invoke(messages), stage=stage, role=role
+            llm, messages, llm.invoke(messages), stage=stage_label, role=role
         )
 
     response = model.invoke(messages)
@@ -248,12 +260,12 @@ def _invoke_role(
             logger,
             "stage.tool_iteration_limit",
             level=logging.WARNING,
-            stage=stage.value,
+            stage=stage_label,
             role=role.value,
             iterations=TOOL_CALL_MAX_ITERATIONS,
             pending_tool_calls=len(pending),
         )
-    return _ensure_text_response(model, messages, response, stage=stage, role=role)
+    return _ensure_text_response(model, messages, response, stage=stage_label, role=role)
 
 
 def _ensure_text_response(
@@ -261,7 +273,7 @@ def _ensure_text_response(
     messages: list[Any],
     response: Any,
     *,
-    stage: PipelineStage,
+    stage: str,
     role: RoleId,
 ) -> Any:
     """保证阶段有文字产出：空输出补一次文字提示，仍为空则告警并继续（F-07）。
@@ -279,7 +291,7 @@ def _ensure_text_response(
             logger,
             "stage.empty_content",
             level=logging.WARNING,
-            stage=stage.value,
+            stage=stage,
             role=role.value,
             attempt=attempt,
             action="retry",
@@ -292,7 +304,7 @@ def _ensure_text_response(
         logger,
         "stage.empty_content",
         level=logging.WARNING,
-        stage=stage.value,
+        stage=stage,
         role=role.value,
         attempt=MAX_EMPTY_CONTENT_RETRIES,
         action="continue_with_empty",
@@ -308,12 +320,17 @@ def _run_role_stage(
     caller: ToolCaller | None = None,
     workflow_id: str | None = None,
     history: Sequence[SessionMessage] = (),
+    attachments: Sequence[AttachmentPayload] = (),
 ) -> dict[str, Any]:
     role = role_for_stage(stage)
     definition = get_role(role)
+    prompt = _role_input(role, task, previous, history)
+    # 附件只进「拿到原始任务」的那一步（`previous is None`）：collector。
+    # 下游节点读的是上游正文，再塞一遍附件等于让同一张图在链路上重复计费。
+    content = build_human_content(prompt, attachments if previous is None else ())
     messages = [
         SystemMessage(content=definition.system_prompt),
-        HumanMessage(content=_role_input(role, task, previous, history)),
+        HumanMessage(content=content),
     ]
     discovered = caller.available() if caller is not None else ()
     log_event(
@@ -371,6 +388,7 @@ def run_role_stage(
     tool_scope: str | None = None,
     workflow_id: str | None = None,
     history: Sequence[SessionMessage] = (),
+    attachments: Sequence[AttachmentPayload] = (),
 ) -> dict[str, Any]:
     """调用指定阶段对应角色的模型，返回 Workflow 阶段活动使用的载荷。
 
@@ -386,6 +404,10 @@ def run_role_stage(
 
     ``history`` 是本次执行之前同一会话的消息（不含本轮），由调用方从会话记忆读出
     （`app/workflows/pipeline.py::_session_history`），会渲染到提示词开头。
+
+    ``attachments`` 是随本条消息上传的附件（ADR-021），只会注入到没有上游的阶段
+    （静态链路的 collect）；图片转成 ``image_url`` 内容块，**需要所选模型支持视觉输入**，
+    否则批次会在模型侧失败——这是模型能力问题，不是附件链路问题。
     """
 
     resolved = PipelineStage(stage) if isinstance(stage, str) else stage
@@ -406,7 +428,38 @@ def run_role_stage(
         caller,
         workflow_id=workflow_id,
         history=history,
+        attachments=attachments,
     )
+
+
+def content_with_tools(content: str | list[Any]) -> str:
+    """把 ``AIMessage.content`` 归一化为纯文本。
+
+    公开别名，供 ``app.orchestration.dynamic_graph`` 复用同一套 content block 归一化，
+    避免动态图另写一份（两份实现迟早会在新的 block 类型上跑偏）。
+    """
+
+    return _content_text(content)
+
+
+def invoke_role_messages(
+    messages: list[Any],
+    llm: BaseChatModel,
+    caller: ToolCaller | None = None,
+    *,
+    stage: PipelineStage | str = PipelineStage.COLLECT,
+    role: RoleId = RoleId.COLLECTOR,
+) -> str:
+    """公开的单次角色调用入口：执行 ReAct 工具回填循环并返回正文。
+
+    静态图经由 ``_run_role_stage`` 走同一实现（含观测与日志）；动态图只需要
+    「给一段消息、拿回正文」，因此这里暴露一个不含阶段语义的薄封装。
+
+    ``stage`` / ``role`` 用于空输出兜底与工具调用观测的字段；动态图传步骤 id
+    （如 ``s1``）与角色即可，默认值只在无观测诉求的调用里使用。
+    """
+
+    return _content_text(_invoke_role(messages, llm, caller, stage=stage, role=role).content)
 
 
 def _state_update(state: PipelineState) -> dict[str, Any]:

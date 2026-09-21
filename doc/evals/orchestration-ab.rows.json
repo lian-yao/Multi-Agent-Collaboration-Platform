@@ -1,0 +1,196 @@
+{
+  "meta": {
+    "model": "gpt-5.5",
+    "base_url": "http://localhost:3000/v1",
+    "repeat": 1,
+    "min_interval": 6.0,
+    "recorded_at": "2026-09-18T00:20:27+08:00",
+    "note": "首版跑批（2026-09-17/18）时脚本还没有 --rows-out，这份 JSON 是按那次 stdout 打印的 8 行逐字段誊写的（含 wall/model/wait/steps/calls/tokens/chars/quality/plan_source），不是脚本直接落的盘。之后重跑会由 --rows-out 自动生成。 指标名那次只打印了并集，因此每行都填这份并集（逐行采样名未被记录）。"
+  },
+  "rows": [
+    {
+      "task": "single_question",
+      "mode": "static",
+      "seconds": 132.37,
+      "model_seconds": 119.8,
+      "throttle_wait": 12.0,
+      "steps": 3,
+      "model_calls": 3,
+      "input_tokens": 3004,
+      "output_tokens": 3076,
+      "output_chars": 1596,
+      "plan_source": "fixed",
+      "error": null,
+      "retried": 0,
+      "quality": true,
+      "metric_names": [
+        "input_tokens",
+        "output_tokens",
+        "stage_duration_ms",
+        "stage_runs",
+        "total_tokens"
+      ]
+    },
+    {
+      "task": "single_question",
+      "mode": "dynamic",
+      "seconds": 41.95,
+      "model_seconds": 35.93,
+      "throttle_wait": 6.0,
+      "steps": 1,
+      "model_calls": 2,
+      "input_tokens": 1265,
+      "output_tokens": 422,
+      "output_chars": 81,
+      "plan_source": "llm",
+      "error": null,
+      "retried": 0,
+      "quality": true,
+      "metric_names": [
+        "input_tokens",
+        "output_tokens",
+        "stage_duration_ms",
+        "stage_runs",
+        "total_tokens"
+      ]
+    },
+    {
+      "task": "collect_then_summarize",
+      "mode": "static",
+      "seconds": 80.45,
+      "model_seconds": 68.45,
+      "throttle_wait": 12.0,
+      "steps": 3,
+      "model_calls": 3,
+      "input_tokens": 2762,
+      "output_tokens": 2761,
+      "output_chars": 1805,
+      "plan_source": "fixed",
+      "error": null,
+      "retried": 0,
+      "quality": true,
+      "metric_names": [
+        "input_tokens",
+        "output_tokens",
+        "stage_duration_ms",
+        "stage_runs",
+        "total_tokens"
+      ]
+    },
+    {
+      "task": "collect_then_summarize",
+      "mode": "dynamic",
+      "seconds": 68.57,
+      "model_seconds": 62.56,
+      "throttle_wait": 6.0,
+      "steps": 1,
+      "model_calls": 2,
+      "input_tokens": 1392,
+      "output_tokens": 1304,
+      "output_chars": 403,
+      "plan_source": "llm",
+      "error": null,
+      "retried": 0,
+      "quality": true,
+      "metric_names": [
+        "input_tokens",
+        "output_tokens",
+        "stage_duration_ms",
+        "stage_runs",
+        "total_tokens"
+      ]
+    },
+    {
+      "task": "two_independent_sources",
+      "mode": "static",
+      "seconds": 164.7,
+      "model_seconds": 152.69,
+      "throttle_wait": 11.99,
+      "steps": 3,
+      "model_calls": 3,
+      "input_tokens": 10206,
+      "output_tokens": 6207,
+      "output_chars": 2610,
+      "plan_source": "fixed",
+      "error": null,
+      "retried": 0,
+      "quality": true,
+      "metric_names": [
+        "input_tokens",
+        "output_tokens",
+        "stage_duration_ms",
+        "stage_runs",
+        "total_tokens"
+      ]
+    },
+    {
+      "task": "two_independent_sources",
+      "mode": "dynamic",
+      "seconds": 227.73,
+      "model_seconds": 203.72,
+      "throttle_wait": 23.99,
+      "steps": 4,
+      "model_calls": 5,
+      "input_tokens": 32982,
+      "output_tokens": 10226,
+      "output_chars": 736,
+      "plan_source": "llm",
+      "error": null,
+      "retried": 0,
+      "quality": true,
+      "metric_names": [
+        "input_tokens",
+        "output_tokens",
+        "stage_duration_ms",
+        "stage_runs",
+        "total_tokens"
+      ]
+    },
+    {
+      "task": "analysis_only",
+      "mode": "static",
+      "seconds": 139.29,
+      "model_seconds": 127.28,
+      "throttle_wait": 12.0,
+      "steps": 3,
+      "model_calls": 3,
+      "input_tokens": 18606,
+      "output_tokens": 6826,
+      "output_chars": 3697,
+      "plan_source": "fixed",
+      "error": null,
+      "retried": 0,
+      "quality": true,
+      "metric_names": [
+        "input_tokens",
+        "output_tokens",
+        "stage_duration_ms",
+        "stage_runs",
+        "total_tokens"
+      ]
+    },
+    {
+      "task": "analysis_only",
+      "mode": "dynamic",
+      "seconds": 297.29,
+      "model_seconds": 279.28,
+      "throttle_wait": 17.99,
+      "steps": 3,
+      "model_calls": 4,
+      "input_tokens": 23885,
+      "output_tokens": 11838,
+      "output_chars": 6431,
+      "plan_source": "llm",
+      "error": null,
+      "retried": 0,
+      "quality": true,
+      "metric_names": [
+        "input_tokens",
+        "output_tokens",
+        "stage_duration_ms",
+        "stage_runs",
+        "total_tokens"
+      ]
+    }
+  ]
+}

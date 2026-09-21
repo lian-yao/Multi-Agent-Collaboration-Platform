@@ -8,196 +8,505 @@
  */
 
 /* -------------------------------------------------------------------------- */
-/* 协作链路：波内并行、波间串行                                                 */
+/* 协作画布：节点是圆点，连线是贝塞尔箭头                                        */
+/*                                                                             */
+/* 画法照 Jasper-zh/Multi-Agent-Playground 的 `GraphViewer.vue`：同一个盒子里   */
+/* 绝对定位的圆节点 + 同尺寸 SVG 边，两端各自退到圆周上。灰虚线 = 要走的边，      */
+/* 蓝实线 = 已经走通的边——进度靠颜色区分，不靠文字说明。                        */
+/*                                                                             */
+/* `overflow: visible`：悬停面板会浮到画布外，这里若裁掉，中间那几行的面板       */
+/* 就永远看不见了（行距 104px 装不下 260px 的面板）。                            */
 /* -------------------------------------------------------------------------- */
 
-.collab-graph {
-  display: grid;
-  min-width: 0;
-}
-
-.collab-wave {
-  display: grid;
-  min-width: 0;
-}
-
-.collab-row {
-  display: grid;
-  gap: 8px;
-  min-width: 0;
-}
-
-.collab-row.parallel {
-  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
-}
-
-/* 波与波之间的串行连接：一条竖线 + 口径标注。 */
-.collab-link {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding-left: 15px;
-}
-
-.collab-link span {
-  width: 1px;
-  height: 16px;
-  background: #cfdde1;
-}
-
-.collab-link small {
+.cv-empty {
+  margin: 0;
   color: var(--cfg-ink-4);
-  font-size: 9.5px;
+  font-size: 10.5px;
+  line-height: 1.6;
 }
 
-.collab-node {
-  display: flex;
-  align-items: center;
-  gap: 9px;
+.cv-canvas {
+  position: relative;
   width: 100%;
-  min-width: 0;
-  padding: 8px 10px;
-  border: 1px solid var(--cfg-line);
-  border-radius: var(--cfg-radius-sm);
+  border: 1px solid var(--cfg-line-faint);
+  border-radius: var(--cfg-radius);
+  background-color: var(--cfg-surface-soft);
+  background-image: radial-gradient(circle, rgba(15, 23, 42, 0.07) 1px, transparent 1px);
+  background-size: 20px 20px;
+}
+
+.cv-canvas.wide { background-size: 26px 26px; }
+
+.cv-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+.cv-svg-base { z-index: 0; }
+
+.cv-edge {
+  fill: none;
+  stroke: #cbd5e1;
+  stroke-width: 1.8;
+  stroke-dasharray: 4 4;
+}
+
+.cv-edge.active {
+  stroke: #3b82f6;
+  stroke-width: 2.4;
+  stroke-dasharray: none;
+}
+
+/* 并行波次的圈定框：并行关系是画出来的，不再写一句「含并行波次」。 */
+.cv-group {
+  position: absolute;
+  z-index: 1;
+  border: 1.5px solid rgba(59, 130, 246, 0.26);
+  border-radius: 22px;
+  background: linear-gradient(180deg, rgba(239, 246, 255, 0.92), rgba(248, 250, 252, 0.94));
+}
+
+.cv-group-head {
+  position: absolute;
+  left: 15px;
+  top: 9px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.cv-group-head b { color: #3f5f86; font-size: 10.5px; font-weight: 700; }
+
+.cv-group-head i {
+  color: #93a8c2;
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* 连线上的工具链胶囊：挂在上游那一段而不是节点里。 */
+.cv-edge-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+}
+
+.cv-edge-slot {
+  position: absolute;
+  pointer-events: auto;
+  transform: translate(-50%, -50%);
+}
+
+.cv-edge-chip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border: 1px solid rgba(59, 130, 246, 0.3);
+  border-radius: 999px;
   background: var(--cfg-surface);
-  color: inherit;
-  font: inherit;
-  text-align: left;
-  transition: border-color var(--cfg-ease), background var(--cfg-ease);
+  color: #3f5f86;
+  font-size: 9.5px;
+  font-weight: 600;
+  white-space: nowrap;
 }
 
-button.collab-node {
-  cursor: pointer;
-}
+.cv-edge-chip:focus-visible { outline: 2px solid var(--cfg-accent); outline-offset: 2px; }
 
-button.collab-node:hover {
-  border-color: var(--cfg-accent-soft);
-  background: var(--cfg-surface-hover);
-}
-
-.collab-node.active {
-  border-color: var(--cfg-accent-soft);
-}
-
-.collab-node.pending {
-  opacity: .68;
-}
-
-.collab-node.running {
-  border-color: #e6d3ac;
-  background: #fffdf8;
-}
-
-.collab-node.completed {
-  border-color: #cfe4d5;
-  background: #fbfefc;
-}
-
-.collab-node.failed {
-  border-color: #e8c7c0;
-  background: #fffbfa;
-}
-
-.collab-node-mark {
+.cv-node {
+  position: absolute;
+  z-index: 3;
   display: grid;
   place-items: center;
-  flex: 0 0 auto;
-  width: 22px;
-  height: 22px;
-  border-radius: 6px;
-  background: #eef4f5;
-  color: #6f8790;
+  border: 2px solid #e2e8f0;
+  border-radius: 999px;
+  background: #fff;
+  color: #8fa3b0;
 }
 
-.collab-node-mark.completed {
-  background: #e8f4ec;
-  color: #478166;
+.cv-node.kind-agent { color: #2563eb; }
+
+.cv-node.visited { border-color: #a8c9f0; }
+
+.cv-node.running {
+  border-color: #2563eb;
+  background: #3b82f6;
+  color: #fff;
 }
 
-.collab-node-mark.running {
-  background: #fdf3e2;
-  color: #c99542;
-}
-
-.collab-node-mark.failed {
-  background: #fbecea;
+.cv-node.failed {
+  border-color: #dfb3ac;
+  background: #fffbfa;
   color: #b4635a;
 }
 
-.collab-node-body {
+/* 悬停时抬到最上层：侧向面板会伸到邻居节点上，不抬上去会被盖住半边。 */
+.cv-node:hover,
+.cv-node:focus-within { z-index: 30; }
+
+.cv-node:focus-visible { outline: 2px solid var(--cfg-accent); outline-offset: 2px; }
+
+.cv-ring {
+  position: absolute;
+  inset: -5px;
+  border: 2px solid rgba(59, 130, 246, 0.55);
+  border-radius: 999px;
+  animation: cv-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes cv-pulse {
+  0%, 100% { opacity: 0.9; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(1.06); }
+}
+
+.cv-dot { width: 9px; height: 9px; border-radius: 999px; background: #94a3b8; }
+.cv-node.visited .cv-dot { background: #7fb1ea; }
+.cv-node.running .cv-dot { background: #fff; }
+
+/* 名字与「模型 · Token」挂在圆下方：圆里只放得下一个图标，字必须出来。
+   必须自带底色——连线是纵向下来的，正好从这两行字中间穿过去；而文字本身不遮光，
+   只靠层级压不住，会看到箭头从笔画缝隙里透出来。 */
+.cv-name,
+.cv-meta {
+  position: absolute;
+  left: 50%;
+  overflow: hidden;
+  max-width: 96px;
+  padding: 1px 5px;
+  border-radius: 6px;
+  background: var(--cfg-surface);
+  text-align: center;
+  text-overflow: ellipsis;
+  transform: translateX(-50%);
+  white-space: nowrap;
+}
+
+.cv-name {
+  top: 100%;
+  margin-top: 5px;
+  color: var(--cfg-ink-2);
+  font-size: 9.5px;
+  font-weight: 600;
+}
+
+.cv-meta {
+  top: 100%;
+  margin-top: 18px;
+  color: var(--cfg-ink-4);
+  font-size: 8.5px;
+}
+
+.cv-canvas.wide .cv-name { max-width: 150px; font-size: 10.5px; }
+.cv-canvas.wide .cv-meta { max-width: 150px; margin-top: 20px; font-size: 9px; }
+
+.cv-expand {
+  position: absolute;
+  z-index: 14;
+  top: 6px;
+  right: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border: 1px solid var(--cfg-line);
+  border-radius: 999px;
+  background: var(--cfg-surface);
+  color: var(--cfg-ink-3);
+  font: inherit;
+  font-size: 9.5px;
+  cursor: pointer;
+  transition: border-color var(--cfg-ease), color var(--cfg-ease);
+}
+
+.cv-expand:hover { border-color: var(--cfg-accent-soft); color: var(--cfg-accent); }
+
+/* -------------------------------------------------------------------------- */
+/* 悬停面板（只在全屏画布）                                                     */
+/*                                                                             */
+/* 用 CSS `:hover` / `:focus-within` 常驻在 DOM 里，不引入 JS hover 状态：       */
+/* 键盘 Tab 能拿到同样的内容，离屏冒烟也能断言这些文本确实渲染了。面板是节点的  */
+/* DOM 后代，视觉上浮到节点外也不影响 `:hover` 的判定（祖先链仍匹配）。          */
+/*                                                                             */
+/* 位置贴节点**侧面**：挂正下方会压住下一段链路，而链路正是要给人看的东西。      */
+/* 中间那 16px 留白算在槽位 padding 里——鼠标从圆滑到面板上时 `:hover` 不会断。   */
+/* -------------------------------------------------------------------------- */
+
+.cv-pop-slot {
+  position: absolute;
+  z-index: 14;
+  transform: translateY(-50%);
+  pointer-events: auto;
+}
+
+.cv-pop-slot.is-right { left: 100%; padding-left: 16px; }
+.cv-pop-slot.is-left { right: 100%; padding-right: 16px; }
+
+.cv-pop {
+  /* 面高上限。声明成变量是为了让专有变体能在**不重复这个数**的前提下再收窄它：
+     内联写 `max-height` 会连同这条上限一起顶掉（本轮踩过：可容高度 532 把 520 覆盖了）。 */
+  --cv-pop-max: 520px;
+  display: none;
+  gap: 0;
+  max-height: var(--cv-pop-max);
+  overflow: auto;
+  padding: 9px 10px;
+  border: 1px solid var(--cfg-line);
+  border-radius: var(--cfg-radius-sm);
+  background: var(--cfg-surface);
+  box-shadow: var(--cfg-shadow);
+  color: var(--cfg-ink-2);
+  font-size: 10px;
+  line-height: 1.55;
+  pointer-events: auto;
+  text-align: left;
+}
+
+.cv-pop-node { width: 380px; }
+
+/* 工具链浮窗与节点浮窗同一套规矩：**贴胶囊侧面**。
+   胶囊钉在画布中线上，向上弹（`bottom:100%`）会正好压住上游那一串节点——实测会把「任务」
+   端子与上游 Agent 一起盖掉。竖直居中于胶囊，面高取「设计上限」与「可容高度
+   `--cv-pop-fit`（内联给）」的较小值，两条约束各归其位。 */
+.cv-pop-edge {
+  position: absolute;
+  top: 50%;
+  width: 340px;
+  max-height: min(var(--cv-pop-max), var(--cv-pop-fit, var(--cv-pop-max)));
+  transform: translateY(-50%);
+}
+
+.cv-pop-edge.is-right { left: calc(100% + 10px); }
+.cv-pop-edge.is-left { right: calc(100% + 10px); }
+
+.cv-node:hover .cv-pop,
+.cv-node:focus-within .cv-pop,
+.cv-edge-chip:hover .cv-pop,
+.cv-edge-chip:focus-within .cv-pop { display: grid; }
+
+.cv-pop-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: -1px 0 7px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--cfg-line-faint);
+}
+
+.cv-pop-head b { color: var(--cfg-ink); font-size: 11px; font-weight: 600; }
+.cv-pop-head span { color: var(--cfg-ink-4); font-size: 9px; }
+
+.cv-pop-block {
   display: grid;
-  flex: 1;
-  gap: 2px;
+  gap: 4px;
   min-width: 0;
 }
 
-.collab-node-body b {
-  overflow: hidden;
-  color: #4d6975;
-  font-size: 11px;
-  font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+.cv-pop-block + .cv-pop-block { margin-top: 8px; }
 
-.collab-node-body small {
-  overflow: hidden;
-  color: var(--cfg-ink-4);
-  font-size: 9px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.collab-legend {
+.cv-pop-block h5 {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  gap: 10px;
-  margin: 12px 0 0;
-  padding-top: 10px;
-  border-top: 1px solid var(--cfg-line-faint);
-  color: #8c9ca2;
-  font-size: 9.5px;
+  gap: 5px;
+  margin: 0;
+  color: var(--cfg-ink-3);
+  font-size: 9px;
+  font-weight: 600;
 }
 
-.collab-legend span {
+.cv-pop-block h5 i {
+  padding: 0 4px;
+  border-radius: 3px;
+  background: #fdf9ef;
+  color: #8a6f31;
+  font-size: 8.5px;
+  font-style: normal;
+}
+
+.cv-pop-block dl { display: grid; gap: 2px; margin: 0; }
+.cv-pop-block dl > div { display: flex; justify-content: space-between; gap: 10px; }
+
+.cv-pop-block dt {
+  flex: 1;
+  overflow: hidden;
+  color: var(--cfg-ink-3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cv-pop-block dd { margin: 0; color: var(--cfg-ink-2); font-weight: 600; }
+.cv-pop-block dl > div.override dt { color: #8a6f31; }
+
+.cv-pop-block pre {
+  overflow: auto;
+  max-height: 130px;
+  margin: 0;
+  padding: 6px 7px;
+  border: 1px solid var(--cfg-line-faint);
+  border-radius: 6px;
+  background: var(--cfg-surface-soft);
+  color: var(--cfg-ink-2);
+  font-size: 9.5px;
+  white-space: pre-wrap;
+}
+
+.cv-pop-block ul {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.cv-pop-block li {
+  display: grid;
+  gap: 2px;
+  padding: 5px 6px;
+  border-radius: 6px;
+  background: var(--cfg-surface-soft);
+}
+
+.cv-pop-block li b { color: var(--cfg-ink); font-size: 10px; }
+.cv-pop-block li span { color: var(--cfg-ink-3); font-size: 9px; }
+.cv-pop-block li.failed { background: #fbecea; }
+.cv-pop-block li em { color: #b4635a; font-size: 9.5px; font-style: normal; }
+
+.cv-pop-note { margin: 0; color: var(--cfg-ink-4); }
+
+/* -------------------------------------------------------------------------- */
+/* 全屏画布                                                                    */
+/*                                                                             */
+/* 用 `position: fixed`：侧栏 `.inspector` 是 `position:absolute; z-index:8` 且  */
+/* `overflow:auto`，fixed 子元素既不受它裁剪、也不受它的层叠上下文限制（祖先没有   */
+/* transform），所以画布能盖住整屏与执行台（后者 z-index:4）。第四个网格行留给    */
+/* 底部那行「当前节点」，画布本体滚它自己，不把这一行顶出屏幕。                   */
+/* -------------------------------------------------------------------------- */
+
+.collab-overlay {
+  position: fixed;
+  z-index: 40;
+  inset: 0;
+  display: grid;
+  grid-template-rows: auto auto 1fr auto;
+  background: #f4f8f9;
+  color: var(--cfg-ink);
+}
+
+.collab-canvas-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--cfg-line);
+  background: var(--cfg-surface);
+}
+
+.collab-canvas-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.collab-canvas-title b { font-size: 13px; font-weight: 600; }
+
+.collab-canvas-title small { color: var(--cfg-ink-4); font-size: 10px; }
+
+/* 图标与文字要落在同一条中线上：`.cfg-quiet` 是块级按钮，而 lucide 的 `svg` 默认
+   `vertical-align: baseline`，图标会比文字高出 2px（实测中线偏差 −2）。侧栏那份
+   `.sidebar-user-menu-head .cfg-quiet` 早就这么修过，这里是同一处对齐。 */
+.collab-canvas-head .cfg-quiet {
   display: inline-flex;
   align-items: center;
   gap: 5px;
 }
 
-.collab-legend i {
-  display: block;
-  width: 7px;
-  height: 7px;
-  border-radius: 2px;
+.collab-conversations {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--cfg-line-faint);
+  background: var(--cfg-surface);
 }
 
-.collab-legend i.done {
-  background: #7fb894;
-}
-
-.collab-legend i.doing {
-  background: #e0b56d;
-}
-
-.collab-legend i.wait {
-  background: #cfd8db;
-}
-
-.collab-legend .collab-mode {
-  margin-left: auto;
-  padding: 2px 6px;
+.collab-conversation {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 9px;
   border: 1px solid var(--cfg-line);
-  border-radius: 5px;
-  color: #6b838f;
+  border-radius: var(--cfg-radius-sm);
+  background: var(--cfg-surface-soft);
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  transition: border-color var(--cfg-ease), background var(--cfg-ease);
 }
 
-.collab-empty {
+.collab-conversation:hover { border-color: var(--cfg-accent-soft); }
+
+.collab-conversation.current {
+  border-color: var(--cfg-accent-soft);
+  background: var(--cfg-surface-hover);
+}
+
+.collab-conversation b { color: var(--cfg-ink); font-size: 10.5px; font-weight: 600; }
+
+.collab-canvas-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow: auto;
+  padding: 16px 20px 20px;
+}
+
+/* 画布外层框：`flex:1` 拿到网格行剩下的高度，画布按这个数把行距摊开。
+   框自己**不裁**——悬停面板要能浮到画布外（中间那几行放不下 280px 的面板）。 */
+.cv-frame {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.cv-task {
+  flex: 0 0 auto;
+  overflow: hidden;
   margin: 0;
-  color: var(--cfg-ink-4);
+  color: var(--cfg-ink-2);
+  font-size: 11.5px;
+  line-height: 1.5;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cv-note { flex: 0 0 auto; margin: 0; color: var(--cfg-ink-3); font-size: 11px; }
+
+.cv-terminal {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 20px;
+  border-top: 1px solid var(--cfg-line-faint);
+  background: var(--cfg-surface);
+  color: var(--cfg-ink-3);
+  font-family: "JetBrains Mono", Consolas, monospace;
   font-size: 10.5px;
-  line-height: 1.6;
+}
+
+.cv-terminal-mode {
+  color: var(--cfg-ink-4);
+  font-family: inherit;
+  letter-spacing: 0.06em;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -332,6 +641,170 @@ button.collab-node:hover {
   color: var(--cfg-ink-4);
   font-size: 10px;
   line-height: 1.7;
+}
+
+/* -------------------------------------------------------------------------- */
+/* 执行轨迹（§5.17）：输入 → 工具调用 → 产出                                    */
+/* -------------------------------------------------------------------------- */
+
+.ws-trace-note {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px dashed var(--cfg-line);
+  border-radius: var(--cfg-radius-sm);
+  background: #f8fbfc;
+  color: var(--cfg-ink-3);
+  font-size: 10.5px;
+  line-height: 1.7;
+}
+
+/* 正文块：等宽 + 保留换行。上限高度交给滚动，页内不出现被压扁的段落。 */
+.ws-trace-block {
+  margin: 0;
+  max-height: 220px;
+  padding: 10px 12px;
+  overflow: auto;
+  border: 1px solid var(--cfg-line-faint);
+  border-radius: var(--cfg-radius-sm);
+  background: #fbfdfe;
+  color: #3f5b67;
+  font-family: Cascadia Mono, Consolas, monospace;
+  font-size: 10.5px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ws-trace-output {
+  border-color: #d9ebe6;
+  background: #f6fbf9;
+}
+
+.ws-trace-count {
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: #eef4f5;
+  color: var(--cfg-ink-4);
+  font-size: 9px;
+  font-weight: 400;
+}
+
+.ws-trace-list {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.ws-trace-step {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--cfg-line-faint);
+  border-radius: var(--cfg-radius-sm);
+  background: #fff;
+}
+
+/* 失败的调用要一眼看出来：它是这条链路里最该被读到的一条。 */
+.ws-trace-step.failed {
+  border-color: #f0d5d5;
+  background: #fdf7f7;
+}
+
+.ws-trace-step-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.ws-trace-step-head b {
+  color: #4d6975;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.ws-trace-chip {
+  margin-left: auto;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: #eef4f5;
+  color: var(--cfg-ink-4);
+  font-size: 9px;
+}
+
+.ws-trace-mark {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: #eef4f5;
+  color: var(--cfg-ink-3);
+}
+
+.ws-trace-mark.green {
+  background: #e8f6f0;
+  color: #2f8f6b;
+}
+
+.ws-trace-mark.rose {
+  background: #fbecec;
+  color: #c0564f;
+}
+
+.ws-trace-mark.amber {
+  background: #fdf3e3;
+  color: #b8842a;
+}
+
+.ws-trace-error {
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: #fbecec;
+  color: #b15550;
+  font-size: 10px;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.ws-trace-io summary {
+  color: var(--cfg-ink-4);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.ws-trace-io dl {
+  display: grid;
+  gap: 6px;
+  margin: 6px 0 0;
+}
+
+.ws-trace-io dt {
+  color: var(--cfg-ink-4);
+  font-size: 9.5px;
+}
+
+.ws-trace-io dd {
+  margin: 2px 0 0;
+}
+
+.ws-trace-io pre {
+  margin: 0;
+  max-height: 140px;
+  padding: 7px 9px;
+  overflow: auto;
+  border-radius: 6px;
+  background: #f6f9fa;
+  color: #43606d;
+  font-family: Cascadia Mono, Consolas, monospace;
+  font-size: 10px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 /* -------------------------------------------------------------------------- */

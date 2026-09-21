@@ -5,3 +5,6 @@ dist/
 rendercheck/ui-preview.html
 rendercheck/.preview-bundle.js
 rendercheck/.preview-bundle.css
+
+# 冒烟用例的 esbuild 打包产物（2 MB，跑一次生成一次，不入库）
+rendercheck/.smoke.cjs

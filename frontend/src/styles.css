@@ -106,6 +106,12 @@ svg {
 .sidebar {
   display:flex;
   flex:0 0 216px;
+  /* 必须显式写 0：`.app-shell` 是 flex 行容器，侧栏是它的 item，而 item 的
+     `min-width:auto` 会把**内容的最小宽度**顶在 `flex-basis` 之上。当前任务标题是
+     `white-space:nowrap`，一旦会话标题很长，侧栏就从 214px 被撑到 1000px 开外
+     （2026-09-21 实测 214 → 1093）。子项自己的 `min-width:0` 救不了这一层——那只
+     影响 flex 分配，不改变容器的 min-content。 */
+  min-width:0;
   flex-direction:column;
   padding:24px 14px 18px;
   color:#b6c7ce;
@@ -700,73 +706,114 @@ svg {
 
 
 
+/* 卡片下方显式写出当前生效的编排模式。
+ * 选择器带 `.welcome` 是为了压过上面的 `.welcome p`（0,1,1），否则
+ * margin/color/font-size 全部落不下来。 */
+.welcome .welcome-note {
+  display:inline-flex;
+  align-items:center;
+  max-width:100%;
+  margin:26px 0 0;
+  padding:7px 14px;
+  border:1px solid #e6eef1;
+  border-radius:13px;
+  background:#f7fbfc;
+  color:#8ba0a8;
+  font-size:11px;
+  line-height:1.6;
+  text-align:center
+}
+
+
+
+/* 欢迎区引导卡（2026-09-16 重做）。
+ * 原先是「图标 + 标题」左对齐的横条，看着像三个功能按钮，也说不出这是什么
+ * 平台。现在改成竖排居中的三段卡：图标 / 标题 / 协作形态标签——标题说的是
+ * 一类任务，标签说的是这类任务通常怎么被拆开执行，卡片之间才形成对照。
+ * 三个色调只是区分任务原型，不承担语义。 */
 .suggestions {
   display:grid;
-  grid-template-columns:repeat(3,minmax(0,1fr));
+  grid-template-columns:repeat(4,minmax(0,1fr));
   gap:12px;
-  margin-top:32px;
+  margin-top:30px;
   width:100%
 }
 
 
 
-.suggestions button {
+.suggestion {
   display:flex;
-  flex-wrap:wrap;
+  flex-direction:column;
   align-items:center;
-  gap:18px;
-  text-align:left;
-  padding:18px 15px;
-  border:1px solid #e1e8eb;
-  border-radius:11px;
+  gap:9px;
+  padding:20px 14px 18px;
+  border:1px solid #e3eaed;
+  border-radius:13px;
   background:#fff;
-  color:#687f89
+  text-align:center
 }
 
 
 
-.suggestions button>svg:first-child {
-  width:100%;
-  object-position:left
+.suggestion-icon {
+  display:grid;
+  place-items:center;
+  width:40px;
+  height:40px;
+  border-radius:11px;
+  background:#eef4f7;
+  color:#4d81a0
 }
 
 
 
-.suggestions button b {
-  font-size:12px;
+.suggestion b {
+  font-size:13px;
   font-weight:500;
-  flex:1
+  color:#3a5966;
+  letter-spacing:-.01em
 }
 
 
 
-.suggestions button>svg:last-child {
-  opacity:.5
+.suggestion-shape {
+  font-size:11px;
+  line-height:1.5;
+  color:#93a5ad
 }
 
 
 
-.suggestions .blue>svg:first-child {
-  color:#5586a1
+.suggestion.blue .suggestion-icon {
+  background:#eaf3f9;
+  color:#4d81a0
 }
 
 
 
-.suggestions .amber>svg:first-child {
-  color:#b8914b
+.suggestion.amber .suggestion-icon {
+  background:#faf2e4;
+  color:#ab8746
 }
 
 
 
-.suggestions .green>svg:first-child {
-  color:#5c9779
+.suggestion.green .suggestion-icon {
+  background:#ebf4ee;
+  color:#508b6c
+}
+
+.suggestion.violet .suggestion-icon {
+  background:#f1edfb;
+  color:#7a63c4
 }
 
 
 
-.suggestions button:hover {
-  background:#f5f9fa;
-  border-color:#aac6d0
+.suggestion:hover {
+  border-color:#b3cdd7;
+  background:#f8fbfc;
+  box-shadow:0 6px 16px #243e490d
 }
 
 
@@ -871,34 +918,135 @@ svg {
 
 
 
-.run-event {
+/* 消息里的附件（ADR-021）。
+ * 图片给可点缩略图（新开页看原图），其余类型只给图标＋一行元信息；
+ * `failed` 的项也照常渲染并写出原因——它本来就没进模型上下文。 */
+.message-attachments {
   display:flex;
-  gap:10px;
-  color:#77919d;
-  margin:8px 0 24px;
-  font-size:12px
+  flex-wrap:wrap;
+  gap:8px;
+  margin:10px 0 0
 }
 
 
 
-.run-event b,
-.run-event span {
-  display:block
+.user .message-attachments {
+  justify-content:flex-end
 }
 
 
 
-.run-event b {
+.message-attachment {
+  display:flex;
+  align-items:center;
+  gap:9px;
+  min-width:0;
+  max-width:260px;
+  padding:7px 11px 7px 8px;
+  border:1px solid #e1eaee;
+  border-radius:10px;
+  background:#f8fbfc
+}
+
+
+
+/* 原件留档后（ADR-024）条目本身是链接：作为 <a> 必须显式继承颜色、去掉下划线，
+ * 否则会退化成默认的蓝字下划线，和卡片样式打架。 */
+a.message-attachment {
+  color:inherit;
+  text-decoration:none
+}
+
+
+
+a.message-attachment:hover {
+  border-color:#aac6d0;
+  background:#f2f8fa
+}
+
+
+
+.message-attachment-thumb {
+  display:grid;
+  place-items:center;
+  flex:0 0 auto;
+  width:34px;
+  height:34px;
+  overflow:hidden;
+  border-radius:7px;
+  background:#e9f2f6;
+  color:#568093
+}
+
+
+
+.message-attachment-thumb img {
+  display:block;
+  width:100%;
+  height:100%;
+  object-fit:cover
+}
+
+
+
+.message-attachment-body {
+  display:grid;
+  gap:1px;
+  min-width:0
+}
+
+
+
+.message-attachment-body b {
+  overflow:hidden;
+  color:#41616e;
+  font-size:11px;
   font-weight:500;
-  color:#4d6e7b;
-  margin-bottom:7px
+  text-overflow:ellipsis;
+  white-space:nowrap
 }
 
 
 
-.run-event span {
-  line-height:1.8
+.message-attachment-body small {
+  color:#93a6ad;
+  font-size:10px
 }
+
+
+
+/* 类型在 `data-kind`（类名留给状态：ready / failed），别写成 `.message-attachment.text`。 */
+.message-attachment[data-kind="text"] .message-attachment-thumb {
+  background:#ebf4ee;
+  color:#4f8c6d
+}
+
+
+
+.message-attachment.failed {
+  border-color:#f0d7d2;
+  background:#fdf7f6
+}
+
+
+
+.message-attachment.failed .message-attachment-thumb {
+  background:#f8e6e2;
+  color:#b4625a
+}
+
+
+
+.message-attachment.failed .message-attachment-body small {
+  color:#b4625a
+}
+
+
+
+/* 原先这里是一行「任务执行中 · 可在下方查看执行状态」的 `.run-event` 文本条。
+ * 它只报进度、不给过程，把「它调了什么工具、拿到了什么」全留在另一块面板里，
+ * 于是过程与结果在时间线上被拆散。现由 `workspace/RunActivity.tsx` 的
+ * `.run-activity` 卡片替代（可展开的逐步 ReAct 轨迹），类名不再使用。 */
 
 
 
@@ -1520,8 +1668,8 @@ svg {
   .suggestions {
     gap:8px
   }
-  .suggestions button {
-    padding:14px 10px
+  .suggestion {
+    padding:16px 10px
   }
   .dock-track {
     gap:10px;
@@ -1638,19 +1786,40 @@ svg {
   .welcome-icon {
     margin-bottom:12px
   }
+  /* 窄屏把三栏卡片摊成三行：三列在手机上每列约 110px，「调查 → 分析 → 总结」
+   * 这种标签会被折成三行，反而更难读。 */
   .suggestions {
-    gap:6px;
+    grid-template-columns:minmax(0,1fr);
+    gap:8px;
     margin-top:22px
   }
-  .suggestions button {
-    padding:12px 8px;
-    gap:14px
+  .suggestion {
+    padding:14px 12px;
+    gap:7px
   }
-  .suggestions button b {
+  .suggestion-icon {
+    width:32px;
+    height:32px
+  }
+  .suggestion b {
+    font-size:12px
+  }
+  .suggestion-shape {
     font-size:10px
   }
-  .suggestions button>svg:last-child {
-    display:none
+  .welcome .welcome-note {
+    margin-top:18px
+  }
+  .suggestions {
+    gap:6px;
+    margin-top:20px
+  }
+  .suggestion {
+    padding:12px 10px;
+    gap:6px
+  }
+  .suggestion-shape {
+    font-size:10px
   }
   .dock-header {
     padding:0 15px;
@@ -1703,9 +1872,16 @@ svg {
   .suggestions {
     margin-top:16px
   }
-  .suggestions button {
-    padding:10px;
+  .suggestion {
+    padding:12px 10px;
     gap:6px
+  }
+  /* 矮屏先丢装饰性内容：图标、协作形态标签、模式说明都让位给输入框。 */
+  .suggestion-shape {
+    display:none
+  }
+  .welcome .welcome-note {
+    display:none
   }
   .conversation-composer {
     margin-bottom:12px
@@ -2410,6 +2586,7 @@ svg {
  * （doc/api.md §3），属于假选择，已移除；架构改为编排层自动决策，不由用户指定。 */
 .composer-hint {
   display:flex;
+  flex:1 1 auto;
   align-items:center;
   gap:8px;
   min-width:0
@@ -2421,6 +2598,237 @@ svg {
   overflow:hidden;
   text-overflow:ellipsis;
   white-space:nowrap
+}
+
+
+
+/* 附件入口（ADR-021）。
+ * 上传是「选完即传」，所以 chip 有三种状态：uploading / ready / failed，
+ * 失败项必须留在输入区里可见（带原因），不能静默丢掉——用户会以为传上了。 */
+.composer-attach {
+  display:inline-flex;
+  flex:0 0 auto;
+  align-items:center;
+  gap:5px;
+  padding:4px 9px 4px 8px;
+  border:1px solid #dbe7eb;
+  border-radius:7px;
+  background:#fff;
+  color:#63808d;
+  font-size:11px
+}
+
+
+
+.composer-attach:hover:not(:disabled) {
+  border-color:#aac6d0;
+  background:#f5f9fa;
+  color:#3f6b7d
+}
+
+
+
+.composer-files {
+  display:flex;
+  flex-wrap:wrap;
+  gap:6px;
+  margin:0 0 9px;
+  padding:0;
+  list-style:none
+}
+
+
+
+.composer-file {
+  display:flex;
+  align-items:center;
+  gap:8px;
+  min-width:0;
+  max-width:230px;
+  padding:6px 8px 6px 9px;
+  border:1px solid #dde8ec;
+  border-radius:9px;
+  background:#f8fbfc
+}
+
+
+
+.composer-file-icon {
+  display:grid;
+  place-items:center;
+  flex:0 0 auto;
+  width:22px;
+  height:22px;
+  border-radius:6px;
+  background:#e9f2f6;
+  color:#568093
+}
+
+
+
+.composer-file-body {
+  display:grid;
+  gap:1px;
+  min-width:0
+}
+
+
+
+.composer-file-body b {
+  overflow:hidden;
+  color:#41616e;
+  font-size:11px;
+  font-weight:500;
+  text-overflow:ellipsis;
+  white-space:nowrap
+}
+
+
+
+.composer-file-body small {
+  overflow:hidden;
+  color:#93a6ad;
+  font-size:10px;
+  text-overflow:ellipsis;
+  white-space:nowrap
+}
+
+
+
+.composer-file-remove {
+  display:grid;
+  place-items:center;
+  flex:0 0 auto;
+  width:18px;
+  height:18px;
+  padding:0;
+  border:0;
+  border-radius:5px;
+  background:transparent;
+  color:#a2b1b7
+}
+
+
+
+.composer-file-remove:hover {
+  background:#e9eff2;
+  color:#5d7d8b
+}
+
+
+
+.composer-file[data-kind="image"] .composer-file-icon {
+  background:#e9f4ee;
+  color:#4f8c6d
+}
+
+
+
+.composer-file.uploading {
+  border-style:dashed
+}
+
+
+
+.composer-file.uploading .composer-file-icon {
+  background:#eef4f6;
+  color:#8fa6b0
+}
+
+
+
+.composer-file.failed {
+  border-color:#f0d7d2;
+  background:#fdf7f6
+}
+
+
+
+.composer-file.failed .composer-file-icon {
+  background:#fae7e3;
+  color:#b4625a
+}
+
+
+
+.composer-file.failed .composer-file-body small {
+  color:#b4625a
+}
+
+
+
+/* 拖拽态：整块输入区给一层反馈，不要只改边框——边框 1px 的深浅差在拖动时看不出来。 */
+.conversation-composer.dragging {
+  border-color:#7fadbe;
+  border-style:dashed;
+  background:#f6fbfc
+}
+
+
+
+.conversation-composer.dragging::after {
+  content:"松开即可添加图片或文档";
+  position:absolute;
+  z-index:3;
+  inset:0;
+  display:grid;
+  place-items:center;
+  border-radius:inherit;
+  background:#f6fbfcf0;
+  color:#4d7e8d;
+  font-size:12px;
+  pointer-events:none
+}
+
+
+
+/* 编排模式切换（ADR-019）。
+ * 这是真的开关：`dynamic` → 规划 Agent 产出计划再执行，`static` → 固定三步。
+ * 分段控件的内层圆角＝外层圆角 − 内边距，两者同心，不画重复描边。 */
+.composer-mode {
+  display:inline-flex;
+  flex:0 0 auto;
+  gap:2px;
+  padding:2px;
+  border:1px solid #e1eaee;
+  border-radius:8px;
+  background:#f4f8fa
+}
+
+
+
+.composer-mode button {
+  padding:3px 9px;
+  border:0;
+  border-radius:6px;
+  background:transparent;
+  color:#8298a2;
+  font-size:11px;
+  white-space:nowrap
+}
+
+
+
+.composer-mode button.active {
+  background:#fff;
+  color:#3d687a;
+  box-shadow:0 1px 3px #20343d14
+}
+
+
+
+/* 输入区与附件在窄屏的收缩。
+ * 这几条必须放在上面 `.composer-*` 定义**之后**——(max-width:680px) 块在文件
+ * 中段，同特异度下按源码顺序决胜，放前面会被基础规则直接盖掉（初版就是这么丢的）。 */
+@media(max-width:680px) {
+  .composer-mode button {
+    padding:3px 7px;
+    font-size:10px
+  }
+  .composer-file,
+  .message-attachment {
+    max-width:100%
+  }
 }
 
 
@@ -4252,4 +4660,623 @@ body {
 
 
 @media(max-width:760px) {
+}
+
+/* ==========================================================================
+ * 消息正文的 Markdown 渲染（components/Markdown.tsx）
+ *
+ * 原先正文是 `<p>{content}</p>`，模型输出里的 `**` `##` `|` 会原样显示，
+ * 结构全丢。这里只做版式：字号、间距、代码块与表格的边框；配色沿用 --cfg-* 令牌。
+ * ========================================================================== */
+
+.md-body {
+  min-width:0;
+  color:#405a66;
+  font-size:14px;
+  line-height:1.85;
+  overflow-wrap:anywhere
+}
+
+
+
+.md-body p {
+  margin:0 0 12px
+}
+
+
+
+/* `.message-body p` 里有 `white-space:pre-wrap`（那是给纯文本正文保留换行用的）。
+ * Markdown 已经把换行解析成块级结构，再 pre-wrap 会把段内的软换行也硬断。
+ * 选择器多一层、与书写顺序无关——这条规则之后还有一处响应式 `.message-body p`。 */
+.message-body .md-body p {
+  margin:0 0 12px;
+  white-space:normal
+}
+
+
+
+.md-body>:first-child {
+  margin-top:0
+}
+
+
+
+.md-body>:last-child {
+  margin-bottom:0
+}
+
+
+
+.md-body h1,
+.md-body h2,
+.md-body h3,
+.md-body h4,
+.md-body h5,
+.md-body h6 {
+  margin:20px 0 10px;
+  color:#2f4a56;
+  font-weight:600;
+  line-height:1.45
+}
+
+
+
+.md-body h1 {
+  font-size:18px
+}
+
+
+
+.md-body h2 {
+  font-size:16.5px
+}
+
+
+
+.md-body h3 {
+  font-size:15px
+}
+
+
+
+.md-body h4,
+.md-body h5,
+.md-body h6 {
+  font-size:14px
+}
+
+
+
+.md-body ul,
+.md-body ol {
+  margin:0 0 12px;
+  padding-left:22px
+}
+
+
+
+.md-body li {
+  margin:3px 0
+}
+
+
+
+.md-body li>ul,
+.md-body li>ol {
+  margin:3px 0 0
+}
+
+
+
+/* GFM 任务列表：勾选框取代项目符号，左移一档抵掉拿掉的光标位。 */
+.md-body .task-list-item {
+  list-style:none;
+  margin-left:-20px
+}
+
+
+
+.md-body input[type=checkbox] {
+  margin:0 6px 0 0;
+  accent-color:#3f7f93;
+  vertical-align:-1px
+}
+
+
+
+.md-body blockquote {
+  margin:0 0 12px;
+  padding:2px 0 2px 12px;
+  border-left:3px solid #cfe0e6;
+  color:#5c7885
+}
+
+
+
+.md-body hr {
+  height:1px;
+  margin:18px 0;
+  border:0;
+  background:var(--cfg-line-soft)
+}
+
+
+
+.md-body strong {
+  color:#2f4a56;
+  font-weight:600
+}
+
+
+
+.md-body em {
+  color:#4d6975
+}
+
+
+
+.md-body img {
+  max-width:100%;
+  border-radius:8px
+}
+
+
+
+.md-body a {
+  color:#2f7189;
+  text-decoration:underline;
+  text-underline-offset:2px
+}
+
+
+
+.md-body a:hover {
+  color:#1f5a6f
+}
+
+
+
+/* 行内代码。代码块里的 <code> 也吃这条，由 `.md-pre .md-code` 抵消掉。 */
+.md-code {
+  padding:1px 5px;
+  border:1px solid #e0eaee;
+  border-radius:5px;
+  background:#eef4f6;
+  color:#33606f;
+  font-family:Cascadia Mono,Consolas,monospace;
+  font-size:.87em;
+  overflow-wrap:anywhere
+}
+
+
+
+/* 代码块。语言名走 `data-lang`（见 Markdown.tsx），画成右上角标；
+ * 不引高亮库——这里要的是「看得出来这是代码」，不是编辑器级着色。 */
+.md-pre {
+  position:relative;
+  margin:0 0 14px;
+  padding:12px 14px;
+  overflow:auto;
+  max-height:520px;
+  border:1px solid #e2ecef;
+  border-radius:10px;
+  background:#f6fafb
+}
+
+
+
+.md-pre .md-code {
+  display:block;
+  padding:0;
+  border:0;
+  background:none;
+  color:#31505c;
+  font-size:12.5px;
+  line-height:1.7;
+  white-space:pre
+}
+
+
+
+.md-pre .md-code[data-lang]:not([data-lang=""])::before {
+  content:attr(data-lang);
+  position:absolute;
+  top:7px;
+  right:11px;
+  color:var(--cfg-ink-4);
+  font-size:10px;
+  letter-spacing:.04em
+}
+
+
+
+/* 表格自己带横向滚动容器：让整段正文一起滚，会把上面的段落也推出视野。 */
+.md-table-wrap {
+  margin:0 0 14px;
+  overflow-x:auto;
+  border:1px solid #e2ecef;
+  border-radius:10px
+}
+
+
+
+.md-table-wrap table {
+  width:100%;
+  border-collapse:collapse;
+  font-size:12.5px
+}
+
+
+
+.md-table-wrap th,
+.md-table-wrap td {
+  padding:8px 12px;
+  border-bottom:1px solid var(--cfg-line-faint);
+  text-align:left;
+  white-space:nowrap
+}
+
+
+
+.md-table-wrap th {
+  background:#f6fafb;
+  color:#3d5b68;
+  font-weight:600
+}
+
+
+
+.md-table-wrap tr:last-child td {
+  border-bottom:0
+}
+
+
+
+/* 自己的消息：气泡改由 `.md-body` 承担。原先是「一句纯文本一个 <p>」，
+ * Markdown 下会变成「一段一个气泡」，所以内层段落要去掉底色与内边距。 */
+.user .message-body .md-body {
+  padding:12px 16px;
+  border-radius:12px 3px 12px 12px;
+  background:#edf3f5
+}
+
+
+
+.user .message-body .md-body p {
+  margin-bottom:0;
+  padding:0;
+  border-radius:0;
+  background:none
+}
+
+
+
+.user .message-body .md-body p+p {
+  margin-top:12px
+}
+
+
+
+/* 渐进揭示的行尾光标（components/useStreamText.ts）。
+ * 挂在最后一个块元素的行尾而不是容器末尾——容器末尾会另起一行。 */
+.md-body.is-streaming>:last-child::after {
+  content:"";
+  display:inline-block;
+  width:7px;
+  height:14px;
+  margin-left:3px;
+  background:#4d6e7b;
+  vertical-align:-2px;
+  animation:md-caret 1.05s infinite
+}
+
+
+
+@keyframes md-caret {
+  0%,45% {
+    opacity:1
+  }
+  50%,100% {
+    opacity:0
+  }
+}
+
+
+
+@media(prefers-reduced-motion:reduce) {
+  .md-body.is-streaming>:last-child::after {
+    animation:none
+  }
+}
+
+
+
+/* ==========================================================================
+ * 可展开 / 收起的折叠块（components/Disclosure.tsx）
+ *
+ * 不用原生 <details>：展开状态必须由调用方掌控（正在跑的那一步自动摊开、跑完的
+ * 收成一行），而 <details> 的状态父组件改不了。左侧竖条按状态着色。
+ * ========================================================================== */
+
+.disclosure {
+  overflow:hidden;
+  border:1px solid var(--cfg-line-faint);
+  border-left:3px solid var(--cfg-line);
+  border-radius:var(--cfg-radius-sm);
+  background:#fff
+}
+
+
+
+.disclosure.is-open {
+  border-color:var(--cfg-line)
+}
+
+
+
+.disclosure.tone-green {
+  border-left-color:#2f8f6b
+}
+
+
+
+.disclosure.tone-accent {
+  border-left-color:#3f7f93
+}
+
+
+
+.disclosure.tone-amber {
+  border-left-color:#b8842a
+}
+
+
+
+.disclosure.tone-rose {
+  border-left-color:#c0564f
+}
+
+
+
+.disclosure-head {
+  display:flex;
+  align-items:center;
+  gap:8px;
+  width:100%;
+  padding:9px 11px;
+  border:0;
+  background:none;
+  color:var(--cfg-ink-2);
+  text-align:left
+}
+
+
+
+.disclosure-head:hover {
+  background:var(--cfg-surface-hover)
+}
+
+
+
+.disclosure-chevron {
+  flex:0 0 auto;
+  color:var(--cfg-ink-4);
+  transition:transform var(--cfg-ease)
+}
+
+
+
+.disclosure.is-open>.disclosure-head .disclosure-chevron {
+  transform:rotate(90deg)
+}
+
+
+
+.disclosure-glyph {
+  display:grid;
+  place-items:center;
+  flex:0 0 auto;
+  color:var(--cfg-ink-3)
+}
+
+
+
+.disclosure-title {
+  min-width:0;
+  overflow:hidden;
+  color:inherit;
+  font-size:12px;
+  font-weight:600;
+  text-overflow:ellipsis;
+  white-space:nowrap
+}
+
+
+
+.disclosure-meta {
+  display:flex;
+  align-items:center;
+  gap:8px;
+  flex:0 0 auto;
+  margin-left:auto
+}
+
+
+
+.disclosure-body {
+  display:grid;
+  gap:12px;
+  min-width:0;
+  padding:12px;
+  border-top:1px solid var(--cfg-line-faint)
+}
+
+
+
+/* ==========================================================================
+ * 对话流内联的「任务执行活动」（workspace/RunActivity.tsx）
+ *
+ * 轨迹内部的类名与执行台弹窗共用（`ws-trace-*`，定义在 workspace.css），
+ * 这里只有外层容器与摘要行——两处共用一套结构，才不会出现「弹窗标了已截断、
+ * 对话流当成全部」这类漂移。
+ * ========================================================================== */
+
+.run-activity {
+  display:grid;
+  gap:10px;
+  min-width:0;
+  margin:0 0 28px;
+  padding:12px 14px;
+  border:1px solid var(--cfg-line);
+  border-radius:12px;
+  background:var(--cfg-surface-soft)
+}
+
+
+
+.run-activity-head {
+  display:flex;
+  align-items:flex-start;
+  gap:10px;
+  min-width:0
+}
+
+
+
+.run-activity-mark {
+  display:grid;
+  place-items:center;
+  flex:0 0 auto;
+  width:26px;
+  height:26px;
+  border-radius:8px;
+  background:#eef4f5;
+  color:var(--cfg-ink-3)
+}
+
+
+
+.run-activity-mark.running {
+  background:#eaf3f7;
+  color:#3f7f93
+}
+
+
+
+.run-activity-mark.completed {
+  background:#e8f6f0;
+  color:#2f8f6b
+}
+
+
+
+.run-activity-mark.failed {
+  background:#fbecec;
+  color:#c0564f
+}
+
+
+
+.run-activity-mark.cancelled,
+.run-activity-mark.paused,
+.run-activity-mark.pending {
+  background:#fdf3e3;
+  color:#b8842a
+}
+
+
+
+.run-activity-head b {
+  display:block;
+  margin-bottom:3px;
+  color:#3d5b68;
+  font-size:12px;
+  font-weight:600
+}
+
+
+
+.run-activity-head span {
+  color:var(--cfg-ink-3);
+  font-size:10.5px;
+  line-height:1.7
+}
+
+
+
+.run-steps {
+  display:grid;
+  gap:7px;
+  min-width:0
+}
+
+
+
+/* 摘要行右侧的三段：阶段名、工具计数、状态胶囊。收起后这三样必须还在，
+ * 否则「收起」就成了信息丢失。 */
+.run-step-label {
+  color:var(--cfg-ink-4);
+  font-size:10px
+}
+
+
+
+.run-step-tools {
+  padding:1px 6px;
+  border-radius:4px;
+  background:#eef4f5;
+  color:var(--cfg-ink-3);
+  font-size:9.5px
+}
+
+
+
+.run-activity .status-pill {
+  flex:0 0 auto
+}
+
+
+
+.run-note {
+  margin:0;
+  color:var(--cfg-ink-3);
+  font-size:10.5px;
+  line-height:1.75
+}
+
+
+
+/* 对话列比弹窗宽，共用的轨迹块在这里抬一档字号与行高；
+ * 只调字号与留白，结构与配色仍与弹窗共用。 */
+.run-activity .ws-detail-section h4 {
+  font-size:10.5px
+}
+
+
+
+.run-activity .ws-trace-step-head b {
+  font-size:11.5px
+}
+
+
+
+.run-activity .ws-trace-note,
+.run-activity .ws-trace-error,
+.run-activity .ws-trace-io summary,
+.run-activity .ws-trace-io dt {
+  font-size:11px
+}
+
+
+
+.run-activity .ws-trace-block,
+.run-activity .ws-trace-io pre {
+  font-size:11px
+}
+
+
+
+.run-activity .md-body {
+  font-size:13px;
+  line-height:1.78
 }

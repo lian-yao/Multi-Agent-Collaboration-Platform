@@ -1,118 +1,30 @@
 /**
- * 协作链路视图。
+ * 侧栏的协作链路视图：一张紧凑画布。
  *
- * 按「波次（wave）」表达 Agent 协作：**同一波内的节点并行，波与波之间串行**。
- * 当前后端是固定串行流水线，所以每波只有一个节点；将来编排层支持 fan-out /
- * Human-in-the-Loop 波次时，只要把同波节点放进同一个数组，这里无需改动——
- * 「并行 / 串行 / 等待」三种关系因此可以用同一个模型表达。
+ * 与「Agent 执行台」的分工（`doc/api.md` §7）：执行台回答「这个 Agent 干到哪一步了」，
+ * 画布回答「这次任务里谁跟谁、各自用什么跑的」。所以节点**点了不弹执行轨迹**——
+ * 两块视图一旦都能点进同一份轨迹，就又混成一个了；要看轨迹去执行台卡片上点。
  *
- * 只吃显式 props、不自己拉数据：容器组件靠 effect 拉数据，静态渲染拿不到内容，
- * 视图本体必须能被离屏冒烟直接挂载（见 `frontend/rendercheck`）。
+ * 图上只留三类信息：节点（Agent 圆点 + 名字 + Token 徽标）、连线（灰虚线要走、
+ * 蓝实线走通）、以及连线上的工具链胶囊。参数全表、Prompt、产出这些细节进全屏画布的
+ * 悬停面板——侧栏的高度该留给「一眼看出走到哪了」。
+ *
+ * 画布本体在 `GraphCanvas.tsx`，这里只负责挂上「全屏画布」入口。
  */
-import { Check, ChevronRight, CircleAlert, Clock3, LoaderCircle, Pause } from "lucide-react";
-import { Status } from "../components/Status";
+import { CollaborationCanvas } from "./GraphCanvas";
+import type { CollabGraph } from "./collaboration";
 import "./workspace.css";
 
-export type CollaboratorNode = {
-  /** 阶段 ID，与 Workflow 的 `current_step` / `checkpoint.completed_steps` 对齐。 */
-  id: string;
-  /** 阶段显示名，如「信息收集」。 */
-  stageLabel: string;
-  /** Agent 显示名；缺配置时由调用方兜底成 `<id> Agent`。 */
-  agentName: string;
-  /** completed / running / paused / failed / pending，取自 `stageStatus()`。 */
-  status: string;
-};
-
-const NODE_ICON: Record<string, typeof Check> = {
-  completed: Check,
-  running: LoaderCircle,
-  paused: Pause,
-  failed: CircleAlert,
-};
-
 export function CollaborationGraph({
-  waves,
-  activeId,
-  onSelect,
+  graph,
+  onExpand,
 }: {
-  /** 波次列表：波内并行、波间串行。空数组表示本次任务还没有参与 Agent。 */
-  waves: CollaboratorNode[][];
-  /** 当前执行中的阶段 ID，用于高亮。 */
-  activeId?: string | null;
-  /** 传入即可点击节点跳转到该阶段的详情。 */
-  onSelect?: (id: string) => void;
+  graph: CollabGraph;
+  /** 有它就渲染浮在画布右上角的「全屏画布」入口。 */
+  onExpand?: () => void;
 }) {
-  if (!waves.length) {
-    return <p className="collab-empty">任务开始后，这里会显示 Agent 之间的协作关系。</p>;
+  if (!graph.nodes.length) {
+    return <p className="cv-empty">任务开始后，这里会画出 Agent 之间的协作链路。</p>;
   }
-  const hasParallel = waves.some((wave) => wave.length > 1);
-  return (
-    <div className="collab-graph" aria-label="Agent 协作链路">
-      {waves.map((wave, index) => (
-        <div className="collab-wave" key={wave.map((node) => node.id).join("+")}>
-          {index > 0 && (
-            <div className="collab-link" aria-hidden="true">
-              <span />
-              <small>串行</small>
-            </div>
-          )}
-          <div className={`collab-row ${wave.length > 1 ? "parallel" : ""}`}>
-            {wave.map((node) => {
-              const Icon = NODE_ICON[node.status] ?? Clock3;
-              const body = (
-                <>
-                  <span className={`collab-node-mark ${node.status}`}>
-                    <Icon size={13} className={node.status === "running" ? "spin" : undefined} />
-                  </span>
-                  <span className="collab-node-body">
-                    <b>{node.agentName}</b>
-                    <small>
-                      {node.stageLabel}
-                      {node.status === "pending" && " · 等待前置阶段"}
-                    </small>
-                  </span>
-                  <Status status={node.status} />
-                </>
-              );
-              return onSelect ? (
-                <button
-                  type="button"
-                  key={node.id}
-                  className={`collab-node ${node.status} ${activeId === node.id ? "active" : ""}`}
-                  aria-label={`查看${node.agentName}的${node.stageLabel}阶段详情`}
-                  onClick={() => onSelect(node.id)}
-                >
-                  {body}
-                  <ChevronRight size={13} />
-                </button>
-              ) : (
-                <div
-                  key={node.id}
-                  className={`collab-node ${node.status} ${activeId === node.id ? "active" : ""}`}
-                >
-                  {body}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      ))}
-      <p className="collab-legend">
-        <span>
-          <i className="done" />
-          已完成
-        </span>
-        <span>
-          <i className="doing" />
-          执行中
-        </span>
-        <span>
-          <i className="wait" />
-          等待前置
-        </span>
-        <span className="collab-mode">{hasParallel ? "含并行波次" : "串行流水线"}</span>
-      </p>
-    </div>
-  );
+  return <CollaborationCanvas graph={graph} dense onExpand={onExpand} />;
 }

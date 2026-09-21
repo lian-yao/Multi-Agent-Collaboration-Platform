@@ -73,10 +73,21 @@ cd deploy; .\start.ps1                     # 起完整环境
 | U-08 | 沙箱边界拒绝越权 | 代码执行工具拒绝网络/危险命令 | M4 |
 | U-09 | 流水线接入 MCP 工具 | 注册表工具被发现，按模型 `tool_calls` 调用并回填观察；失败记为 failed 且不中断；阶段载荷可序列化 | M4 |
 | U-10 | 行为日志事件 | 阶段开始/结束/失败与工具调用输出 `event=... field=value` 结构化日志，含 workflow_id 与耗时 | M4 |
+
 | U-11 | 会话与长期记忆的 Redis 读写 | `session:{id}:messages` List 追加与「读最近 N 条」、`agent:{id}:memory` Hash 覆盖写、序列化往返、客户端不可用时按契约降级（ADR-005 修订，2026-09-16 补） | M4（增量） |
 | U-12 | 沙箱 Docker 后端隔离与 fail-closed | 容器隔离边界参数齐全、网络仅在显式允许时打开、超时杀容器且不报成功、Docker 不可用时报 sandbox unavailable、输出超限截断并标记（2026-09-16 补，`38200cc` 只加测试） | M4（增量） |
 | U-13 | 会话记忆接线 | 阶段提示词带上会话历史且剔除本轮自己的消息、无历史时提示词逐字不变、终态把报告正文追加进记忆、受理消息时写用户消息（ADR-019，2026-09-20 补，关闭 F-06 的接线部分） | M4（增量） |
 | U-14 | 工具失败重试与空输出兜底 | 工具失败沿用同一 `call_id` 重试（首次 + 最多 3 次，最多 4 次尝试）；**只有瞬时故障重试**——入参/策略/无效 SQL 等确定性失败标 `retryable=False`、只尝试一次并落 `tool.retry_skipped`；成功即采用真实输出、耗尽重试记 `failed` 且阶段仍输出；撞工具轮次上限时落 `stage.tool_iteration_limit`，空输出补一次文字提示、仍空则告警并继续（ADR-009 三次修订，2026-09-20 补） | M4（增量） |
+
+| U-11 | 动态编排计划与调度 | 计划解析只收合法形态（未知角色 / 重复 id / 自依赖 / 前向依赖 / 超步数一律整份丢弃）；规划模型抛错或返回垃圾文本时回退固定三步；依赖就绪度调度、失败连坐（含传递闭包）与最终交付物取值；Dapr 侧先规划后执行、子工作流实例 ID 稳定、业务终态与实例终态一致（ADR-019） | M5 |
+| U-12 | 多模态附件：分类 / 限额 / 解析 / 提示词 | 类型白名单（图片、文本与代码、pdf/docx/xlsx）与三类拒绝理由（空文件 / 超限 / 格式不支持）**都指名到具体文件**；文本解码的 `gb18030` 回退与可打印率闸门能挡住二进制；docx/xlsx 用标准库抽出段落与单元格；PDF 质量闸门把扫描件判为 `failed`，吃得下真实形态的 **FlateDecode 压缩流**与多页内容流；**内嵌子集字体靠 `/ToUnicode` 解回文字**（十六进制 CID 与字面量 CID 两种写法），**字体码冲突时安全拒绝**而不是产出通顺的乱码；`build_human_content` 无图片时返回**纯字符串**（不改变既有链路），有图片时升级为 content block；失败项必须出现在附件清单里；**原件对所有类型留档**（ADR-021 / ADR-024） | M5 |
+| U-13 | 沙箱可用性探测与容器硬化 | 套接字连不上时原因要点到 `/var/run/docker.sock` 并给出可照做的动作；**只 `ping` 通不算可用**（镜像不在宿主机同样报不可用）；`SANDBOX_AUTO_PULL_IMAGE` 打开时自拉一次并重试、拉取失败还原为 `SandboxUnavailable`；探测自身抛异常时仍返回原因而不冒泡；容器参数逐条钉住（`cap_drop=['ALL']`、`read_only`、`network_disabled`、`user=nobody`、`security_opt=['no-new-privileges']`、`/app` 与 `/tmp` 的 tmpfs、`macp.role` 标签）（ADR-023） | M5 |
+| U-14 | 真实二进制附件夹具 | 6 份**真实库产出**的文件（fpdf2 / python-docx / openpyxl）逐份跑过抽取：多页 PDF 读到第三页附录、内嵌子集字体靠 `/ToUnicode` 读到正文、两字体冲突**一个字正文都不给**（改走页面图像，ADR-027）、扫描件不填正文且原因点到「文本层」、docx 表格单元格出来、xlsx 声明「公式未求值」；每份都断言 `prepare_upload` 后的 `data` 与磁盘原件**逐字节相同**；夹具目录不允许有没人测的文件 | M5（§4.5） |
+| U-15 | 会话级文件工具（Agent 读回附件） | 清单返回可读性（图片按类型算，不只看 `status`）；按 id / 完整名 / **唯一**子串解析附件，歧义时拒绝并列出候选；超 `session_file_max_chars` 截断并标注 `truncated`；图片与解析失败各给可行动提示；`SessionFileRegistry` 按会话追加且 `GET /tools` 静态目录不变；`session_scoped_registry` 在无会话/无条目时空转；**接线到 `advance_pipeline_stage` 后模型确实拿到这两个工具且调用被审计记录**（ADR-025） | M5（§4.5） |
+| U-16 | 附件回读的列契约 | 编译 `list_attachments_for_messages` 用的语句，断言选中列里**没有** `data` / `text_content`，`has_original` 是库侧 `data IS NOT NULL`，且 filter / order 仍在（ADR-024 遗留低效的回归）（§4.5） | M5（§4.5） |
+| U-17 | 编排层工具枚举不产生 IO（ADR-026） | 注册表 Server 的工具与内置合成、目录只取已发现的缓存（不重新握手）、`disabled` 摘除、重名内置优先、调用路由到真 Server（走真实 MCP 协议往返）、读表失败**只尝试一次**、刷新后目录跟随 | M5（§4.6） |
+| U-18 | 扫描版 PDF 的页面渲染（ADR-027） | 真实夹具渲出**结构自校验的 PNG**（签名 + 逐块 CRC + IHDR + 解压行长 + filter 字节全 0），多页按文档序；页数上限生效且**如实报告**少带了几页；单页超体积先重渲再丢页、合计到顶提前停；畸形 / 截断 / 渲染组件缺失一律降级而不抛；展开成逐页图片载荷（名字带「第k页/共N页」、id 沿用父附件）后附件计数**不虚高**；执行时渲染失败 → **这一次执行**降级为 `failed` 而不沿用上传时的说明 | M5（§4.7） |
+| U-19 | 阶段执行轨迹的读取契约（§5.17） | 从阶段状态里取回产出、按序的工具调用（含失败调用的原因）与**上游输入**（`input` + `input_from`）；三种「没有轨迹」给三句不同的话（尚未开始 / 正在执行 / 已完成但状态被清理）；动态链路报 `not_integrated` 并说明原因；超长正文与超大工具载荷**截断并标记**（不静默剪）；坏载荷只说明「无法解析」不抛异常；读取器异常**继续上抛**（由接口层归一化成 503，不伪装成「这个阶段没有轨迹」） | M5（§4.8） |
 
 ### 2.2 集成测试（I）
 
@@ -92,7 +103,12 @@ cd deploy; .\start.ps1                     # 起完整环境
 | I-08 | 配置热更新 | PATCH agent 后新执行使用新配置 | M4 |
 | I-09 | D7-D8 只读巡检接口 | Provider/Agent/工具/调用/指标接口的分页、`availability` 区分「未接入」与「零条记录」、404/422/503 契约 | M4 |
 | I-10 | Provider 配置读写 | `GET/PUT /api/v1/config/provider`：200 生效值与回退、422 校验、503 写失败、裸请求可写（不鉴权，ADR-015）；覆盖值落 `provider_configs` 并镜像 Redis，响应与日志不含密钥（ADR-014） | M4 |
+
 | I-11 | 注册表与 Agent 目录 API | `doc/api.md` §5.7、§5.9–§5.12：Provider / 模型 / MCP Server 注册表与 Agent 角色目录的 CRUD 契约、404/409/422 校验、预设目录、批量引入去重与 `existing` 计数（ADR-017，2026-09-16 补） | M5 后（ADR-017） |
+
+| I-11 | 多模态附件接口契约 | `POST /api/v1/attachments` 的 201、四类 400（非法 base64 / 空 / 超限 / 格式不支持）；发消息带上 `attachment_ids` 后附件归属回填且**只挂一次**（重复提交进 `unattached_attachment_ids`）；「只带图不带文字」可发送；`GET .../content` 对图片回 `inline`、对文本与文档（**含解析失败项**）回 `attachment` 原件、对无字节的旧行回 404；`DELETE` 未归属 204 / 已发出 409；删会话级联清附件（ADR-021 / ADR-024） | M5 |
+| I-12 | 执行边界诊断接口 | `GET /api/v1/config/sandbox`：200 时 `available` / `reason` 的语义；原因**原样透传**后端给出的文案（不再由接口层编兜底话术）；探测自身抛异常时仍回 200 + 原因；`PUT` / `POST` 一律 405（ADR-020 / ADR-023） | M5 |
+| I-13 | 会话的历史工作流列表（§5.18） | `GET /api/v1/sessions/{id}/workflows`：未知会话 404、草稿态会话回空列表（**不建会话**）、**乱序写入也必须按 `created_at` 升序返回**（对话编号由位置决定，倒序会让回看的编号整体错位）、只含本会话的工作流、运行中的那条要带出 `current_step` 与 `checkpoint` | M5（§4.9） |
 
 ### 2.3 端到端测试（E）
 
@@ -192,19 +208,23 @@ Provider 配置面板的验证步骤（ADR-017 之后：`frontend/src/config/` �
 
 | 页面 | 组件 | 分区 / 验证要点 |
 | --- | --- | --- |
-| 工具与配置 | `config/ConfigPage.tsx` | 只放写配置的三个分区，见下表三行；三个分区用 `components/PageTabs.tsx` 副路由切换，标题与副路由左对齐（**不整页居中**） |
-| Agent 团队 | `App.tsx::AgentTeamPage` → `config/AgentPanel.tsx` | 角色路由：一次 `GET /config/agents` 取回角色与 `available_models`；角色**一行多个方块**，方块只显示摘要（名字 / `role · 状态` / 生效模型 / Temperature / 覆盖项数），点击方块在网格下方展开 `AgentTuningPanel` 编辑，再点一次或「收起」关掉；`override_keys` 高亮「已覆盖」字段；「清除全部覆盖」发 6 个 `null`；`activeAgentId` 只做当前阶段高亮 |
+| 工具与配置 | `config/ConfigPage.tsx` | 放写配置的三个分区 + 一个**只读**的执行边界，见下表；四个分区用 `components/PageTabs.tsx` 副路由切换，标题与副路由左对齐（**不整页居中**） |
+| Agent 团队 | `App.tsx::AgentTeamPage` → `config/AgentPanel.tsx` | 角色路由：一次 `GET /config/agents` 取回角色与 `available_models`；角色**一行多个方块**，方块只显示摘要（**角色图标**（按 `role` 解析，ADR-029）/ 名字 / `role · 状态` / 生效模型 / Temperature / 覆盖项数），点击方块在网格下方展开 `AgentTuningPanel` 编辑，再点一次或「收起」关掉；`override_keys` 高亮「已覆盖」字段；「清除全部覆盖」发 6 个 `null`；`activeAgentId` 只做当前阶段高亮 |
 | 任务记录 | `records/RecordsPage.tsx`（容器与行渲染在 `records/Inspection.tsx`） | 四分区副路由：`runs` 运行记录、`calls` 工具调用（§5.5）、`metrics` 指标采样（§5.6）、`sessions` 历史会话（§5.13）。采样有 Workflow 时按 `workflow_id` 取并轮询（终态停），无 Workflow 时退回全局采样；历史会话调 `GET /api/v1/sessions` 分页列出，点选按 `latest_workflow_id` 恢复执行台并回工作台；`Records` 统一「加载中 / 失败 / 未接入 / 无记录 / 有数据」五态，分页仅在多页时出现 |
 
-「工具与配置」页的三个分区：
+「工具与配置」页的分区（前三个可写，第四个只读）：
 
 | 分区 | 组件 | 验证要点 |
 | --- | --- | --- |
-| Provider | `ProviderPanel.tsx` + `ModelSection.tsx` | 预设目录预填 `preset_type`/`api_type`/`base_url`；`api_key` 输入框留空 = 不修改；删除仍有启用模型的 Provider 时先用 `409 PROVIDER_IN_USE` 拦一次，再让用户确认 `?force=true` |
+| Provider | `ProviderPanel.tsx` + `ModelSection.tsx` | 预设目录预填 `preset_type`/`api_type`/`base_url`；`api_key` 输入框留空 = 不修改；删除仍有启用模型的 Provider 时先用 `409 PROVIDER_IN_USE` 拦一次，再让用户确认 `?force=true`；`openai-compatible`（自定义）的**图标位渲染加号**（`.cfg-mark-add`），不再把「自定义」当 monogram 文字塞进方块 |
 | 同上 · 批量引入 | `ModelSection.tsx::BatchImportModal` | 「从远端发现」**只在点击时**发起（不在挂载时调用）；已登记模型置灰计入 `existing`；重复提交返回 `skipped` 而不报错 |
-| 同上 · 特化调参 | `ModelSection.tsx::ModelTuningForm` | 只提交被改动字段；清空数字输入 = 显式 `null`（回到未设置）；`PATCH` 不发 `provider_id` |
+| 同上 · 特化调参 | `ModelSection.tsx::ModelTuningForm` | 只提交被改动字段；清空数字输入 = 显式 `null`（回到未设置）；`PATCH` 不发 `provider_id`；改模型名时按 `modelCapabilities.ts` 带出常见模型的**上下文上限**，用户手改过（`contextTouched`）之后不再覆盖 |
+| 同上 · 手动登记 | `ModelSection.tsx::ModelCreateModal` | 与特化调参同一套自动带出与文案（`describeContextHint`）；识别不到常见模型时**留空**由用户手填，不做正则猜测 |
 | 默认路由 | `DefaultRoutePanel.tsx` | `default_llm_model_id` 非空时展示解析出的注册表来源；悬空 id 给出提示而不是报错 |
-| MCP 工具 | `McpPanel.tsx` | 工具卡片只显示 `name` / 截断后的 `description` / 开关与可用性；完整 `input_schema` 收进**默认折叠**的 `<details>`，展开时才调 §5.3 |
+| MCP 工具 | `McpPanel.tsx` | 工具卡片只显示 `name` / 截断后的 `description` / 开关与可用性；完整 `input_schema` 收进**默认折叠**的 `<details>`，展开时才调 §5.3。工具级选项里**只有 `disabled` 有界面出口**：`disabled` 现在真的会把工具从 Agent 的工具集里摘掉（ADR-026），`allowAutoExecution` 则**仍然不消费**——它要表达的是「需要人工确认」，而 HITL 还没做，所以**不给它做界面开关**，否则就是一个点了没效果的假开关 |
+| 同上 · 粘贴导入 | `McpImportModal.tsx` + `mcpConfig.ts` | 粘贴外部客户端的配置 JSON（`mcpServers` 映射/数组、裸映射、单条参数四种形态）后**立即解析并预览**，不自动提交；已登记的 ID 在预览里标黄「会失败」；提交是**前端逐条**调 `POST /config/mcp/servers`（§5.11 只有单条创建接口），一条失败不拖垮其余，成功与失败分别汇报，**全部成功才关闭弹层** |
+| 同上 · Server 表单 | `McpPanel.tsx::ServerFormModal` + `KeyValueFields.tsx` | 传输下拉按**远程 / 本地**分组；环境变量与请求头是**键值对行编辑器**（可增删、逐项校验空键与重复键），不再是「每行 KEY=VALUE」文本域；表单校验与粘贴导入**共用** `mcpConfig.ts::draftProblem`，两处不会各漂一套口径 |
+| 执行边界 | `SandboxPanel.tsx` | **只读**：展示沙箱后端、镜像、可用性探测与不可用原因，以及 7 项生效限额；`available=false` 时原因行必现（`GET /config/sandbox` §5.15）。**没有任何可编辑控件**，后端也没有写接口（`PUT` → `405`）。为什么不给开关：这些是部署期安全边界，且当前 `available=false` 的成因是缺 docker.sock，改限额不会让它变可用（ADR-020） |
 
 浏览器端的自动化用例（Playwright 之类）尚未引入，属后续增量。在此之前，配置页与工作台
 各有一层**无浏览器渲染冒烟**（不引入新依赖，只用项目已有的 react / esbuild）：
@@ -223,7 +243,7 @@ node_modules/.bin/esbuild rendercheck/workspace-smoke.tsx --bundle --platform=no
 > `frontend/` 下造出 `frontend/c/Users/...` 这种路径形状的垃圾目录（已踩过一次，见
 > 2026-09-15 日志）。用 `C:/...` 或 `$TEMP`。
 
-`config-smoke` 用 `react-dom/server` 渲染整棵配置页，断言配置页只剩 3 个分区入口、已迁走
+`config-smoke` 用 `react-dom/server` 渲染整棵配置页，断言配置页只剩 4 个分区入口、已迁走
 的分区不再出现在这里，另外**单独挂载**一次 `AgentPanel`（Agent 团队页）、
 `RuntimeSampling` 与 `RecordsPage`（任务记录页）——它们不在 `RuntimeConfig` 的树里，
 不单独挂就等于换页后无人验证。再加三层用显式 props 驱动、effects 够不到的区块：
@@ -231,14 +251,22 @@ node_modules/.bin/esbuild rendercheck/workspace-smoke.tsx --bundle --platform=no
 不在方块里**）、`AgentTuningPanel`（六个覆盖字段 + 层次来源 + 保存/清除入口 + 已绑定
 模型回显）与 `ModelSection`（两条模型、特化徽标、开关、批量引入入口）。
 
-`workspace-smoke`（ADR-018）覆盖工作台三块新视图，同样是「显式 props 驱动」那一类：
-`CollaborationGraph`（串行 / 并行波次两种排布、等待态文案、空态，以及**未传 `onSelect`
-时渲染为 `<div>` 而不是 `<button>`**）、`AgentStageModal`（身份与绑定、`pending` 说
+`workspace-smoke`（ADR-018 + ADR-031）覆盖工作台**四块**视图，同样是「显式 props 驱动」那一类：
+`GraphCanvas` / `layoutCollaboration`（ADR-028：串行 / 并行波次两种排布的**坐标**与首尾端子、
+弧线确为三次贝塞尔、连线激活口径、悬停详情与工具胶囊、`minHeight` 撑高与**不满压**，
+以及侧栏紧凑档不写任务与产出）、`AgentStageModal`（身份与绑定、`pending` 说
 「等待前置阶段」而不是 workflow 词汇「排队中」、角色未就绪时的降级、明示推理过程尚未
-对外暴露）与 `TaskUsagePanel` + `groupUsage`（**同一指标多次采样并排列出、断言不求和**）。
+对外暴露）、`RunActivity`（对话流内联执行轨迹：跑完的步骤收成一行且摘要仍带阶段名与工具次数、
+执行中只摊开正在跑的那一步、失败调用连着原因、轨迹缺席时转述服务端给的原因且整条链路
+只重复一次）与 `TaskUsagePanel` + `groupUsage`（**同一指标多次采样并排列出、断言不求和**）。
+另有 `Markdown`（ADR-031：标题 / 加粗 / 行内代码 / 表格滚动容器 / 围栏代码块语言角标 /
+任务列表只读勾选框六类结构，且断言**正文里不再出现未渲染的 `**` 与 `| ---`**——
+只查元素存在会漏掉「记号原样吐出」这个真正的病根）与 `Disclosure`（展开态带
+`aria-expanded` + `aria-controls`、收起态**不写**指向空元素的 `aria-controls`）。
 另有一组读源文件的静态断言，固定「假选择已删除」：`styles.css` 不含 `.decision-*`、
 `App.tsx` 不含「主决策 / 自动分配」、卡片点击走 `setDetailStage` 而非 `setInspectorOpen`、
-`WorkflowInspection` 已从 `Inspection.tsx` 删除。
+`WorkflowInspection` 已从 `Inspection.tsx` 删除；并固定「正文不再走 `<p>{content}</p>`」、
+「`.run-event` 规则已清干净」、「轨迹渲染只有一份实现（弹窗与对话流同调 `TraceParts`）」。
 
 副路由（2026-09-15 增加，`components/PageTabs.tsx`）另有三类断言：
 `role="tablist"` / `role="tab"` 语义与 `aria-selected`、只有选中项 `tabindex="0"`、
@@ -249,6 +277,85 @@ node_modules/.bin/esbuild rendercheck/workspace-smoke.tsx --bundle --platform=no
 `.config-page > :not(.page-heading):not(.ui-tabs)` 必须带 `max-width:1180px` +
 `margin-inline:auto`（内容限宽居中——副路由左置但内容拉满整行同样是用户报过的问题）。
 因这两条断言按 `process.cwd()` 找样式表，**脚本必须在 `frontend/` 下运行**。
+
+行内二次确认（2026-09-16 增加，`components/InlineConfirm.tsx`）另有一组断言：**未点击时只渲染
+触发按钮**（不得出现 `ui-confirm-yes` 或「取消」）、宿主 slot 类名落在外层（各区域靠它复用
+绝对定位）、确认条的 `role="group"` 与「确认 / 取消」两键，以及两条**读文件断言**：
+
+1. `src/**/*.ts(x)` 不得再出现 `window.confirm|alert|prompt`。这条是用户实报问题的固化——原生
+   对话框由宿主提供，沙箱 iframe（无 `allow-modals`）与浏览器「阻止此页面创建更多对话框」都会
+   屏蔽它；被屏蔽时 `confirm()` 不弹窗、直接返回 `false`，挂在返回值上的删除逻辑就静默失效
+   （表现为「点了删除没反应」）。**新增删除/清空类入口时先过这一条断言。**
+2. `.ui-confirm` 容器规则必须与触发按钮**同形**：`border-radius: 6px`（与
+   `.sidebar-user-item-delete` / `.cfg-quiet` 同款）、`border: 0`（按钮自带的边会和容器边叠成
+   「框套框」）、`padding: 2px` 且 `gap: 2px`。用户 2026-09-16 反馈过「外层容器不融洽、间距
+   太大」，改确认条样式时别把这条改红。
+
+Provider 图标位与模型上下文识别（2026-09-17 增加）另有三条断言：
+
+3. **渲染断言**：`ProviderMark` 传 `presetType="openai-compatible"` 时必须渲染 `cfg-mark-add`
+   且 HTML 里**不得出现「自定义」文字**（把中文当 monogram 会缩到很小、且与品牌白底方块不同
+   形）；传品牌预设时仍走品牌标、不得带 `cfg-mark-add`。
+4. **读文件断言**：`src/config/modelCapabilities.ts` 必须有 `KNOWN_CONTEXT_TOKENS` 与
+   `resolveKnownContextTokens`；`ModelSection.tsx` 里 `resolveKnownContextTokens(` 至少两处
+   （两个表单入口各一）、`contextTouched` 至少四处（声明 + 判断 + 提示 + 写值），保证「自动带
+   出」与「手改后停手」两个语义都还在。
+5. **纯函数断言**：`resolveKnownContextTokens` 对 `openai/gpt-4o`（带厂商前缀）、
+   `claude-sonnet-4-5-20250929`（带快照日期）、`gemini-2.5-pro` 要命中，对不认识的模型名返回
+   `null`——**宁可留空也不猜**，猜错会让用户以为上限比真实值大，从而攒出必然超限的请求。
+
+MCP 粘贴导入与键值对编辑（2026-09-17 增加）另有一条纯函数断言、一条渲染断言与一条读文件断言：
+
+6. **纯函数断言**（`mcpConfig.ts` 是与后端 `app/core/mcp_registry.py` 同口径的纯函数层）：
+   四种输入形态各测一遍——`mcpServers` 映射 / `mcpServers` 数组 / 裸映射 / 单条参数——外加
+   `type: "streamable-http"` 归一成 `http`、按 `command`/`url` 推断传输、非法条目**逐条给出
+   原因**而不是静默丢弃、JSON 语法错误向上抛出给弹层转文案、请求体按传输裁剪字段（本地不带
+   `url`、远程不带 `command`/`args`/`env`）。`KeyValueFields.tsx` 的取值规则同批覆盖：
+   空行忽略、空键报错、重复键报错、比较按项不看引用。
+7. **渲染断言**：`McpImportModal` 按显式 props 单独挂一次——它平时只在点击后才挂载，静态渲染
+   够不到。有内容时必须出现逐条预览与 `cfg-mcp-import-item dup`（与已有条目撞车的 ID 标黄）；
+   空态必须能渲染且**不出现条目行**。
+8. **读文件断言**：`McpPanel.tsx` 必须调 `draftProblem(`，且**不得再出现** `parsePairs(` /
+   `formatPairs(`——校验只写在 `mcpConfig.ts` 一处，防止「表单」与「粘贴导入」两条入口各漂一套
+   口径；三个入口（`<KeyValueFields`、`TRANSPORT_GROUPS.map`、`<McpImportModal`）都要接在
+   渲染树里。另有一条**类名不串台**断言：导入弹层必须用 `cfg-mcp-import-*`，因为 `cfg-import-*`
+   已被「模型批量引入」占用（`ModelSection.tsx` 的 `.cfg-import-block` / `.cfg-import-toolbar`），
+   同名复用会让两处布局互相带崩。
+
+执行边界只读（2026-09-17 增加，ADR-020）另有三条断言，都指向同一件事——**这块不能有写入口**：
+
+9. **渲染断言**：`SandboxBoundary` 按显式 props 单独挂一次（面板本体靠 `useEffect` 拉数据，
+   静态渲染够不到）。不可用时必须同时出现原因行与逐项限额（`15 秒`、`0.5 核`、`256m`、
+   `禁用`、`4000 字符`）；可用时**不得**渲染 `cfg-alert`。
+10. **只读断言**：`SandboxBoundary` 的渲染结果里**不得出现** `<input` / `<select` /
+    `<textarea`；`ui-preview.html` 的 jsdom 自检也断言「执行边界分区内可编辑控件数为 0」。
+11. **契约断言**：`tests/integration/test_api.py` 断言 `PUT /api/v1/config/sandbox` 返回
+    **405**。写接口是被显式测掉的——以后要加必须先改这条用例和 ADR-020。
+
+多模态附件与欢迎区引导卡（2026-09-17 增加，ADR-021 / ADR-022）另有一组断言：
+
+12. **纯函数断言**（`workspace/attachments.ts` 与后端 `app/attachments/spec.py` 持同一份口径）：
+    扩展名表命中图片 / 代码 / 文档三类、`MAX_ATTACHMENT_COUNT === 4`、
+    `MAX_ATTACHMENT_BYTES === 5 * 1024 * 1024`、`classifyLocal` 对四类文件的归类、
+    `rejectionReason` 的三类拒绝**必须指名到文件**、`formatBytes` 的 KB/MB 换算、
+    `shortenName` 折叠后仍保留扩展名。
+13. **渲染断言**：`PendingFileChips` 与 `MessageAttachmentList` 按显式 props 单独挂一次
+    （空态必须渲染成空字符串，不能留一个空容器）。三种状态的**可见文案**要各就各位
+    （上传中 / 失败原因 / 体积）；图片附件渲染 `<img>` 且指向附件正文地址，非图片
+    **不得**出现 `img`；解析失败项必须写出原因并带 `failed` 标记。
+14. **读文件断言**：`App.tsx` 必须包含三条协作形态标签、`onChoose(p.text, "dynamic")`
+    （点卡同时切模式）、`promptMode` + `setMode(promptMode)`；`styles.css` **不得再有**
+    `.suggestions button`（旧横排规则残留会把新卡的图标撑成整宽），且新增界面引用的
+    类名（`.suggestion-icon` / `.suggestion-shape` / `.welcome .welcome-note` /
+    `.composer-attach` / `.composer-files` / `.composer-file.failed` /
+    `.conversation-composer.dragging` / `.composer-mode button.active` /
+    `.message-attachments` / `.message-attachment-thumb`）**逐个都要有定义**。
+    最后一条治的是真实事故：`config.css` 曾因残缺注释让 esbuild 压缩器**静默丢掉约 3KB 规则**
+    （只打 WARNING、退出码仍是 0），所以「类名有定义」不能只靠肉眼看构建输出。
+15. **选择器口径断言**：附件条目的**类名留给状态**（`uploading` / `ready` / `failed`），
+    类型写在 `data-kind` 上。必须出现 `.message-attachment[data-kind="text"]` 与
+    `.composer-file[data-kind="image"]`——写成 `.message-attachment.text` 不会报错，
+    只是永远不命中（初版就是这么写的，靠预览自检里数 `[data-kind="document"]` 的条数才发现）。
 
 **边界要说清**：它只跑不依赖 `useEffect` 的路径，跑不到「点击 → 请求 → 回填」的交互
 链路；那部分仍是人工浏览器验收（上面两张表就是人工清单），或退到 §3.4 的静态预览。
@@ -281,14 +388,64 @@ python frontend/rendercheck/build-preview.py      # 产出 rendercheck/ui-previe
 - `preview.tsx` 必须**自己** `import "../src/styles.css"`。那一行只在 `src/main.tsx` 里，
   而预览不经过 `main.tsx`；漏了会得到一个没有全局令牌与外壳版式的空壳页面。
 - 变更类请求（保存 / 删除）预览不模拟落库，统一回空成功体，免得评审版式时被红字带偏。
+  **例外是附件（ADR-021）**：`POST /api/v1/attachments` 在内存里造一条真附件、
+  `DELETE` 真删、`POST /messages` 真把消息推进该会话的消息表——因为前端发完立刻重拉
+  `GET /messages`，不真推进去「刚发出去的那条会人间蒸发」，评审时会以为是 bug。
+- 图片附件在预览里用**内联 SVG 顶替**正文地址（`preview.tsx` 换掉
+  `api.attachmentContentUrl` 的返回值）。`<img src>` 不走 `fetch`，mock 拦不住它，
+  预览又是 `file://` 单文件，不替换必然裂图，「缩略图长什么样」就评审不出来。
+- `build-preview.py` 里 `POST /messages` 的响应必须带 `attachments` 与
+  `unattached_attachment_ids` 两个字段：前端会读后者 `.length`，缺了就在「发送成功」之后
+  抛 `TypeError`（预览里点一次发送即可复现）。
+- **注释里不能出现 `*/`。** `preview.tsx` 的一条注释写了 `/api/v1/attachments/*/content`，
+  其中的 `*/` 把块注释提前闭合，后半段代码被当成语法碎片，`tsc` 报出一串
+  「Module declaration names may only use ' or " quoted strings / Unterminated template literal」
+  这类与真实位置无关的错。写路径通配时改成 `<id>` 或 `xxx`。
+- **`tsconfig.json` 的 `include` 只有 `src`**，`rendercheck/` 不在里面，所以
+  `npm run build` 覆盖不到这三个文件（esbuild 只转译、不做类型检查）。改完要单独过一遍：
+
+  ```bash
+  cd frontend && npx tsc --noEmit --jsx react-jsx --module esnext \
+    --moduleResolution bundler --target es2022 --lib es2022,dom,dom.iterable \
+    --strict --skipLibCheck --esModuleInterop --isolatedModules \
+    rendercheck/preview.tsx rendercheck/workspace-smoke.tsx rendercheck/config-smoke.tsx
+  ```
+
+  （会剩下 `node:fs` / `process` 找不到声明的报错，那是项目没依赖 `@types/node`，不是代码问题；
+  把这几类报错滤掉，剩下的才是真的。）
+  **这条命令比「`npm run build` 通过」更有意义**：`Attachment` / `Agent` 这类类型的必填字段一改，
+  `rendercheck` 里的夹具不会在构建时报错。2026-09-17 给 `Attachment` 加 `has_original` 时，就是靠
+  这条命令才发现 `preview.tsx` 的夹具漏了它（漏了会让预览里新上传的附件全部退化成「没有下载
+  入口」的形态，而这恰恰是要评审的东西）。
+- **`file://` 下 Windows 的盘符会混进 `pathname`（2026-09-21 修）**。mock 用
+  `new URL("<请求路径>", location.href).pathname` 查种子表，而 `file:///C:/Users/.../ui-preview.html`
+  下 `/api/v1/agents` 会解析成 `file:///C:/api/v1/agents`，`pathname` 变成 **`/C:/api/v1/agents`**
+  —— 种子里一条都命中不了，整页空数据，界面上只剩「预览未收录：GET /C:/api/v1/agents」。
+  已按 `^\/[A-Za-z]:(?=\/)/` 剥掉盘符前缀（HTTP 下是空操作）。
+  **这个缺口藏了很久**：离线自检（jsdom）用的 `location` 是 HTTP 形状，`pathname` 本来就对；
+  而「双击打开」这条真实用法从来没被自动检查覆盖。**声明的用法与自动检查的用法不一致，
+  缺口就会一直留着** —— 改完预览后请用 CDP 打开 `file://` 实跑一遍（见 §4.11 的「取证手段」），
+  不要只用 jsdom 自检通过就收工。
 - 产物 `ui-preview.html` 与中间产物 `.preview-bundle.*` 已进 `.gitignore`，不入库。
 
-预览产物本身可以离线自检（`jsdom` 挂载 + 点一遍侧栏与副路由，11 项断言）。这条链路
-**不进仓库**，因为项目刻意不引前端测试依赖；本机想跑就临时装：
+预览产物本身可以离线自检（`jsdom` 挂载 + 点一遍侧栏、副路由、四个配置分区、会话生命周期，
+以及 2026-09-17 新增的欢迎卡与附件：三张卡在且竖排居中、**先手动切「固定三步」再点卡片**
+验证模式被切回「自动编排」、切开会话后气泡里的**四种**附件形态（图片 / 文档 / 解析失败 /
+无原件的历史行）与「有原件的才是链接」，共 45 项断言）。
+
+> **别把它当成预览页的完整验收。** jsdom 里的 `location` 是 HTTP 形状，`file://` 特有的问题
+> （盘符混进 `pathname`，见上一节）它照不到；而「双击 HTML」才是这个预览的真实用法。
+> 改过 `preview.tsx` 就走一遍 CDP + `file://` 实跑（2026-09-21 实测：仅 jsdom 自检通过时，
+> 预览页在浏览器里是**整页空数据**）。
+这条链路**不进仓库**，因为项目刻意不引前端测试依赖；本机想跑就临时装：
 
 ```bash
 npm i jsdom && node verify_preview.mjs frontend/rendercheck/ui-preview.html
 ```
+
+> 为什么「先手动切到固定三步」这一步不能省：模式默认就是 `dynamic`，不先改一次的话
+> 「点卡片后是自动编排」这条断言**在功能坏掉时也会通过**。凡是断言「某动作导致了状态变化」，
+> 都要先把状态置于另一个值。
 
 > **纠正一条旧结论**：早前记录「`npm install jsdom` 长时间无产物」被当成网络问题。
 > 真实原因是 **npm 在缺少 `package.json` 的目录里会挂住**——补一个最小
@@ -321,7 +478,11 @@ npm i jsdom && node verify_preview.mjs frontend/rendercheck/ui-preview.html
 | U-08 沙箱边界拒绝越权 | 通过 | `tests/unit/test_sandbox_policy.py`：Python/Shell 越权拒绝、策略先于后端、`denied` 后端不降级执行（ADR-012） |
 | U-09 流水线接入 MCP 工具 | 通过（含真实模型验收） | `tests/unit/test_pipeline_tools.py`（15 例全绿，含「阶段活动消费默认注册表」，ADR-009）。真实路径已验收：API 模型下 collector/analyst 两阶段各产生一次 `calculator` 调用（`21*2`、`21+21`，`succeeded`） |
 | U-10 行为日志事件 | 通过 | `tests/unit/test_observability.py`（ADR-010） |
+
 | I-06 MCP 工具发现与调用 | 通过（跨进程 stdio 已补齐） | `tests/unit/test_mcp_tools.py` 走 `mcp.shared.memory` 的**真实 MCP 协议往返**（发现、调用、错误还原、目录）；真实流水线验收（2026-09-15）：Workflow 内 2 次 `calculator` 调用落 `tool_calls` 并读回（`21*2`、`21+21` → `42`）。原先遗留的「跨进程 stdio 传输端到端用例」已由 E-06（`tests/e2e/test_mcp_stdio_e2e.py`，2026-09-16）补齐 |
+
+| U-11 动态编排计划与调度 | 通过（单元级；未接真实模型） | `tests/unit/test_dynamic_pipeline.py`（43 例：计划解析的 12 类非法输入、规划降级、就绪度调度、连坐跳过、交付物取值、`resolve_workflow_name`）与 `tests/unit/test_workflow_dynamic.py`（13 例：规划/步骤活动、父工作流先规划后执行、子工作流实例 ID、终态一致性）。**缺口**：规划质量与「动态相对静态的净收益」没有任何度量，也没有把动态模式纳入真实模型回归（见 `doc/orchestration.md` §3.3） |
+| I-06 MCP 工具发现与调用 | 通过（缺跨进程 stdio） | `tests/unit/test_mcp_tools.py` 走 `mcp.shared.memory` 的**真实 MCP 协议往返**（发现、调用、错误还原、目录）；真实流水线验收（2026-09-15）：Workflow 内 2 次 `calculator` 调用落 `tool_calls` 并读回（`21*2`、`21+21` → `42`）；仍缺跨进程 stdio 传输的端到端用例 |
 | I-07 可观测数据输出 | 通过 | `tests/unit/test_observability_metrics.py`：Span 与属性/异常、指标去重、Prometheus 文本、`metrics` 表写入（SQLite 与表缺失两种路径）、降级不阻塞；`metrics` 表已由 `app/core/checkpoint.py::MetricRecord` 建出，2026-09-15 在真实 PostgreSQL 上跑通采样落库与 `/api/v1/metrics` 读回（16 条采样），真实 Prometheus 上抓到 `backend`/`dapr-sidecar` 两个 `up` target（43 条 `macp_*` 序列），真实 Jaeger 上查到 `stage.run`/`llm.chat` span；Token 按真实模型名归因（F-03 回归，见 §4.2） |
 | I-08 配置热更新 | 通过 | `PATCH /api/v1/config/agents/{agent_id}` 已实现（`doc/api.md` §5.7、ADR-013）：覆盖写 `agent_configs`，阶段活动执行时解析生效配置，无需重启；单元用例 `tests/unit/test_agent_config.py`（合并/校验/回退/表契约），集成用例 `tests/integration/test_config_api.py`（404/422/503/200 与生效值，裸请求可写见 ADR-015）；真实 PostgreSQL 上已跑通写入—读回—新执行生效 |
 | I-09 只读巡检接口 | 通过（本轮 3 条转红，见 §4.4） | `tests/integration/test_inspection_api.py`；覆盖分页、`availability` 区分「未接入」与「零条记录」、默认工具目录接线（`/tools` 返回 4 个注册工具）与 Prometheus 文本端点（`/metrics`）。**2026-09-16 修正**：此前写的「用 SQLite 内存表与注入目录数据」只对巡检存储成立——该文件没有屏蔽 Provider 覆盖，而 `tests/integration/` 又没有固定 DSN 的 conftest，Provider 相关 3 条实际读的是开发库，因此不等于真实 PostgreSQL/MCP 验收 |
@@ -516,6 +677,7 @@ conftest，DSN 落到 `app/core/storage.py` 的默认开发库，而这些用例
    在本机**无法**验收——E-01/E-02 目前的通过依赖模型当次未选该工具。
 2. 浏览器渲染，以及「发消息 → 观察 Agent 执行台推进 → 展开协作详情」仍是人工步骤：
    本轮只给核对清单，没有引入浏览器自动化（前端门禁是类型检查 + 构建，见 §3.3）。
+
 3. 「任务记录」页只显示当前会话最近一次执行（`App.tsx::History`）。**已闭环**
    （2026-09-16 回填）：PR #9 新增 `GET /api/v1/sessions` 枚举接口（`doc/api.md` §5.13）
    与删除接口（§5.14），记录页因此从三分区扩为四分区并新增「历史会话」分区，
@@ -690,8 +852,981 @@ MACP_E2E_LIVE=1 MACP_E2E_TIMEOUT=900 uv run pytest tests/e2e/test_live_e2e.py -q
 ≈ 40s/次，是 live 套件 9–10 分钟的主要来源；压缩它需要把 `TOOL_SEARCH_ENDPOINT` 指向
 可达服务或在无网环境不暴露该工具（配置项，未在本次范围）。
 
-## 5. 失败处理约定
+3. 「任务记录」页只显示当前会话最近一次执行（`App.tsx::History`，页面已标注
+   「完整历史查询尚未接入」）。做完整历史需要新增 `GET /api/v1/workflows` 一类的列表
+   接口，属新增能力，本轮未做；因此**不据此宣称** `分工.md` §7 的「Web UI 可展示任务历史」
+   已闭环。
+   - **后续状态（2026-09-16 起，此处更正）**：**会话级**历史已接入——`GET /api/v1/sessions`
+     （`doc/api.md` §5.13）+ 记录页「历史会话」副路由 + 侧栏「历史会话」下拉，可浏览并恢复任一
+     历史任务。上面这段说的是**workflow 级跨会话列表**，它到 D9-10 收尾时**仍然没有**，
+     所以「当前会话最近一次执行」的运行记录区口径未变。`doc/deployment.md` §E-04 的核对清单
+     已按这个区分改写。
 
+### 4.4 多模态附件、欢迎区引导卡与沙箱可用性（2026-09-17，成员 D）
+
+对应 ADR-021 / ADR-022 / ADR-023 / ADR-024。新增与改动：`app/attachments/`、`attachments` 表、
+三个附件接口、发送消息契约加 `attachment_ids` 与 `orchestration_mode`、编排侧四处 `attachments`
+透传、前端附件交互与欢迎区重做；同一天第二轮把沙箱在部署里真正启用（`deploy/compose.yaml`
+挂宿主机套接字）并把附件原件改为**全类型留档**。
+
+**1. 后端（隔离存储，跑法与 §1 一致）**
+
+```bash
+DATABASE_URL="postgresql+psycopg://postgres:postgres@localhost:5433/macp_test" \
+REDIS_URL="redis://localhost:6380/15" ./.venv/Scripts/python.exe -m pytest -q
+# 682 passed, 7 skipped, 6 warnings in 10.50s
+
+DATABASE_URL="..." REDIS_URL="..." ./.venv/Scripts/python.exe -m pytest -q \
+  tests/unit/test_attachments.py tests/integration/test_attachments_api.py \
+  tests/unit/test_dynamic_pipeline.py
+# 97 passed in 1.88s
+```
+
+两轮合计新增 61 例：附件 48 例（39 单元 + 9 集成）、「附件只进根步骤」的动态编排 3 例、
+`tests/unit/test_sandbox_docker_runtime.py` 10 例（探测与容器硬化，用假 client）。
+`7 skipped` 与 `6 warnings` 均为既有状态（需真实模型 / Starlette 弃用告警），本轮未新增跳过项。
+
+- `test_attachments_api.py` 覆盖：上传 201、四类 400、挂消息后归属回填、**重复提交只挂一次**
+  （第二次进 `unattached_attachment_ids`）、只带图不带文字可发送、`GET .../content` 的三类分支
+  （图片 `inline` / 文档 `attachment` / 无字节 `404`）、`DELETE` 的 204/409、删会话级联清附件。
+- `test_dynamic_pipeline.py` 新增：附件只进 `depends_on` 为空的根步骤、每个根步骤都拿到、
+  静态 `collect` 收到附件。
+- `test_sandbox_docker_runtime.py`：套接字连不上时原因里必须点到 `/var/run/docker.sock`；
+  **只 `ping` 通不算可用**（镜像不在宿主机也要报出来）；镜像缺失给可行动的错误；
+  `SANDBOX_AUTO_PULL_IMAGE` 打开时自拉一次并重试；容器参数逐条钉住（`cap_drop=['ALL']`、
+  `read_only`、`network_disabled`、`user=nobody`、`security_opt`、`/app` 被 tmpfs 遮住）。
+- `test_attachments.py`：PDF 样本升级为「每个入参一个内容流」，新增 **FlateDecode 压缩流**与
+  **多页合并**两条——真实 PDF 的内容流几乎都是压缩的，只留未压缩样本测不到 `zlib.decompress`
+  分支。
+
+**2. 前端（无测试框架，仍按「构建 + 无浏览器冒烟 + 预览自检」三步）**
+
+```bash
+npm --prefix frontend run build
+# 通过：tsc --noEmit && vite build，
+# 产物 index-xd77pDwS.css 78.51 kB / index-BRyVa_SR.js 402.86 kB
+```
+
+- `rendercheck/workspace-smoke.tsx` → **78/78**（本轮 +3：非图片条目也能打开原件并带下载文件名、
+  图片不带 `download`、无原件的历史行不给任何入口）
+- `rendercheck/config-smoke.tsx` → **69/69**（无回归）
+- `rendercheck/ui-preview.html` 的 jsdom 自检 → **45/45**（本轮 +3：有原件的条目是 `<a>`、
+  无原件的历史行是 `<div>` 且没有 `href`、图片不带 `download`）
+
+**3. 构建产物核对（防止样式被静默丢弃）**
+
+构建退出 0 **不等于**样式完整：`config.css` 曾因残缺注释让 esbuild 压缩器静默丢掉约 3KB 规则
+（只打 WARNING）。所以改完 CSS 要回查 `dist/assets/*.css` 里类名还在。
+本次核对结果是**注意压缩器会把属性选择器的引号去掉**：`[data-kind="text"]` 在产物里是
+`[data-kind=text]`，用带引号的形式去 `grep` 会得到 0 命中，误判成规则被丢
+（初版就误判过一次）。查的时候用去引号形式。
+
+**4. 真实环境验收（第二轮补齐）**
+
+第一轮欠下的四件事，第二轮逐条做了：
+
+1. **容器已重建 + 真机全链路**（`docker compose up -d --build frontend backend`）：
+   - 上传真实 PNG（31220 字节）→ 动态模式发消息 → 25.2 s 完成，`checkpoint.mode=dynamic`、
+     `plan_source=llm`；模型**读到了图**：答出「执行边界」与「docker 不可用」——图片块确实进了
+     根步骤的提示词。
+   - 静态链路：上传一份含代号「青鸢-7」的 `现场记录.md`，报告里原样写出该代号，证明文档正文
+     进了 `collect` 步骤。
+   - 原件下载（ADR-024）：文本附件 44 字节与上传**逐字节一致**、`text/markdown` +
+     `attachment`；解析失败的 PDF 同样能取回 `%PDF-1.4` 开头的原件；图片为 `inline`。
+2. **图片理解已接真实视觉模型**：见上，当前 Provider（`openai-compatible` → 本机 3000，
+   `gpt-5.5`）确实能看图。**这只证明这条通路是通的**，不构成对模型视觉能力的评测。
+3. **沙箱在部署里真正可用**（ADR-023）：`GET /config/sandbox` → `available=true`、`reason=null`；
+   容器内探针实测真实执行 `print(sum(range(1,101)))` → `exit=0, stdout=5050, 317 ms`；
+   `import os` → `SandboxViolation`（在起容器**之前**被拒）；超时用例 → `timed_out=true,
+   exit=124`、3.4 s 后容器被终止；工具层 `CodeExecutionTool.invoke` 同样返回 `docker/exit 0`；
+   运行后 `docker ps -a --filter label=macp.role=tool-sandbox` 无残留。
+
+**5. 仍未做 / 仍未验（不隐瞒）**
+
+1. **PDF 仍只有构造样本**：本轮补了 FlateDecode 压缩流与多页合并，但**没有真实扫描件或真实
+   排版 PDF**（本机无 PDF 生成库、也无公网样本），「生产 PDF 的抽取成功率」没有数据。
+2. **视觉能力没有评测集**：只证明通路可用（上面第 2 条），没有「多少张图能读对」的度量。
+3. **`list_attachments_for_messages` 会把 `data` 列读出来再丢掉**：ADR-024 记录的既有低效，
+   本轮只加了纯内存判断（没有变差，也没修好）。会话内附件多时这条查询会变重。
+4. **动态编排的净收益仍无度量**：与 §4.2 里 U-11 的缺口同源。
+
+### 4.5 D9-10 收尾：真实附件样本、视觉评测集、Agent 读会话文件、附件回读列、编排净收益（2026-09-17，成员 D）
+
+§4.4 末尾登记的四条「仍未做」在本轮逐条处理，另加一条顺手修掉的既有低效。
+新增决策 [ADR-025](decisions/025-session-file-tools.md)（会话级文件工具）。
+
+**1. 后端（隔离存储，跑法与 §1 一致）**
+
+```bash
+DATABASE_URL="postgresql+psycopg://postgres:postgres@localhost:5433/macp_test" \
+REDIS_URL="redis://localhost:6380/15" ./.venv/Scripts/python.exe -m pytest -q
+# 724 passed, 7 skipped, 7 warnings in 10.50s（上一轮 682 → +42）
+```
+
+新增 42 例：
+
+| 文件 | 例数 | 覆盖 |
+| --- | --- | --- |
+| `tests/unit/test_attachment_fixtures.py` | 13 | 真实 fpdf2 / python-docx / openpyxl 产出的 6 份夹具 |
+| `tests/unit/test_session_files_tools.py` | 19 | 会话文件工具、注册表装饰、接线到阶段执行 |
+| `tests/unit/test_attachment_readback_columns.py` | 4 | 回读语句的列契约（不选 `data` / `text_content`） |
+| `tests/unit/test_attachments.py` | +6 | PDF `/ToUnicode`：十六进制 CID、字面量 CID、无 CMap、码冲突、bfrange、二进制流 |
+
+`7 skipped` 与既有 6 条 warning 不变（需真实模型 / Starlette 弃用告警）。本轮多出的
+第 7 条 warning 是**本机环境噪声**：`.pytest_cache` 目录不可写触发的
+`PytestCacheWarning: Permission denied`，与代码无关，加 `-p no:cacheprovider` 即回到 6 条。
+
+**2. 真实二进制附件夹具（上一轮「PDF 仍只有构造样本」）**
+
+`tests/unit/test_attachments.py` 里的样本是**手工拼的字节串**——它能钉住「某段正则能处理
+某种形状」，钉不住「真实工具产出的文件长什么样」。本轮补 `scripts/make_attachment_fixtures.py`
+生成、并提交 6 份**真实库产出**的夹具到 `tests/fixtures/attachments/`：
+
+| 夹具 | 生成方式 | 期望 |
+| --- | --- | --- |
+| `quarterly-report.pdf` | fpdf2，核心字体 + FlateDecode + 3 页 | 读出全文（含第三页附录） |
+| `embedded-subset-font.pdf` | fpdf2 + 内嵌 DejaVuSans TTF 子集，CID 写字面量串 | 靠 `/ToUnicode` 读出全文 |
+| `two-font-heading.pdf` | fpdf2 + Bold/Regular 两套内嵌字体 | **明确失败**，不产出乱码 |
+| `scanned-invoice.pdf` | PIL 画整页位图后贴进 PDF | 明确失败（没有文本层） |
+| `meeting-notes.docx` | python-docx（含表格） | 段落与表格单元格都出来 |
+| `budget-plan.xlsx` | openpyxl（含**无缓存结果的公式**） | 表头声明「公式未求值」 |
+
+夹具生成**不进测试依赖**（测试环境没有 fpdf2 / python-docx / openpyxl，也不该为了读夹具去装）：
+
+```bash
+uv run --no-project \
+  --with fpdf2 --with pillow --with python-docx --with openpyxl --with matplotlib \
+  python scripts/make_attachment_fixtures.py
+```
+
+用 matplotlib 只是为了取一份**开源许可**的 TTF（DejaVuSans）——内嵌商业字体（SimHei 等）
+会把字体文件带进提交物，许可上不合适。`test_fixture_directory_is_fully_covered` 钉住
+「夹具目录里不能有没人测的文件」。
+
+**这一轮真正补上的能力是 PDF 的 `/ToUnicode` 解码**：真实 PDF 的正文常写成**字形码**
+（CID）而不是字符，单靠 `latin-1` 解出来是控制字符，解析器会整份放弃。`extract_pdf` 现在
+会合并文档自带的 `/ToUnicode` CMap（`beginbfchar` / `beginbfrange`），把字面量串
+`(\000\001…)` 与十六进制串 `<0001…>` 两种写法都解回文字。
+
+**冲突码安全拒绝**是刻意保留的边界：子集字体的码各自从 0 起编，两套字体合并后同一个码
+会指向不同的字；按「能解出来就用」会产出**通顺但完全错误**的句子——比读不出来更糟，
+因为模型会当真。所以冲突时返回 `failed`，错误信息点明「字符码冲突、按此解码会得到乱码」，
+由 `two-font-heading.pdf` 钉住。
+
+**3. 视觉能力评测集（上一轮「视觉能力没有评测集」）**
+
+`scripts/vision_eval.py`：10 个**答案唯一、机器可判**的用例，覆盖计数（含颜色/形状双重筛选）、
+颜色识别、位置（最左/最高）、七段数码管 OCR、网格行列定位、以及「图中没有三角形」这类
+**否定回答**。图片用 Pillow 按固定坐标画（数字自绘七段管，不依赖字体），走**真实链路**：
+`prepare_upload` → `AttachmentPayload` → `build_human_content` → 真实模型，不绕过附件层。
+
+```bash
+MACP_VISION_EVAL=1 uv run --with pillow python scripts/vision_eval.py \
+  --out doc/evals/vision.md --keep-images .workbuddy/tmp/vision-images --gap 6
+# 10/10 通过
+```
+
+报告：[doc/evals/vision.md](evals/vision.md)。**它评的是「看不看得对」，不评回答质量**；
+期望串是「归一化后命中」，适合当趋势指标与回归闸门，不是精确准确率。
+**评测图片不入库**：脚本按固定坐标逐像素生成，换台机器画出的是同一张图（`--keep-images`
+只是给人工看一眼），所以提交一目录二进制没有意义，报告里写清用例形态就够了。
+
+**4. Agent 按需读回会话附件（上一轮「Agent 仍无法自己读文件」）**
+
+按 ADR-025 新增两个**会话级只读**工具 `list_session_files` / `read_session_file`，
+数据来自 `attachments` 表：不放宽沙箱策略（`open` / `import` 依旧禁止）、不给沙箱挂任何卷、
+不进 `GET /api/v1/tools` 静态目录。19 例覆盖：清单与读取、截断（`session_file_max_chars`）、
+图片不可读的提示、解析失败时带出原因、**子串歧义拒绝**（`invoice.pdf` 与 `invoice-2026.pdf`
+并存时不猜）、注册表按会话追加、`session_scoped_registry` 在无会话/无条目时空转。
+`tests/e2e/test_pipeline_e2e.py` 的真实工具断言改为断言它们**在执行时确实被绑定给模型**
+（`bound == {四个内置} ∪ {两个会话级}`）——只在单元测试里存在不算数。
+
+**5. 附件列表回读不再读 `data` 列（上一轮「既有低效，未修」）**
+
+ADR-024 时期 `list_attachments_for_messages` 用 `select(AttachmentRecord)` 取实体，
+`data` / `text_content` 被读出来又丢掉。现在改为显式列元信息
+（`_attachment_meta_columns()`），`has_original` 由**库侧** `data IS NOT NULL` 算出。
+返回结构与调用方口径不变。回归靠编译语句断言选中列里没有 `data` / `text_content`
+（`tests/unit/test_attachment_readback_columns.py`）——**不用 SQL 子串断言**：
+`has_original` 的表达式本身含 `attachments.data`，子串断言会误报。
+
+**6. 静态 vs 动态编排的净收益（上一轮「动态编排的净收益仍无度量」）**
+
+`scripts/orchestration_ab.py`：4 个任务 × 2 种模式，进程内直跑两条链路，对比
+墙钟 / 模型纯耗时 / 节流等待 / 步骤数 / 模型调用数 / 输入输出 token / 交付物字符 /
+「必备内容是否命中」。报告：[doc/evals/orchestration-ab.md](evals/orchestration-ab.md)。
+
+```bash
+MACP_AB_LIVE=1 uv run python scripts/orchestration_ab.py \
+  --out doc/evals/orchestration-ab.md --gap 6 --min-interval 6 --retry 2
+```
+
+**这一轮量出一个环境事实，必须先记下来**：本机网关（`localhost:3000`，one-api 系）在
+**紧接着**上一次请求结束就发下一次时，必然在 ~1.4s 内返回 500 `do_request_failed`。
+判定实验（同进程、同一模型）：
+
+| 调用 | 与上一次的间隔 | 结果 |
+| --- | --- | --- |
+| A | 首次 | 成功（2.84s） |
+| B | 立刻（同客户端） | **失败**（1.33s） |
+| C | 距 B 6s（同客户端） | 成功（2.48s） |
+| D | 立刻（**新建客户端**） | **失败**（1.52s） |
+| E | 距 D 6s | 成功（2.95s） |
+
+D 用的是新客户端却同样失败 → **不是连接复用**，是网关侧节流。第一次跑批因此
+**8 个组合全灭**，且失败形态极具误导性：静态链路第 1 步（collect）成功、第 2 步
+（analyze）必失败；动态链路规划成功、第一步必失败——看起来像"某一步有 bug"，
+实际是"第 2 次调用撞上节流"。所以脚本里加了 `GatewayThrottle`：相邻调用强制间隔
+（`--min-interval`，默认 6s）+ 只对**报错**重试，并把**等待时间与模型纯耗时分开记**。
+不加它，量到的是网关限流而不是编排差异。视觉评测（第 3 条）也是靠同样的间隔与退避
+才跑出 10/10。加上之后第二次跑批 **8/8 组合全部成功、0 次重试需要触发**。
+
+**跑出来的数（单轮采样、4 个任务，`--min-interval 6`）**：
+
+| 任务 | static token | dynamic token | 差值 | 步骤（static → dynamic） | 交付物字符（static → dynamic） |
+| --- | --- | --- | --- | --- | --- |
+| `single_question` | 6080 | 1687 | **-72.3%** | 3 → **1** | 1596 → 81 |
+| `collect_then_summarize` | 5523 | 2696 | **-51.2%** | 3 → **1** | 1805 → 403 |
+| `two_independent_sources` | 16413 | 43208 | **+163.3%** | 3 → 4 | 2610 → **736** |
+| `analysis_only` | 25432 | 35723 | +40.5% | 3 → 3 | 3697 → 6431 |
+| **合计** | 13362/次 | 20828/次 | **+55.9%** | 3.0 → 2.25 | — |
+
+「必备内容命中」两边都是 **4/4**。所以结论是：**在这个小样本上，动态编排的净收益是负的**
+（+55.9% token、+0.2 次调用，质量判据持平）。分开看两条更值得记的事实：
+
+1. **动态的「省」来自它不做三步**：前两个任务上规划节点把计划收敛成 **1 步**，等于承认
+   「这任务不值得走收集→分析→报告」。这确实便宜，但**不是动态编排的功劳**——
+   给静态链路加一条「简单任务跳过 collect」的规则成本更低（连规划调用都省了）。
+2. **动态的「贵」发生在它真正拆开的时候，而且没换来产出**：`two_independent_sources`
+   是唯一为「两路独立收集」准备的任务，动态确实拆成 4 步，但代价是 **2.6 倍 token**
+   （43208 vs 16413），交付物却**从 2610 字缩到 736 字**。更贵、更多步、产出更短——
+   这是本轮最直接的反面证据。
+
+因此**不建议在本轮之后打开 `AGENT_ORCHESTRATION_MODE=dynamic`**（默认仍是 `static`）；
+档 3（并行 / 聚合 / 反思）的前置条件**仍未满足**——现在有数了，而数说「先别加」。
+下一步该做的是把评测集做大（更多任务 + 参考输出 + 多轮采样），而不是先加并行。
+
+报告模板里还有一张**按任务看差值**的自动表，就是为了防止「合计平均值」把这种结构差异
+抹平（合计那一栏读起来像"动态贵 56%"，实际是两个方向的巨大差异相加）。原始行落在
+`doc/evals/orchestration-ab.rows.json`，改报告措辞用 `--from-rows` **离线重渲染**，
+不必再花一次 20 分钟的模型开销。
+
+**7. 仍未做 / 仍未验（不隐瞒）**
+
+1. **`orchestration_mode=dynamic` 的部署环境端到端回归**：`tests/e2e/test_live_e2e.py` 走
+   HTTP 打的是部署好的栈，至今只覆盖静态链路；动态链路的真实模型证据是脚本级的
+   （第 6 条）而不是走 compose 的。
+2. **规划质量仍只能人工读**：`plan_source` 区分 `llm` / `fallback`，但没有「降级率」指标，
+   也没有「动态的计划比固定三步更贴任务」的机器判据。
+3. **扫描件 OCR**：`scanned-invoice.pdf` 这类没有文本层的 PDF 只做到「明确失败 + 保留原件」，
+   不做 OCR。这是范围选择，不是缺陷。
+   → **已由 §4.7 / [ADR-027](decisions/027-scanned-pdf-page-images.md) 推进**：仍然不做 OCR，
+   但页面会渲成图片走视觉通路，模型不再看到零内容。
+4. **多字体 PDF**：两种以上内嵌字体且码冲突时拒绝解析（第 2 条）。单字体覆盖了主流导出，
+   但「同一份文档里正文与页眉用不同字体」的场景目前读不了。
+   → **已由 §4.7 / [ADR-027](decisions/027-scanned-pdf-page-images.md) 兜住**：文本通路仍然拒绝
+   （正确性优先），但这类 PDF 会走页面图像，实际可读。
+5. **视觉评测只测 10 例、单轮采样**：够当闸门，不够当准确率；`--repeat` 与更大用例集是
+   后续的事。
+
+### 4.6 MCP 注册表接入编排层（2026-09-19，成员 D）
+
+新增决策 [ADR-026](decisions/026-registry-servers-in-orchestration.md)。§4.5 结束时留下的
+唯一硬缺口是：**配置页登记并「发现」的 MCP Server 对 Agent 完全无效**
+（`mcp_server_registry` 的引用者只有 API 层 CRUD）。本轮把它接上了。
+
+**1. 改动**
+
+| 文件 | 变化 |
+| --- | --- |
+| `app/mcp/registry.py` | 新增 `RegistryServersToolRegistry`（合成层）、`registry_server_entries()`、`refresh_registry_server_entries()`、`_entry_tools()`；`build_tool_registry()` 在基础后端上叠合成层 |
+| `app/core/mcp_registry.py` | 新增 `_sync_orchestration_tools()`，在增删改 / 发现 / 列配置之后刷新快照 |
+| `app/mcp/__init__.py` | 转出新增的公开名 |
+| `tests/unit/conftest.py` | 新增 `memory_mcp_registry`（autouse），理由见下 |
+
+**2. 验证**
+
+```bash
+./.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider \
+  tests/unit/test_registry_servers.py
+# 13 passed in 0.63s
+
+./.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider \
+  tests/unit/test_mcp_tools.py tests/unit/test_pipeline_tools.py \
+  tests/unit/test_session_files_tools.py tests/unit/test_dynamic_pipeline.py
+# 95 passed in 1.67s
+```
+
+13 例覆盖：与内置工具合成、目录只取**已发现的缓存**（用 `transport="ws"` 证明没去连接）、
+`disabled` 摘除且给出原因、重名时内置优先、调用路由到真 Server（走真实 MCP 协议往返）、
+未知名字回退基础注册表、传输不支持不抛、读表失败**只尝试一次**、刷新后目录跟随、
+`close` 释放 Server 与基础后端。
+
+**3. 本轮实测踩到的坑（已写进 ADR 的「决策 3」）**
+
+第一版让 `list_tools()` **每次现读** `mcp_server_registry`。这在存储正常时看不出问题，
+存储不可达时是灾难性的：`docker ps` 显示 Docker Desktop 已停，此时到 `5433` 的连接
+失效形态是 **`TimeoutError`（包被丢弃）而不是 `ConnectionRefused`**，于是**每次**工具枚举
+都要卡满一个 TCP 超时——4 个文件共 95 例从「几十秒」变成 **15 分钟都跑不完**。
+
+「读不到配置」的正确含义是「没有额外工具」，不是「整条流水线停摆」。所以改成
+**进程内快照 + 配置面主动刷新**：只加载一次、失败不重试，热路径纯内存。
+
+**4. 单测必须隔离这条读取**
+
+`tests/unit/conftest.py` 新增 autouse 的 `memory_mcp_registry`，把快照固定为空。
+它与既有的 `memory_redis`、`MemoryMetricSink` 是同一条约定——**单元测试不连真实
+PostgreSQL**（§1）。把它当作"测试环境特殊处理"就错了：它同时也是**生产语义**的一部分，
+即工具枚举路径上不能有 IO。
+
+**5. 本轮验证边界（如实记录）**
+
+- **全量回归未跑**：本机 Docker Desktop 已停（PostgreSQL 5433 / Redis 6380 / 网关 3000
+  全部不可达），而全量用例依赖真实 PG。上面两组数字是**不依赖存储**的那部分，
+  不是本轮的完整证据。启动 Docker 后需要补跑：
+  `DATABASE_URL="postgresql+psycopg://postgres:postgres@localhost:5433/macp_test" REDIS_URL="redis://localhost:6380/15" ./.venv/Scripts/python.exe -m pytest -q`
+- **`tests/unit/test_mcp_registry.py`（Server CRUD）未验证**：它是本轮改到
+  `app/core/mcp_registry.py` 的直接对象，且需要真实 PG。改动本身只新增了一个
+  「记日志 + 通知编排层」的调用，不改返回值，但**这是未验证的部分**。
+- **动态模式的 compose 端到端回归仍未做**（承接 §4.5 的缺口）。
+
+**6. 顺手修掉的文档缺陷**
+
+`doc/testing.md` 第 201 行原写「见 §3.4 的漂移清单」，但**全文没有这一节**——
+§3.4 是「UI 评审预览」。悬空引用已删除，该行同时更新为准确表述：
+`disabled` 现在真的会摘掉工具（ADR-026），`allowAutoExecution` 仍然不消费（HITL 未做）。
+
+### 4.7 扫描版 PDF 走页面图像，不引 OCR 引擎（2026-09-20，成员 D）
+
+新增决策 [ADR-027](decisions/027-scanned-pdf-page-images.md)。§4.5 留下的边界是
+「扫描件只**明确失败** + 留原件」——原件留住了，但模型看到的是**零内容**。本轮把这个洞补上：
+抽不出正文的 PDF 把页面渲成 PNG，当普通图片附件走**已经付过成本的**视觉通路
+（`doc/evals/vision.md` 的 10 例实测 10/10）。仍然**不做 OCR**：识别错一个字产出的是一句
+通顺但错误的话，而页面图里模型自己会做视觉判断。
+
+**1. 改动**
+
+| 文件 | 变化 |
+| --- | --- |
+| `app/attachments/render.py` | **新增**：`render_pdf_pages()` / `encode_png()` / `RenderedPages` + 五个上限常量 |
+| `app/attachments/extract.py` | `extract_pdf()` 抽不到正文时先**探测渲染第 1 页**；新增 `_pdf_render_note()`；`_pdf_failure_reason()` 带上「转图也失败」的原因 |
+| `app/attachments/prepare.py` | 新增 `_expand_scanned_pdf()`，`load_payloads()` 把这类 PDF 展开成逐页图片载荷（**执行阶段**才渲） |
+| `app/attachments/prompt.py` | 附件数按 id 去重计；「没有可用正文」与「超出长度上限」拆成两句不同的说明；清单带上 `ready` 项的降级说明 |
+| `pyproject.toml` / `uv.lock` | `pypdfium2==5.13.0`（BSD-3 / Apache-2.0，wheel 自带 pdfium） |
+| `frontend/src/workspace/attachments.ts` | `describeAttachment` 显示 `ready` 项自带的降级说明（原来被静默丢掉） |
+
+**2. 验证**
+
+```bash
+./.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider tests/unit/test_pdf_render.py
+# 13 passed in 1.02s
+
+./.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider \
+  tests/unit/test_mcp_tools.py tests/unit/test_pipeline_tools.py \
+  tests/unit/test_session_files_tools.py tests/unit/test_dynamic_pipeline.py \
+  tests/unit/test_attachments.py tests/unit/test_attachment_fixtures.py \
+  tests/unit/test_pdf_render.py
+# 173 passed in 3.13s
+
+./.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider tests/integration/test_attachments_api.py
+# 10 passed in 2.09s
+
+cd frontend && npm run build                      # tsc --noEmit + vite build 通过
+node_modules/.bin/esbuild rendercheck/workspace-smoke.tsx ... && node "$TEMP/workspace-smoke.cjs"
+# 80/80 checks passed（+2 条本轮新增的文案断言）
+```
+
+`test_pdf_render.py` 的 13 例刻意**自带一个最小 PNG 解析器**（逐块校验 CRC、核对解压行长、
+检查每行 filter 字节）：编码器是自己手写的，用另一个库来"相信"它等于没测。
+另外两处实测数字值得记一笔：一页 A4 渲染 **0.02–0.3 秒**、PNG **17–52 KB**；
+两份原本读不出正文的夹具（`scanned-invoice.pdf`、`two-font-heading.pdf`）渲出来的图
+**肉眼完全可读**（发票金额与标题文字都清楚），这正是"渲染不是 OCR 的降级品"的证据。
+
+**3. 边界（如实记录）**
+
+- **超过 5 页只带前 5 页**：硬上限，靠载荷名字里的「第k页/共N页」与 `error` 里的说明如实报告，
+  也不做长图拼接——视觉模型会把长边缩到 1.5k 像素，拼起来每页只剩约 300px 高，文字全糊。
+- **不做空白页检测**：可靠的空白判断要逐像素统计（没有 numpy 时是慢路径），误判代价是
+  **丢掉真实内容**；宁可让模型自己说"这一页是空白的"。
+- **`read_session_file` 工具读不到扫描件正文**：工具结果只能是文本，无法回传图片；
+  它会看到 `status=ready` + `text=null` + 那句降级说明。
+- **镜像必须重建**：`uv sync --frozen` 从 `uv.lock` 装 pypdfium2，compose 里的 backend
+  不重建就还是老镜像；组件缺失时降级为 `failed` 并**点明 `pypdfium2`**，不是含混的"读不出来"。
+
+**4. 本轮验证边界（承接 §4.6）**
+
+本机 Docker Desktop **仍未启动**（PostgreSQL 5433 / Redis 6380 / 网关 3000 不可达），
+所以上面四组数字依旧是**不依赖存储**的那部分。全量回归（基线 724 passed / 7 skipped）
+与依赖真实 PG 的用例需要在 Docker 起来后补跑，命令见 §4.6。
+
+**5. 顺带修正的旧断言**
+
+两份夹具的期望从「明确失败」改成「`ready` + 页面图像」，这是 ADR-027 改的就是这条边界；
+但**核心不变量一条没松**：任何情况下都不许产出"像正文的垃圾"。
+`_assert_no_readable_text()` 把它固化成一个共用断言——`text` 必须是 `None` 或有真内容，
+且 `error` 必须交代清楚（能渲染就写"改走页面图像"，不能就报 `failed` + 原因）。
+
+### 4.8 执行台弹窗改为「执行轨迹」，时间补日期，确认行右对齐（2026-09-21，成员 D）
+
+§4.7 之后用户提的三处界面问题，一处是功能缺口、两处是版式：
+
+**1. 改动**
+
+| 文件 | 变化 |
+| --- | --- |
+| `app/api/stage_trace.py` | **新增**：只读读取 Dapr State Store 的阶段状态，还原 `content` / `previous` / `tool_calls` |
+| `app/api/main.py` | 新增 `GET /api/v1/workflows/{id}/stages`（§5.17）与三个响应模型 |
+| `frontend/src/workspace/AgentStageModal.tsx` | 重写为**执行轨迹**弹窗（`AgentTraceView` 纯视图）；删掉「角色与模型绑定」整块与随之为死的字段 / 导出 |
+| `frontend/src/config/shared.tsx` | 新增 `formatStamp(value, now = new Date())`：今天 / 昨天 / `M月D日 HH:mm` / 跨年补年份 |
+| `frontend/src/App.tsx` | 删掉只给 `HH:mm` 的本地时间实现，改走 `formatStamp` |
+| `frontend/src/workspace/workspace.css`、`config/config.css` | `.cfg-modal-foot` / `.cfg-actions` 加 `justify-content: flex-end` |
+
+弹窗回答的是「**它收到了什么、调了什么、产出了什么**」：分配到的任务（上游正文）、按序的工具调用
+（含失败原因与截断标记）、阶段产出。**不放模型与参数**——角色绑定与调参属于「Agent 团队」页。
+模型内部的隐藏推理没有落盘，弹窗如实说明，不伪造「思维链」。
+
+**2. 验证**
+
+```bash
+./.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider tests/unit/test_stage_trace.py \
+  tests/integration/test_stage_trace_api.py
+# 13 passed（9 + 4）
+
+./.venv/Scripts/python.exe -m pytest -q          # 全量（隔离存储 macp_test + redis/15）
+# 768 passed / 7 skipped in 14.41s
+
+cd frontend && npm run build                      # tsc --noEmit + vite build 通过（CSS 80.68 kB）
+node_modules/.bin/esbuild rendercheck/workspace-smoke.tsx ... && node "$TEMP/workspace-smoke.cjs"
+# 90/90 checks passed（+10）
+```
+
+**线上端到端**（`docker compose up -d --build backend frontend` 重建后，17m36s，两镜像 Built、
+容器 healthy）——要证的是 §5.17 在**真部署**（PostgreSQL + Dapr sidecar + 真实模型网关）上
+读得出轨迹，不是拿单测替身糊的：
+
+- 任务「用计算器算出 128/2680 的结果（保留四位小数）」→ workflow
+  `961af452-c680-49d9-8cf5-38c5d9fad431`，终态 `completed`，
+  `completed_steps=["collect","analyze","report"]`。
+- `GET /api/v1/workflows/{id}/stages` → `mode=static`、`availability=available`，三阶段齐全：
+  `collect` 是根阶段（`input=null`）且有 **1 次 `calculator` 调用**
+  （`{"expression":"128/2680"}` → `{"value":0.04776119402985075}`，`succeeded`）；
+  `analyze` 的 `input` 正是 `collect` 的产出切片（**上游接线生效**）；三者 `truncated: false`。
+- 镜像内产物核对：`dist/assets/*.css` 含 `ws-trace-` 与 5 处 `justify-content: flex-end`
+  ——新样式确实烤进了 nginx 镜像，不是只躺在宿主机源码里。
+
+**3. 边界（如实记录）**
+
+- **动态链路没有逐步骤轨迹**（ADR-019 不落盘）：接口回 `availability=not_integrated` + 原因，
+  界面原样显示这句，不改写成「暂无数据」。
+- **「没有轨迹」有四句不同的话**：尚未开始 / 正在执行（轨迹在阶段完成后才落盘）/ 已完成但状态
+  已被清理 / 载荷无法解析。混成一句会让用户去查错的地方。
+- 预览页路由表有**两处**（`rendercheck/preview_seed.py::ROUTES` 与 `build-preview.py`），
+  漏一处就提示「预览未收录」——本轮又踩了一次，已补。
+
+### 4.9 侧栏改为协作画布，会话工作流可编号回看（2026-09-21，成员 D）
+
+用户的反馈是「右侧栏的 Agent 卡片应该是记 Agent 的参数、Token 这些，和 Agent 执行台不一样」。
+根子上是**三块视图的分工没落到数据上**：侧栏此前展示的是执行进度，和执行台弹窗说的是同一件事。
+本轮把侧栏改成「这个 Agent 是用什么跑的」，并给它一个能回看历史对话的全屏画布。
+决策见 [ADR-028](decisions/028-sidebar-collaboration-canvas.md)。
+
+**1. 改动**
+
+| 文件 | 变化 |
+| --- | --- |
+| `app/core/checkpoint.py` | 新增 `list_workflows_for_session()`，**按 `created_at` 升序**返回（编号由位置决定，顺序是契约） |
+| `app/api/store.py` | `SqlApiStore` / `InMemoryApiStore` 实现 `list_workflows()`；内存实现同样排序 |
+| `app/api/main.py` | 新增 `GET /api/v1/sessions/{id}/workflows`（§5.18）与 `WorkflowListResponse` |
+| `frontend/src/workspace/collaboration.ts` | **新增**：纯模型（波次、参数、用量归集、工具链路、节点/连线/图），不依赖 React |
+| `frontend/src/workspace/CollaborationGraph.tsx` | 重写为 **Agent 卡片 + 连线**；移除「点击开弹窗」 |
+| `frontend/src/workspace/CollabCanvas.tsx` | **新增**：全屏画布，顶部 `对话 1 / 2 / 3` 编号切换，Esc 关闭 |
+| `frontend/src/workspace/TaskUsage.tsx` | 抽出 `useWorkflowMetrics()`（卡片与用量面板共用一次请求）与 `usageFor()`；新增 `scopeOf()` 的 `role` 兜底 |
+| `frontend/src/workspace/workspace.css` | `.collab-card*` / `.collab-hover`（CSS 驱动悬停）/ `.collab-overlay`（`fixed`，z-index 40） |
+| `frontend/src/api/client.ts`、`frontend/src/App.tsx` | 新接口封装；`Inspector` 接管画布状态与「别的对话单独取一份轨迹与用量」 |
+| `rendercheck/{preview_seed.py,build-preview.py,workspace-smoke.tsx}` | 两处路由登记；种子按**真实标签口径**（`role`/`stage`，无 `agent_id`）给；冒烟 +31 条 |
+
+**2. 修掉的真问题：Token 没有归到 Agent 头上**
+
+采样标签里**没有 `agent_id`**——编排层两条链路都只传 `role`
+（`app/orchestration/pipeline_graph.py`、`dynamic_graph.py` 调 `observed_stage(...)` 时只给 `role`），
+落地标签是 `workflow_id` / `stage` / `role`（Token 另有 `model`）。`scopeOf()` 原来只认 `agent_id`，
+于三个 Agent 的 Token 全部退到 `model` 一层、合并成一个 `gpt-5.5` 分组，界面上看就是
+「Token 没按 Agent 记」。归集顺序改为 `agent_id` → `role` → `model` → 任务级。
+`doc/api.md` §5.5 原文写的「可选 agent_id/model」也是**文档漂移**，已一并改正。
+
+**3. 验证**
+
+```bash
+./.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider \
+  tests/integration/test_session_workflows_api.py tests/integration/test_stage_trace_api.py \
+  tests/unit/test_stage_trace.py
+# 18 passed（5 + 4 + 9）
+
+cd frontend && npm run build                      # tsc --noEmit + vite build 通过（CSS 86.76 kB / JS 417.37 kB）
+node_modules/.bin/esbuild rendercheck/workspace-smoke.tsx ... && node "$TEMP/workspace-smoke.cjs"
+# 121/121 checks passed（+31）
+node_modules/.bin/esbuild rendercheck/config-smoke.tsx ... && node "$TEMP/config-smoke.cjs"
+# 69/69 checks passed
+```
+
+`rendercheck/*.tsx` 单独过一遍 tsc：只剩既有的 `@types/node` 缺失噪音（`tsconfig.json` 的
+`include` 只有 `src`，覆盖不到本目录）。预览页重建：**42 条路由**，种子里能看到两个对话编号
+（`wf-preview-earlier` 是补出来的更早一次已完结对话），切到「对话 1」时它的
+`GET /workflows/{id}` / `/stages` / `/tool-calls` 三条也都有应答——不然预览里的历史对话会是空白。
+
+**线上验证**（`docker compose up -d --build backend frontend` 重建后，两镜像 Built、
+容器 healthy；入口是 **5173** 的 nginx 反代 `/api`）：
+
+- `GET /api/v1/sessions/{id}/workflows` 对一条有 **3 条**工作流的会话回
+  `total=3`，顺序与创建时间一致（16:17:45 → 16:23:36 → 16:23:39），即「对话 1 / 2 / 3」
+  在真实数据上成立，不只是单测里造出来的；三条的 `session_id` 全部等于被查询的会话。
+  未知会话回 `404 SESSION_NOT_FOUND`（不是空列表——「草稿态」与「不存在」是两件事）。
+- 前端容器里核到了新产物：`index-tFSw4r53.css` 含 `.collab-card` / `.collab-overlay` /
+  `.collab-hover` / `.collab-link-tools`，`index-DIwFFPx_.js` 含「展开全屏画布」「工具链路」
+  「collab-canvas」——**部署里的界面确实换了，不是只在源码里**。
+- **采样标签的实测口径**（直接查库，不是推断）：
+  `select metric_name, labels from metrics where labels->>'workflow_id' = '961af452-…'` 回的标签是
+  `{"role": "collector", "model": "gpt-5.5", "stage": "collect", "workflow_id": "…"}`；
+  另查 `where labels ? 'agent_id'` → **全库 0 条**。这就是 §5.5 那处漂移的实证：
+  `agent_id` 从来不存在，Token 只能靠 `role` 归到 Agent 头上。
+
+**4. 边界（如实记录）**
+
+- **卡片不再是执行轨迹的入口**：点了不跳 §5.17 弹窗。执行台卡片已经承担那个入口，两块视图都能
+  点进同一份轨迹就又会混成一个（ADR-018）。
+- **悬停详情用 CSS `:hover` / `:focus-within`，不用 JS 状态**：DOM 常驻 → 键盘可达，
+  离屏冒烟也能断言内容（JS 状态驱动的浮层在静态渲染里永远是空的）。
+- **工具链路的计数一律写出来，包括 `×1`**：只在多于一次时写计数会得到
+  `web_search ×3、sql_query` 这种半截话，读者无从判断后者调了几次。
+- **并行是「上游那一波」决定的**：连线 `kind` 看上游波次的节点数，不看两端是否同波——
+  依赖永远指向更低的波次，同波判断不可达。
+- **动态链路只有进度没有逐步骤轨迹**：画布能显示波次与状态，轨迹仍旧缺（见 §4.8 的边界）。
+- `app/core/checkpoint.py` 的 `list_workflows_for_session()` 属**只读新增**（B 的文件），
+  已登记 `分工.md` §4。
+- **本节的画布是「卡片 + 连线」，下一轮被重写为节点图**（用户判定「当前根本就不是画布」），
+  见 §4.10；本节其余（接口、编号回看、Token 归因）仍是当前状态。
+
+### 4.10 协作画布重写为节点图：卡片排布不是画布（2026-09-21，成员 D）
+
+用户的反馈很直接：「画布效果非常不好，当前根本就不是画布」，并附参考项目
+（`Jasper-zh/Multi-Agent-Playground`）的截图，指出可视化源码可参考。根子上是 §4.9 把画布做成了
+**竖向堆叠的卡片 + 横向连线**——那是一张表，不是一张图：没有节点、没有弧线、没有「谁指向谁」。
+本轮照参考项目的画法重写：**圆节点 + 弧线连线**。决策补进 [ADR-028](decisions/028-sidebar-collaboration-canvas.md)
+（同日修订 + 决策 7 的「画布四条规则」）。
+
+**1. 改动**
+
+| 文件 | 变化 |
+| --- | --- |
+| `frontend/src/workspace/GraphCanvas.tsx` | **新增**画布本体：`layoutCollaboration()` 纯函数算坐标，`CollaborationCanvas` 渲染 SVG 弧线 + 绝对定位圆节点，`useElementSize` 量像素尺寸 |
+| `frontend/src/workspace/CollaborationGraph.tsx` | 由「卡片 + 连线」**收成薄封装**：只把 `graph` 交给紧凑档画布，空态文案保留 |
+| `frontend/src/workspace/CollabCanvas.tsx` | 复用同一画布宽档；`cv-frame` 量出的可用高度喂给 `minHeight` |
+| `frontend/src/workspace/workspace.css` | `.collab-card*` / `.collab-link*` / `.collab-legend` / `.collab-foot` **删除**，换成 `.cv-*`（节点、弧线、并行圈定框、工具胶囊、悬停详情） |
+| `frontend/src/App.tsx` | 删掉模块标题下的功能说明段（用户要求「模块标题区域不需要那么多文本介绍功能」） |
+| `frontend/rendercheck/workspace-smoke.tsx` | 卡片断言换成**几何断言**（节点数 / 连线数 / 路径形状 / 锚点不在中点 / 高度），净 +20 条 |
+
+**2. 画布的硬规则（写进 ADR-028 决策 7）**
+
+1. **`viewBox` 必须等于元素的像素尺寸**（配 `preserveAspectRatio="none"`）：否则 SVG 用户坐标
+   和节点的 `left/top` 对不上，弧线整体飘走。
+2. **量不到宽高就用默认值**：`useElementSize` 在首帧 / 离屏量不到时退 720（宽档）/ 248（窄档），
+   否则首帧 `NaN` 会把整张图画没（冒烟正是断言这两个数）。
+3. **`minHeight` 由外层给**：侧栏不给（用自然高度），全屏给 `cv-frame` 的可用高度——
+   行距按可用高度铺开，屏幕高时不满压、屏幕矮时才滚动。
+4. **标签要盖住弧线，工具胶囊不能放几何中点**：`.cv-name` / `.cv-meta` 带 `--cfg-surface` 底色
+   （否则弧线从字上穿过去）；胶囊若放在 `t=0.5` 会被上游标签压住，要采样到
+   「上游标签下沿 ↔ 下游节点上沿」的空带里。
+
+**3. 验证**
+
+```bash
+cd frontend && npm run build      # tsc --noEmit + vite build 通过（CSS 85.95 kB / JS 420.11 kB）
+node_modules/.bin/esbuild rendercheck/workspace-smoke.tsx --bundle --platform=node \
+  --format=cjs --jsx=automatic --loader:.css=empty --outfile=rendercheck/.smoke.cjs \
+  && node rendercheck/.smoke.cjs   # 141/141 checks passed（121 → 141）
+```
+
+**4. 边界（如实记录）**
+
+- **侧栏紧凑档只写「生效参数 + Token 消耗」**：圆下只滑出 `模型 · Token`；
+  任务 / 阶段产出 / 工具调用留给全屏档与执行台弹窗——三块视图的分工（ADR-018）没变，只是画法换了。
+- **悬停详情仍走 CSS `:hover` / `:focus-within`**，不用 JS 状态：离屏冒烟还能断言到内容。
+- **节点可拖**（仅全屏档），但拖动只改渲染偏移，不改会话数据、不落盘。
+- 参考项目是 Vue（`GraphViewer.vue`），本仓是 React，**只借画法不借代码**：弧线控制点从
+  「按 dx 水平折」改成「按垂直极点切线弯曲」；节点用绝对定位 div 而非 SVG `<circle>`
+  （图标与文字更好排，且能挂 CSS 驱动的悬停面板）。
+- **箭头不能吃 `strokeWidth` 单位**：默认 `markerUnits="strokeWidth"` 会让箭头随线宽放大，
+  30px 节点上会盖住圆——改为 `markerUnits="userSpaceOnUse"` 并给死尺寸（7.5 窄档 / 9.5 宽档）。
+- **本节没有做「到底画出来了吗」的线上取证**：当时只核了服务端产物哈希与 DOM 计数。
+  计数说明不了可见性（`.inspector` 默认收起，画布在 DOM 里但尺寸为 0）。更正与取证方法见 §4.11。
+
+### 4.11 节点图交互动刀：浮层收进全屏、贴侧面、产出优先，拖动整个删掉（2026-09-21，成员 D）
+
+节点图画出来之后，用户又评审了一轮交互，四条意见：
+
+> 首先应该在全屏画布下才会悬停显示具体内容；当前似乎是在正下方会遮盖住图……应该在偏右或者偏左；
+> 浮窗太小了看不全内容，按照内容优先级，参数配置 token 消耗这些应该在最下面，首先应该显示
+> 分配到的任务和产出；然后这个画布似乎是可被拖动移动的？按理来说这显示的是交互过程可视化，
+> 排布固定即可，移动节点没什么实质性作用。
+
+四条**全部采纳**，决策补成 [ADR-028](decisions/028-sidebar-collaboration-canvas.md) 决策 8。
+
+**1. 改动**
+
+| 文件 | 变化 |
+| --- | --- |
+| `frontend/src/workspace/GraphCanvas.tsx` | 删掉 `draggable` 与整套拖动（`offsets` / `drag` ref / 两个 window 监听 / `onPointerDown` / 拖动后重算边）；`NodeDetail` 去掉 `compact`，小节重排；浮层槽位改 `cv-pop-slot is-{left,right}`，位置由 `popSide()` / `popTop()` 算 |
+| `frontend/src/workspace/CollabCanvas.tsx` | 不再传 `draggable` |
+| `frontend/src/workspace/workspace.css` | `.cv-pop-slot` 改为侧向锚定（`left:100%` / `right:100%` + 16px `padding` 作悬停过渡带）、`translateY(-50%)`；`.cv-pop` 去掉 `position`/`width`/`translateX(-50%)`，面高 280 → 520；`.cv-pop-node` 264 → **380px**；`.cv-pop-edge` 自带定位；删 `.cv-canvas.dense .cv-pop` 与 `cursor: grab`；悬停抬层 12 → 30 |
+| `frontend/rendercheck/workspace-smoke.tsx` | 侧栏断言改为「不挂浮层」；新增内容排序、侧向定位、不可拖断言；**并修掉一个恒真断言**（见下） |
+
+**2. 修掉的真问题：断言读错了文件（恒真）**
+
+新加的「画布节点不再可拖」写成 `!styles.includes("cursor: grab")`，其中 `styles` 是
+`src/styles.css` —— 而画布样式在 `src/workspace/workspace.css`，那条规则从来不在 `styles` 里，
+**断言恒真**。是「悬停面板的侧向定位规则已落盘」这条正断言先失败，才把它暴露出来。
+冒烟里现已单开一个 `canvasStyles` 显式读 `workspace/workspace.css`。
+
+**教训**：**否定式断言（`!x.includes(...)`）在「读的不是那个文件」时永远是绿的**，
+比没有断言更糟——它给你的是虚假的安全感。写否定断言时先确认目标字符串**曾经**在那个文件里。
+
+**3. 验证**
+
+```bash
+cd frontend && npm run build    # tsc --noEmit + vite build 通过（CSS 85.97 kB / JS 418.99 kB，比上轮少 1.1 kB）
+node_modules/.bin/esbuild rendercheck/workspace-smoke.tsx --bundle --platform=node \
+  --format=cjs --jsx=automatic --loader:.css=empty --outfile=rendercheck/.smoke.cjs \
+  && node rendercheck/.smoke.cjs   # 146/146 checks passed（141 → 146）
+```
+
+**线上实测**（重建 frontend 镜像后，用 CDP 驱动真浏览器 —— 见下节「取证手段」）：
+
+| 检查 | 实测 |
+| --- | --- |
+| 侧栏（紧凑档）浮层元素 | **0**（`cv-pop` / `cv-pop-slot` 都不渲染） |
+| 侧栏画布 298×368、5 个圆节点 | 是 |
+| 全屏覆盖层 / 宽档画布 | 1664×849 / 1624×638，5 个圆节点 |
+| 三个 Agent 浮层面宽 | **380**，`is-right`，与圆间隔 14px（节点右沿 854 → 浮层左沿 868） |
+| 浮层竖直位置（视口 849 高） | 192–665 / 218–710 / 270–790，**全部在视口内** |
+| 前两个浮层是否需要滚动 | **不需要**（473 / 492 vs 面高上限 520） |
+| 报告生成（产出最长） | 面高 520 触顶、内容 562 → 需滚 44px |
+| 小节顺序 | 分配到的任务 → 阶段产出 → 本阶段工具调用 → 生效参数 → Token 消耗 |
+| 节点 `cursor` / 交付端子 | `auto`（无 `grab`） / 不给浮层 |
+
+**4. 取证手段（本轮最有价值的沉淀）**
+
+`curl` 资产哈希只能证明**部署换了**，证明不了**界面画出来了**；`--dump-dom` 只能看首屏，
+而画布要先点会话、再展开侧栏。用 Chrome DevTools Protocol 驱动真浏览器才拿得到几何：
+
+```text
+chrome --headless=new --remote-debugging-port=9333 --user-data-dir=<temp> --window-size=1680,1000 about:blank
+→ GET http://127.0.0.1:9333/json/list 取 page 的 webSocketDebuggerUrl
+→ Python: websockets.sync.client.connect(...)  （很多项目 venv 里已有 websockets，不必另装）
+→ Page.enable / Runtime.enable / DOM.enable / CSS.enable
+→ Page.navigate → Runtime.evaluate 点击 → DOM.querySelectorAll 拿 nodeId
+→ CSS.forcePseudoState {forcedPseudoClasses:["hover"]}  ← 悬停必须用它，见下
+→ Page.captureScreenshot
+```
+
+两个非显然的点：
+
+- **`Input.dispatchMouseEvent` 在 headless 下改不出 CSS `:hover`**（面板始终 `display:none`）。
+  要 `Display`/量几何就用 `CSS.forcePseudoState`——这正是它存在的用途。
+- **`.inspector` 默认 `display:none`**（`position:absolute` + `.open` 才 `display:block`）。
+  不先点开侧栏，画布虽然在 DOM 里、`querySelector` 也找得到，但**所有 `getBoundingClientRect()`
+  都是 0**，截图里什么都没有。另外工具条上**有两个 `.toolbar-toggle`**（「隐藏 Agent 执行台」与
+  「显示协作详情」），必须按 `aria-label` 定位——按类名取到的永远是第一个，点了没反应。
+- 顺带更正：§4.10 那次「线上实测」只核了 DOM 计数，**没有核可见性**，当时给用户的截图里其实
+  没有画布。凡是「画出来了」的结论，都必须带 `getBoundingClientRect()` 或截图。
+
+**5. 边界（如实记录）**
+
+- **浮层会盖住画布右侧空白区**：面宽 380px，只覆盖图上本来没东西的地方；并行波次里靠右的节点
+  自动翻到左侧。
+- **面高上限 520px 与 JS 里的 `POP_H` 是同一个数**：两处必须一起改，否则竖直夹取算错。
+  （§4.12 已把胶囊浮窗那份改成 `--cv-pop-max` 变量，只剩 node 浮窗这一处镜像。）
+- **最长的那份产出仍要滚 44px**：再放大就会在矮屏上顶出可见区，滚动是更稳的选择。
+- 侧栏紧凑档因此**完全没有任何悬停信息**：这是刻意的——侧栏只回答「用什么跑的」。
+
+### 4.12 浮层规则补全到工具链胶囊，另收两条容器层的账（2026-09-21，成员 D）
+
+**改动**：`frontend/src/workspace/{GraphCanvas.tsx,workspace.css}`、`frontend/src/styles.css`、
+`frontend/rendercheck/workspace-smoke.tsx`；`workspace-smoke` **146 → 151**。
+
+**1. 工具链胶囊的浮层仍挂在正上方居中（二轮漏改）**
+
+二轮只把**节点**浮层挪到了侧面，胶囊浮层还是 `bottom: calc(100% + 8px)`。CDP 实测：
+
+```text
+胶囊 l751 t427 r835 b445（cx 793）
+浮窗 l643 t175 r943 b420（cx 793）   ← 与胶囊同 cx，中心相对胶囊 dy −139
+压住的节点 = ["任务", "信息收集 Agent"]
+```
+
+胶囊钉在画布中线上，所以「居中 + 向上弹」**必然**盖住上游那一串节点。改为
+`.cv-pop-edge.is-left` / `.is-right` 贴侧面（胶囊在右半边 `mid.x > w/2` 就往左弹）。
+竖直方向不再"量面高"，改成**算可容高度**：面竖直居中于胶囊，「面高 ≤ 胶囊到上下沿距离的
+两倍」就等价于不溢出，于是不必去量浮窗自己的高度。改后实测：`is-right`、在胶囊右侧、
+**压住的节点 = []**、340×244、无越界。
+
+**2. 关闭按钮的图标与文字差 2px**
+
+```text
+按钮 display:block，svg vertical-align:baseline
+图标中线 28 / 文字中线 30 → 偏差 −2
+```
+
+`.cfg-quiet` 是块级按钮，lucide 的 `svg` 默认按基线坐，于是图标比文字高 2px。同一个坑
+**侧栏早就修过**（`.sidebar-user-menu-head .cfg-quiet` 用 `inline-flex`），全屏画布头这份漏了。
+补 `.collab-canvas-head .cfg-quiet { display:inline-flex; align-items:center; gap:5px }`，
+改后图标中线 = 文字中线 = 按钮中线 = 标题图标中线 = 28，偏差 **0**。
+
+**3. 侧栏被长会话标题顶宽（老账，非画布引入）**
+
+隔离验证（只改一个变量）：
+
+```text
+只把「当前任务标题」灌长：侧栏 214 → 1093px       ← 复现
+只把历史列表条目灌长：    侧栏 214 → 214px        ← 不背锅（菜单是 position:absolute）
+侧栏 computed min-width: auto
+```
+
+`.sidebar` 是 `.app-shell` 这个 flex 行容器的 item，`min-width: auto` 会让**内容的最小宽度**
+顶在 `flex-basis: 216px` 之上；当前任务标题是 `white-space: nowrap`，于是被撑到 1093px。
+**子项的 `min-width: 0` 救不了这一层**——`.sidebar-user-meta` 本来就写着 `min-width:0`，
+那只影响 flex 分配，不改变容器的 min-content 计算。治本点是给 `.sidebar` 自己写
+`min-width: 0`。改后：侧栏稳定 **214px**，标题 `clientWidth 111 / scrollWidth 990` → 省略号生效。
+
+**4. 自查：内联 `max-height` 静默顶掉了设计上限**
+
+给胶囊浮窗传可容高度时直接写内联 `maxHeight`，实测 `getComputedStyle` 报 **532.777px** ——
+把 `.cv-pop` 里的 `520px` 无声顶掉了。两个约束是两件事（一个是设计上限，一个是"别溢出"），
+不能让晚出现的那个吃掉前一个。改为：上限声明成 `--cv-pop-max: 520px`（`.cv-pop` 上），
+胶囊浮窗写 `max-height: min(var(--cv-pop-max), var(--cv-pop-fit, var(--cv-pop-max)))`，
+内联只给 `--cv-pop-fit`。改后 `getComputedStyle` 报 **520px**。
+
+**教训**
+
+- **「同一套规矩」要回头数元素个数。** 二轮写下了"浮层贴侧面"这条规则，却只应用在节点上。
+  只覆盖一半的规则比没有规则更容易漏——写完之后应当枚举这类元素到底有几个。
+- **`min-width: auto` 的症状会报在反方向。** 它让"布局由内容决定"，但用户看到的是"侧栏太长"，
+  第一直觉会去查侧栏里的文字省略，而省略早就写好了。凡容器尺寸该由设计定、不该由数据定，
+  就把 `min-width` 写在**容器**上。
+- **内联样式会静默吃掉样式表的同名约束。** 凡是"算出来的值要和设计值取小"，就在 CSS 里用
+  `min()`／变量把两者显式并列，而不是让内联值覆盖掉设计值。冒烟为此单开一条断言。
+- **隔离变量再下结论。** 侧栏这一条第一次是把两个变量（当前标题 + 列表条目）一起灌长的，
+  看起来"列表文本导致侧栏变宽"；拆开单独灌才定位到真正的驱动者。测试几何问题时，
+  一次只动一个变量。
+
+**边界（如实记录）**
+
+- 胶囊浮窗面宽 340px，比节点浮窗（380px）窄：它列的是工具入参出参，宽度够用且更省横向空间。
+- 竖直可容高度有下限 `180px`（`Math.max(180, …)`）：胶囊极靠上下沿时宁可靠滚动，也不压成一条。
+- 面高上限 520px 仍有一处 JS 镜像 `POP_H`（node 浮窗的竖直夹取用），两处需一起改；
+  胶囊浮窗已改走 `--cv-pop-max` 变量，不再有第二份数字。
+
+### 4.13 角色图标按 role 解析，另修好预览页在 file:// 下整页空数据（2026-09-21，成员 D）
+
+**需求**（用户原话）
+
+> agent 配置的 icon 似乎是默认显示名称的第一个文本？这样很丑，和协作画布图节点的机器人
+> icon 保持一致，也添加一些可能会用到的 icon。
+
+**1. 首字方块换成角色图标**
+
+配置页角色卡的头像位原先渲染 `agent.name.slice(0, 1)`（「信」「数」「报」）。新增
+`frontend/src/components/AgentGlyph.tsx` 作为**唯一**的判断处：先按 `role` 全表匹配语义，
+再按显示名，最后回退机器人；配置页（卡片 + 弹窗头）与协作画布 `NodeGlyph` 都调它。
+决策与口径见 ADR-029。
+
+画布侧只换「角色」那一档，状态档不变——顺序是 `failed` → `paused` → `running` → 角色图标。
+实测（CDP，线上 5173 与预览页各跑一遍）：
+
+| 位置 | 信息收集 | 数据分析 | 报告生成 | 自定义「任务规划」 |
+| --- | --- | --- | --- | --- |
+| 配置页角色卡 | `lucide-file-search` | `lucide-chart-line` | `lucide-file-text` | `lucide-list-checks` |
+| 侧栏 / 全屏画布节点 | 同上 | 同上 | 同上（seed 里该步 `running` → 让位给转圈） | — |
+
+每个图标在 34px 方块里 17×17、居中偏差 **dx = dy = 0**，头像位 `textContent` 为空
+（即那一格不再有文字）。`running` 的节点实测是 `lucide-loader-circle` 且带 `spin`，
+证明「状态优先于角色」在真浏览器里成立。
+
+**2. 冒烟断言**
+
+- `config-smoke` **69 → 77**：卡片头像位是 `<svg>` 且不含汉字、analyst → 折线图、六条
+  `role → 图标键` 用例（含 `summarizer` / `translator` / `reviewer`）、`role` 优先于显示名、
+  两轮回退（按显示名 → 机器人）、每个图标键都能渲染出图形、**键与图形一一对应**
+  （两键共用一张图是静默错配，只能这样发现）。
+- `workspace-smoke` **151 → 154**：侧栏节点三个角色图标齐、执行中的节点画转圈且带 `spin`、
+  同一张图里已跑完与未开始的节点各带自己的角色图标。
+
+**3. 顺带发现并修好：预览页在 `file://` 下整页空数据**
+
+用 CDP 打开 `rendercheck/ui-preview.html` 复验时，页面自己报了
+`连接异常 · 预览未收录：GET /C:/api/v1/agents` —— **种子里一条都没命中**。根因在
+`rendercheck/preview.tsx` 的 mock：
+
+```ts
+const url = new URL("/api/v1/agents", location.href);  // file:///C:/Users/.../ui-preview.html
+url.pathname                                            // → "/C:/api/v1/agents"
+```
+
+Windows 下 `file://` 的**盘符会混进 pathname**，于是 `GET /api/v1/...` 永远查不到；
+而「双击打开」正是这个预览页的既定用法（见 `build-preview.py` 文件头，也是评审时唯一会
+用到的方式）。修法是按 `^\/[A-Za-z]:(?=\/)/` 剥掉盘符前缀——HTTP 下是空操作。
+
+**这条为什么一直没被发现**：该预览页的离线自检（jsdom，见 §3.3）用的是 HTTP 形状的
+`location`，`pathname` 本来就是 `/api/...`；而「双击打开」这条使用路径从来没有被自动检查
+覆盖过。**声明的用法和自动检查的用法不一致**，缺口就一直留着。
+
+**4. 边界（如实记录）**
+
+- 关键词表不完整：新角色不进表就回退机器人（不会画错，只是不够贴切）。
+- 15 张图标进包，JS 419.13 → **424.97 kB**（CSS 86.25 kB）；`lucide-react` 按图标 tree-shake。
+- 没做后端 `icon` 字段：那要动 `agent_registry` 的库表与 §5.7 的响应契约，否决理由见 ADR-029。
+
+### 4.14 多智能体拓扑支持面盘点，画布并行能力可验证化（2026-09-21，成员 D）
+
+**1. 改了什么**
+
+| 文件 | 改动 |
+| --- | --- |
+| `frontend/rendercheck/workspace-smoke.tsx` | 新增「扇出 → 并行 → 汇聚」三波形状断言，**154 → 159** |
+| `frontend/rendercheck/preview_seed.py` | 新增 `DYNAMIC_PLAN` / `DYNAMIC_TRACE_REASON` / `new_dynamic_workflow()`；`stage_traces()` 增动态分支 |
+| `frontend/rendercheck/build-preview.py` | 注入动态工作流三条路由（42 → **45** 条） |
+
+**2. 为什么补这组断言**
+
+原有用例只覆盖「同波两个节点 + 一起汇入」一种形状，而动态链路真正要表达的是
+「**一个上游分叉成两路并行、再合并收尾**」。缺这条时，「画布支持动态并行」只能靠读代码相信。
+数据形状取后端 `dynamic_checkpoint_summary` 的四个字段（`id` / `role` / `depends_on` / `status`），
+所以同一条用例同时锁住前后端契约。
+
+断言清单（5 条）：波次分组 `1,2,1` / 只有分叉波带 `parallel` / 边口径
+`serial,serial,parallel,parallel` / 三波各占一行且中间行两个 / 只有分叉波画「并行协作区」。
+
+**3. 预览页为什么能证明「不是只能画串行」**
+
+`stage_traces()` 原来只按静态三步返回、`mode` 恒为 `static`——**预览页结构上看不到动态画布**。
+新增的动态对话（`checkpoint.mode = "dynamic"` + 带 `depends_on` 的 `plan`）走的是与后端
+`app/api/stage_trace.py::read_stage_traces` 相同的 `not_integrated` 分支，
+所以预览与真实环境口径一致：**形状齐（来自 `plan`）、详情空（未集成）**。
+
+**4. 实渲截图（SSR 量不到宽度，必须客户端渲染）**
+
+把画布渲成图时踩到一次：`renderToStaticMarkup` 下 `useElementSize` 量到宽度 0，
+布局退化成紧凑档、画出来挤在左侧且并行框溢出边界。**改用客户端渲染**（esbuild
+`--platform=browser` + `createRoot` + `chrome --headless --screenshot`）后宽度正常。
+教训：**画布的几何断言要走真实测量路径**，SSR 只能验结构与状态，验不了排布。
+
+**5. 边界（如实记录）**
+
+- 执行层仍未并行：`dynamic_graph.py` 的 `ready[0]` 与 `dynamic.py` 的顺序循环都在 A 线；
+  计划声明同波时，图在说并行、实跑没并行（ADR-030「代价」一节）。
+- 角色池只有三个（`RoleId`），池外角色会让整份计划作废并回退固定三步。
+- 前端**没有**编排模式开关；默认 `static`（`app/config.py:65`），要看动态画布需服务端配置或请求体字段。
+- 未跑全量 pytest：Docker Desktop 未启动（同前几轮）。
+
+### 4.15 对话流 Markdown 正文、渐进揭示与内联执行轨迹（2026-09-21，成员 D）
+
+**1. 用户反馈与病根**
+
+反馈原话：「当前的文本输出缺少流式渲染，很多符号并没有相应渲染，效果不是很好，同时缺少在相应位置
+展开/收起思维连，还有具体工具输出的地方，按照主流 agent 的实现方法完善」。两处病根：
+
+- `App.tsx::MessageBubble` 正文是 `<p>{message.content}</p>`。模型按 Markdown 组织输出，
+  记号（`**` `##` `|`）原样吐出——**结构全丢**，不是观感问题。
+- 执行轨迹只在执行台弹窗（§5.17）与记录页，对话流只剩一行 `.run-event` 进度文本。
+  要在对话里理解「这一步为什么得出这个结论」，得跑到另一块面板对时间线。
+
+先追问确认了三个分歧点（都撞上已有的、已冻结的约束），三项均取推荐项：
+Markdown 用成熟库而不是自研；流式只做**前端呈现层**而不是后端起 SSE；
+「思维链」展示**真实的 ReAct 行动链**而不是去落盘模型 reasoning
+（后者要改 ADR-018、§5.17、本文件并动 A/B 线）。
+
+**2. 改了什么**
+
+| 文件 | 内容 |
+| --- | --- |
+| `frontend/src/components/Markdown.tsx` | 新增。GFM 渲染；`pre`/`code`/`table`/`input`/`a` 五个自定义渲染器；不挂 `rehype-raw` |
+| `frontend/src/components/useStreamText.ts` | 新增。渐进揭示：按总时长（320–1800ms）反推步长；文本变长从断点续；非浏览器与 reduced-motion 降级为全文 |
+| `frontend/src/components/Disclosure.tsx` | 新增。受控折叠块（原生 `<details>` 的状态父组件改不了） |
+| `frontend/src/workspace/RunActivity.tsx` | 新增。对话流内联执行轨迹；正在跑的步骤默认摊开；跑完收成一行 |
+| `frontend/src/workspace/TraceParts.tsx` | 新增。`ToolCallBlock` 抽出来给弹窗与对话流共用（原先只有弹窗有） |
+| `frontend/src/App.tsx` | `MessageBubble` 走 Markdown；`RunActivity` 按 `reportIndex` 插在提问与答复之间；`revealed` 集合决定谁播动画 |
+| `frontend/src/workspace/collaboration.ts` | 导出 `stageMetaFor`（阶段 id 优先、角色兜底） |
+| `frontend/src/workspace/AgentStageModal.tsx` | 工具调用改调共享实现，删掉本地那份 |
+| `frontend/src/styles.css` | Markdown 版式 / 折叠块 / 执行活动卡片；**移除** `.run-event` |
+| `frontend/vite.config.ts` | markdown 栈拆独立 chunk |
+| `frontend/package.json` | `+ react-markdown@^10.1.0`、`+ remark-gfm@^4.0.1` |
+| `doc/decisions/031-conversation-stream-rendering.md` | 新增 ADR：把 ADR-018 的「三块视图」扩成四块，改按**时间面**划边界 |
+| `doc/api.md` §7 | 四块视图对照表 + 对话流细则；顺带修掉一处悬空引用（原文写「见 §7.1」，无此小节） |
+
+**3. 验证**
+
+```bash
+npm --prefix frontend run build
+# 通过：tsc --noEmit && vite build，无 500 kB 警告
+# 产物 index-Bv3Mc4mw.css 91.70 kB / markdown-pr2ruGPi.js 166.03 kB / index-CbrzEpDA.js 422.69 kB
+```
+
+- `rendercheck/workspace-smoke.tsx` → **201/201**（159 → 201，+42；含 Markdown 六类结构、
+  折叠块可达性、执行活动卡片四种状态、以及「对话流与弹窗同一套小标题」的防漂移断言）
+- `rendercheck/config-smoke.tsx` → **77/77**（无回归）
+- `rendercheck/preview.tsx` 等三个文件单独过 tsc：只剩既有的 `node:fs` / `process`
+  找不到声明的噪音（项目不依赖 `@types/node`），本轮新增代码零报错。
+- 产物样式完整性：按**出现次数**（不是行数，压缩后只有一行）核对 `md-body` 37、
+  `run-activity` 21、`md-table-wrap` 6、`disclosure-head` 3、`md-caret` 2、`run-step-tools` 1 ——
+  全部存活，没有被压缩器丢掉。
+
+**4. 实渲取证（CDP + 真实浏览器，客户端渲染）**
+
+`renderToStaticMarkup` 量不到宽度、也不跑 effect，验证不了版式与动画，所以走 CDP 驱动
+headless Chrome 打开离线预览页 `file://.../ui-preview.html`，点到「执行中」的会话后取证：
+
+| 断言 | 实测 |
+| --- | --- |
+| 正文里没有未渲染的记号 | `.conversation-transcript` 的 `innerText` 匹配 `/\*\*|\| ---/` → **false** |
+| 提交一条含七类结构的消息后 | 用户气泡内出现 `H2` / `STRONG` / `CODE.md-code` / `TABLE` / `UL` / `LI`×2 / `BLOCKQUOTE` / `CODE.md-code` |
+| 气泡底色迁移 | `.md-body` 的 `background` = `rgb(237,243,245)`（= `#edf3f5`），内层 `p` 为 `transparent`（否则 Markdown 下会「一段一个气泡」） |
+| 内联卡片几何 | `.run-activity` = **760×506**（拿到了真实宽度，不是 0），无横向溢出 |
+| 默认展开面 | 3 个折叠块、**只 1 个展开**（正在跑的那一步） |
+| 摘要不丢信息 | 收起的步骤仍带「信息收集 / 2 次工具调用 / 已完成」 |
+| 状态着色 | 已完成 → `tone-green` `rgb(47,143,107)`；执行中 → `tone-accent` `rgb(63,127,147)` |
+| 工具入参出参 | 展开后 2 个 `.ws-trace-step`、2 个 `details[open]` |
+| 渐进揭示 | 覆盖媒体特性后 0.55s 时 **62/70 字**仍在增长，`::after` 光标 7×14px、`animation-name: md-caret`；随后自动收尾到全文 70 字 |
+| 页面报错 | **0** |
+
+**5. 踩到的坑**
+
+- **headless Chrome 默认上报 `prefers-reduced-motion: reduce`**，直接把渐进揭示的降级分支
+  打开：`animation-name` 量到 `none`、`.is-streaming` 一直不出现。**看起来像动画根本没实现。**
+  要验动画必须 `Emulation.setEmulatedMedia` 显式覆盖成 `no-preference`（脚本已按这个来）。
+  反过来，这条也顺带证明了降级分支真的生效——在 reduced-motion 下正文是立即全文。
+- **CDP 脚本每次调用都重新导航**，跨调用攒状态是白费：点开的下拉、展开的步骤全丢。
+  必须把「点击 → 等待 → 取证 → 截图」放进**同一个连接**里顺序执行。另外每个
+  `Runtime.evaluate` 共享全局作用域，同名 `const` 第二次声明会 `SyntaxError`
+  （本轮踩到一次，`Identifier 'b' has already been declared`）——用 IIFE 包起来。
+- **npm 装 `react-markdown` 遇到 `ECONNRESET` 重试**：多个包的 `cache revalidated` 耗时
+  30–40s，首次安装（无 pipe、`--loglevel=http`）约 3 分钟。不是挂死，是慢；
+  命令里不要 `| tail`，否则中途看不到任何输出，无法区分「慢」和「挂」。
+- **引入 markdown 栈把主包推过 500 kB**：402 kB → 589 kB，Vite 开始告警。
+  在 `vite.config.ts` 里把这一栈拆成独立 chunk（422.69 + 166.03 kB）恢复无告警。
+
+**6. 边界（如实记录）**
+
+- **渐进揭示是呈现效果，不是流式传输。** 后端没有事件流，助手正文是工作流终态一次性落库的
+  （`app/workflows/pipeline.py::finalize_activity`）。要真正的流式语义，需 **B** 在
+  `app/workflows` 于阶段推进/工具调用处发布事件、**D** 新增只读事件流端点；
+  且 LLM 逐 token 输出受 Dapr 活动边界限制，现实上限是「按阶段/工具粒度推送」。
+- **展示的是真实的 ReAct 行动链，不是模型思维链。** 模型内部推理没有落盘，服务端也不提供；
+  界面上不编造。要展示真思维链需 **C** 落库 reasoning + **A** 透传，并同步改 ADR-018、
+  §5.17 与本文件中「不假装有思维链」那条断言。
+- **只跑了前端门禁**：未跑全量 pytest（Docker Desktop 未启动，同前几轮）。
+- `rendercheck/ui-preview.html` 的 jsdom 自检脚本（`verify_preview.mjs`）不在仓库里
+  （项目刻意不引前端测试依赖），本轮改用 CDP 实跑替代，覆盖更强。
+
+## 5. 失败处理约定
 - 任一用例失败：先复现，再定位，修复后将失败模式固化为新的测试或本文档约束；
 - 对 Dapr/编排等共享行为，先写测试或同步补测试，不允许“看起来正确”代替；
 - 每次里程碑结束时在报告记录：运行命令、通过数/失败数、失败原因。

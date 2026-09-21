@@ -44,8 +44,18 @@ services:
       OBS_TRACING_ENDPOINT: http://jaeger:4318/v1/traces
       OBS_TRACING_ENABLED: "true"
       OBS_METRICS_SINK: postgres
+      # 沙箱容器建在**宿主机**守护进程上（见下面 volumes），所以沙箱镜像必须先存在于宿主机。
+      # 这里指到本项目自建镜像：compose 一定会把它构建出来，离线/内网环境也能用。
+      # 能拉到官方镜像的环境可以删掉这行，回落到代码默认的 python:3.12-slim（更小、无本项目代码）。
+      SANDBOX_IMAGE: ${SANDBOX_IMAGE:-multi-agent-collaboration-platform-backend:latest}
     extra_hosts:
       - host.docker.internal:host-gateway
+    volumes:
+      # 敏感工具的执行边界（ADR-023）：沙箱需要向宿主机守护进程申请一次性容器。
+      # 代价是 backend 间接拿到宿主机 root 等价权限——只把 8000 暴露给可信网络。
+      # 宿主机上该路径不存在时 Docker 会创建同名**目录**（不报错），此时用
+      # SANDBOX_DOCKER_SOCKET 指向真实套接字（如 Podman 的 /run/podman/podman.sock）。
+      - ${SANDBOX_DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
     ports:
       - "8000:8000"
     healthcheck:

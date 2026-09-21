@@ -22,7 +22,12 @@ from app.tools.sql import SqlQueryTool
 
 
 def builtin_tools() -> tuple[BuiltinTool, ...]:
-    """四个内置工具：计算器、网络搜索、代码执行、只读 SQL。"""
+    """四个**进程级**内置工具：计算器、网络搜索、代码执行、只读 SQL。
+
+    会话级的「读本次会话附件」两个工具不在这里：它们需要 `session_id`，
+    由 `app/tools/session_files.py::session_file_tools()` 按执行临时构造，
+    再经 `app/mcp/registry.py::with_session_files()` 拼到注册表上。
+    """
 
     return (
         CalculatorTool(),

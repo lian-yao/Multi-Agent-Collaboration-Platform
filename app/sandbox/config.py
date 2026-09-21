@@ -33,6 +33,20 @@ class SandboxSettings(BaseSettings):
     """执行后端：`docker` 为容器隔离；`denied` 直接拒绝执行（无 Docker 环境时的显式降级）。"""
 
     image: str = "python:3.12-slim"
+    """沙箱容器镜像。
+
+    默认是官方 slim 镜像——**小、无本项目代码**，是正常网络环境下该用的。
+    离线/内网部署拉不到它时，可指到本地已有镜像（`deploy/compose.yaml` 就指到
+    本项目自建镜像，因为 compose 一定会把它构建出来）。
+    """
+
+    auto_pull_image: bool = False
+    """镜像不在宿主机时是否自动拉取。
+
+    默认关：拉取是一个可能长时间阻塞的网络动作（本机实测直连 Docker Hub 十分钟不返回），
+    而沙箱是安全边界组件，**失败要快、原因要准**。开启后首次执行会自动拉一次。
+    """
+
     timeout_seconds: int = 15
     memory_limit: str = "256m"
     cpu_limit: float = 0.5

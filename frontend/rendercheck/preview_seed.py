@@ -269,20 +269,258 @@ def new_workflow(session_id: str, completed: int = 2, status: str = "running") -
     return workflow
 
 
-def metrics_for(workflow_id: str) -> list:
-    return [
-        {"id": 1, "metric_name": "tokens.input", "value": 12840.0,
-         "labels": {"workflow_id": workflow_id, "agent": "collector"}, "recorded_at": iso(-260)},
-        {"id": 2, "metric_name": "tokens.output", "value": 3210.0,
-         "labels": {"workflow_id": workflow_id, "agent": "analyst"}, "recorded_at": iso(-200)},
-        {"id": 3, "metric_name": "latency.first_token_ms", "value": 412.0,
-         "labels": {"workflow_id": workflow_id, "agent": "analyst"}, "recorded_at": iso(-198)},
-        {"id": 4, "metric_name": "tool.call.count", "value": 4.0,
-         "labels": {"workflow_id": workflow_id}, "recorded_at": iso(-30)},
+# 动态编排的计划种子（ADR-019）。`depends_on` 决定画布上的波次，所以这里刻意给一份
+# 「扇出 → 并行 → 汇聚」：s1 收集完分给两路（s2 继续深挖、s3 先做分析），两路并行，
+# 最后由 s4 汇总。预览页因此能看到「并行协作区」，而不是只有静态三步那条串行链。
+#
+# 步骤数只有 4，但形状是三波：`[s1] → [s2, s3] → [s4]`。这正是「只能画串行节点」
+# 这个判断的反例，也是动态链路相对静态链路的全部价值所在。
+DYNAMIC_PLAN = [
+    {"id": "s1", "role": "collector", "depends_on": [], "status": "completed"},
+    {"id": "s2", "role": "collector", "depends_on": ["s1"], "status": "completed"},
+    {"id": "s3", "role": "analyst", "depends_on": ["s1"], "status": "completed"},
+    {"id": "s4", "role": "reporter", "depends_on": ["s2", "s3"], "status": "pending"},
+]
+
+# 与后端 `app/api/stage_trace.py::DYNAMIC_TRACE_REASON` 逐字一致：预览页给出的说明
+# 不能比真实环境更乐观，否则「动态链路看不到详情」这个真问题在预览里会被掩盖。
+DYNAMIC_TRACE_REASON = (
+    "本次执行走的是动态编排链路，它当前不落盘逐步骤执行轨迹（ADR-019）；"
+    "可执行到的替代信息是各步骤的阶段状态与「任务记录」里的工具调用链路。"
+)
+
+
+def new_dynamic_workflow(session_id: str) -> dict:
+    """动态编排链路的工作流种子：`checkpoint` 多出 `mode` / `plan_source` / `plan`。
+
+    形状与 `new_workflow` 一致（前端只认 `checkpoint` 这几个字段），差别全在那三个
+    动态独有的字段上——画布正是靠 `plan[].depends_on` 算出波次与并行关系。
+    `created_at` 取 -100（晚于静态那条的 -300），让它在「对话 N」里排到最后，
+    不挤占既有预览的「对话 1/2」编号。
+    """
+
+    wid = uid("wf")
+    workflow = {
+        "id": wid, "session_id": session_id, "agent_run_id": uid("run"),
+        "status": "running", "current_step": None,
+        "checkpoint": {
+            "mode": "dynamic", "status": "running", "current_step": None,
+            "completed_steps": ["s1", "s2", "s3"],
+            "plan_source": "llm",
+            "plan": [dict(step) for step in DYNAMIC_PLAN],
+            "updated_at": iso(),
+        },
+        "created_at": iso(-100), "updated_at": iso(), "completed_at": None,
+    }
+    STATE["workflows"][wid] = workflow
+    STATE["tool_calls"][wid] = [
+        {"id": uid("tc"), "run_id": workflow["agent_run_id"], "workflow_run_id": wid,
+         "tool_name": "web_search", "input": {"query": "三份竞品的定价与核心功能"},
+         "output": {"hits": 8}, "status": "succeeded", "error": None,
+         "created_at": iso(-95), "updated_at": iso(-93)},
+        {"id": uid("tc"), "run_id": workflow["agent_run_id"], "workflow_run_id": wid,
+         "tool_name": "calculator", "input": {"expression": "2 * (3 + 4)"},
+         "output": {"result": 14}, "status": "succeeded", "error": None,
+         "created_at": iso(-92), "updated_at": iso(-91)},
     ]
+    return workflow
+
+
+ROLE_OF = {"collect": "collector", "analyze": "analyst", "report": "reporter"}
+
+# 逐阶段轨迹的种子（§5.17）：内容按「一个真的跑过的任务」写，包含一次失败调用——
+# 预览页要能看到失败态的样子，而不是三条全是绿灯的假数据。
+STAGE_TRACE_SEED = {
+    "collect": {
+        "input": None,
+        "input_from": None,
+        "output": "已收集 12 篇来源与 2 份内部资料，去重后保留 9 篇，覆盖 2024–2026 年的基准测试。",
+        "tool_calls": [
+            {"call_id": "seed-collect-1", "tool_name": "web_search",
+             "input": {"query": "向量数据库 检索性能 基准"}, "output": {"hits": 12},
+             "status": "succeeded", "error": None},
+            {"call_id": "seed-collect-2", "tool_name": "list_session_files",
+             "input": {"session_id": "s-demo"}, "output": ["bench-2025.md", "notes.md"],
+             "status": "succeeded", "error": None},
+        ],
+    },
+    "analyze": {
+        "input": "已收集 12 篇来源与 2 份内部资料，去重后保留 9 篇，覆盖 2024–2026 年的基准测试。",
+        "input_from": "collect",
+        "output": "三家在 100 万向量规模下的 QPS 分别是 1480 / 960 / 720；召回率差异小于 1%。"
+                  "写入吞吐上 B 方案明显落后，若以只读检索为主则差异可以忽略。",
+        "tool_calls": [
+            {"call_id": "seed-analyze-1", "tool_name": "sql_query",
+             "input": {"sql": "select engine, qps from bench where scale = 1e6"},
+             "output": {"rows": 3}, "status": "succeeded", "error": None},
+            {"call_id": "seed-analyze-2", "tool_name": "code_execution",
+             "input": {"language": "python", "code": "import matplotlib"},
+             "output": None, "status": "failed",
+             "error": "SandboxViolation: 只读沙箱拒绝写文件（charts/ 不在允许的写入范围）"},
+        ],
+    },
+    "report": {
+        "input": "三家在 100 万向量规模下的 QPS 分别是 1480 / 960 / 720；召回率差异小于 1%。"
+                 "写入吞吐上 B 方案明显落后，若以只读检索为主则差异可以忽略。",
+        "input_from": "analyze",
+        "output": "结论：只读检索场景选 A；需要频繁写入且对延迟不敏感时选 C；"
+                  "B 仅在前两者都不可用时作为候选。建议先按 100 万规模做一次线上压测再定。",
+        "tool_calls": [],
+    },
+}
+
+
+def stage_traces(
+    workflow_id: str,
+    *,
+    done: tuple = (),
+    current: str | None = None,
+) -> dict:
+    """`GET /api/v1/workflows/{id}/stages` 的种子（§5.17）。
+
+    默认从 `STATE["workflows"]` 取进度：已完成的阶段给轨迹、当前阶段说明「正在执行」、
+    其余说明「尚未开始」——三种状态都要能在预览页里看到。构建静态预览时可直接传
+    `done` / `current`，不必先造一个 Workflow 进 STATE。
+    """
+    workflow = STATE["workflows"].get(workflow_id) or {}
+    checkpoint = workflow.get("checkpoint") or {}
+
+    # 动态链路不落盘逐步骤轨迹：与后端 `read_stage_traces` 同口径返回 `not_integrated`。
+    # 画布的形状来自 `checkpoint.plan`（走另一个字段，不靠这个接口），这里只负责把
+    # 「详情为什么是空的」说清楚——不说，预览页就会把「未集成」看成「没跑」。
+    if checkpoint.get("mode") == "dynamic":
+        return {
+            "workflow_id": workflow_id,
+            "mode": "dynamic",
+            "task": None,
+            "availability": "not_integrated",
+            "reason": DYNAMIC_TRACE_REASON,
+            "items": [],
+        }
+
+    if not done and current is None:
+        done = tuple(checkpoint.get("completed_steps") or ())
+        current = checkpoint.get("current_step")
+
+    items = []
+    for stage in STEPS:
+        seed = STAGE_TRACE_SEED[stage]
+        if stage in done:
+            item = {"stage": stage, "role": ROLE_OF[stage], **seed,
+                    "truncated": False, "reason": None}
+        else:
+            reason = ("该阶段正在执行：轨迹在阶段完成后写入状态存储，阶段结束再打开这里即可看到；"
+                      "当下想跟进工具调用可以走「任务记录」页。"
+                      if current == stage else "该阶段尚未开始。")
+            item = {"stage": stage, "role": ROLE_OF[stage], "input": None, "input_from": None,
+                    "output": None, "tool_calls": [], "truncated": False, "reason": reason}
+        items.append(item)
+    return {
+        "workflow_id": workflow_id,
+        "mode": "static",
+        "task": "对比三种向量数据库的检索性能",
+        "availability": "available",
+        "reason": None,
+        "items": items,
+    }
+
+
+def metrics_for(workflow_id: str) -> list:
+    """用量采样（§5.5）。
+
+    种子照**真实标签口径**给：后端 `_labels` 走上下文，标签集是 `role` / `stage` / `model`，
+    **没有 `agent_id`**。种子要是打了 `agent_id`，预览页就会显示得比真实环境还好看，
+    「Token 有没有分到 Agent 头上」这个真问题在预览里反而看不出来。
+    """
+
+    rows = (
+        ("collector", "collect", 817, 66, 883),
+        ("analyst", "analyze", 852, 279, 1131),
+        ("reporter", "report", 1045, 511, 1556),
+    )
+    items = []
+    for role, stage, prompt, completion, total in rows:
+        for name, value in (
+            ("input_tokens", prompt),
+            ("output_tokens", completion),
+            ("total_tokens", total),
+        ):
+            items.append({
+                "id": len(items) + 1,
+                "metric_name": name,
+                "value": float(value),
+                "labels": {"workflow_id": workflow_id, "role": role, "stage": stage},
+                "recorded_at": iso(-120),
+            })
+    items.append({
+        "id": len(items) + 1,
+        "metric_name": "stage_duration_ms",
+        "value": 7179.5,
+        "labels": {"workflow_id": workflow_id, "role": "collector", "stage": "collect"},
+        "recorded_at": iso(-110),
+    })
+    items.append({
+        "id": len(items) + 1,
+        "metric_name": "workflow_runs",
+        "value": 1.0,
+        "labels": {"workflow_id": workflow_id, "status": "completed"},
+        "recorded_at": iso(-100),
+    })
+    return items
+
+
+def session_workflows(session_id: str) -> dict:
+    """`GET /api/v1/sessions/{id}/workflows` 的种子（§5.18）。
+
+    这个列表存在的意义是「对话编号」，所以要能看出**不止一次对话**：真实 workflow
+    之外补一条更早的已完结对话，编号按下标 + 1，与真实接口同口径（升序）。
+    """
+
+    rows = sorted(
+        (w for w in STATE["workflows"].values() if w.get("session_id") == session_id),
+        key=lambda w: w.get("created_at") or "",
+    )
+    if rows:
+        earlier = dict(rows[0])
+        earlier.update({
+            "id": f"{rows[0]['id']}-earlier",
+            "status": "completed",
+            "current_step": None,
+            "created_at": iso(-1800),
+            "updated_at": iso(-1740),
+            "completed_at": iso(-1740),
+            "checkpoint": {
+                "status": "completed",
+                "current_step": None,
+                "completed_steps": ["collect", "analyze", "report"],
+            },
+        })
+        rows = [earlier, *rows]
+    return {"items": rows, "total": len(rows)}
 
 
 # ------------------------------------------------------------------ routing
+
+# 沙箱状态（§5.15）：按**真实部署**的样子给种子——后端容器没挂 docker.sock，
+# 所以这里是「不可用 + 原因」，而不是一个好看的绿灯。
+SANDBOX_STATUS = {
+    "backend": "docker",
+    "image": "python:3.12-slim",
+    "available": False,
+    "reason": (
+        "Docker 守护进程不可达；常见原因是 backend 容器未挂载 /var/run/docker.sock "
+        "或当前用户无权访问该套接字"
+    ),
+    "limits": {
+        "timeout_seconds": 15,
+        "memory_limit": "256m",
+        "cpu_limit": 0.5,
+        "pids_limit": 64,
+        "network_enabled": False,
+        "output_limit_chars": 4000,
+        "max_code_chars": 20000,
+    },
+}
 
 ROUTES = [
     ("GET", r"^/api/v1/agents$", lambda m, b: {"items": AGENTS}),
@@ -292,6 +530,8 @@ ROUTES = [
      lambda m, b: STATE["sessions"].get(m.group("sid")) or new_session()),
     ("GET", r"^/api/v1/sessions/(?P<sid>[^/]+)/messages$",
      lambda m, b: {"items": STATE["messages"].get(m.group("sid"), [])}),
+    ("GET", r"^/api/v1/sessions/(?P<sid>[^/]+)/workflows$",
+     lambda m, b: session_workflows(m.group("sid"))),
     ("POST", r"^/api/v1/sessions/(?P<sid>[^/]+)/messages$", None),  # handled below
     ("POST", r"^/api/v1/sessions/(?P<sid>[^/]+)/(pause|resume)$",
      lambda m, b: {"session": STATE["sessions"].get(m.group("sid"), {}),
@@ -300,12 +540,15 @@ ROUTES = [
     ("GET", r"^/api/v1/workflows/(?P<wid>[^/]+)$", lambda m, b: STATE["workflows"].get(m.group("wid"))),
     ("GET", r"^/api/v1/workflows/(?P<wid>[^/]+)/tool-calls$",
      lambda m, b: page(STATE["tool_calls"].get(m.group("wid"), []))),
+    ("GET", r"^/api/v1/workflows/(?P<wid>[^/]+)/stages$",
+     lambda m, b: stage_traces(m.group("wid"))),
     ("GET", r"^/api/v1/metrics$", lambda m, b: page(metrics_for("demo"))),
     ("GET", r"^/api/v1/providers$", lambda m, b: {"items": PROVIDERS}),
     ("GET", r"^/api/v1/tools$", lambda m, b: page(MCP_TOOLS)),
     ("GET", r"^/api/v1/config/provider$", lambda m, b: PROVIDER_CONFIG),
     ("PUT", r"^/api/v1/config/provider$", lambda m, b: PROVIDER_CONFIG),
     ("GET", r"^/api/v1/config/provider-presets$", lambda m, b: PRESETS),
+    ("GET", r"^/api/v1/config/sandbox$", lambda m, b: SANDBOX_STATUS),
     ("GET", r"^/api/v1/config/providers$", lambda m, b: {"items": PROVIDERS, "total": len(PROVIDERS)}),
     ("GET", r"^/api/v1/config/providers/(?P<pid>[^/]+)$", None),  # handled below
     ("GET", r"^/api/v1/config/models$",

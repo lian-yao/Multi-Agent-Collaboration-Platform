@@ -3,6 +3,15 @@ import threading
 import dapr.ext.workflow as wf
 
 from app.core.checkpoint import update_workflow_run
+from app.orchestration.dynamic_graph import ORCHESTRATION_MODES, resolve_orchestration_mode
+from app.workflows.dynamic import (
+    DYNAMIC_SUBTASK_WORKFLOW_NAME,
+    DYNAMIC_WORKFLOW_NAME,
+    agent_dynamic_workflow,
+    dynamic_plan_activity,
+    dynamic_step_activity,
+    dynamic_subtask_workflow,
+)
 from app.workflows.pipeline import (
     SUBTASK_WORKFLOW_NAME,
     WORKFLOW_NAME,
@@ -15,6 +24,17 @@ from app.workflows.pipeline import (
     report_activity,
     run_stage_activity,
 )
+
+
+def resolve_workflow_name(mode: str | None = None) -> str:
+    """按生效的编排模式返回要调度的工作流名。
+
+    优先级：单次执行的 `mode` → 服务端 `AGENT_ORCHESTRATION_MODE` → `static`。
+    非法值一律退回 `static`：宁可按固定流程跑完，也不要调度一个不存在的工作流。
+    """
+
+    resolved = mode if mode in ORCHESTRATION_MODES else resolve_orchestration_mode()
+    return DYNAMIC_WORKFLOW_NAME if resolved == "dynamic" else WORKFLOW_NAME
 
 
 class WorkflowService:
@@ -38,11 +58,19 @@ class WorkflowService:
             agent_subtask_workflow,
             name=SUBTASK_WORKFLOW_NAME,
         )
+        # 动态编排链路与静态链路并列注册；未显式启用 dynamic 时永远不会被调度（ADR-019）。
+        self._runtime.register_workflow(agent_dynamic_workflow, name=DYNAMIC_WORKFLOW_NAME)
+        self._runtime.register_workflow(
+            dynamic_subtask_workflow,
+            name=DYNAMIC_SUBTASK_WORKFLOW_NAME,
+        )
         self._runtime.register_activity(run_stage_activity)
         self._runtime.register_activity(collect_activity)
         self._runtime.register_activity(analyze_activity)
         self._runtime.register_activity(report_activity)
         self._runtime.register_activity(finalize_activity)
+        self._runtime.register_activity(dynamic_plan_activity)
+        self._runtime.register_activity(dynamic_step_activity)
         self._registered = True
 
     def start(self) -> None:
@@ -61,7 +89,7 @@ class WorkflowService:
     def schedule(self, task: WorkflowTask) -> str:
         instance_id = str(task.workflow_id)
         self._client.schedule_new_workflow(
-            WORKFLOW_NAME,
+            resolve_workflow_name(task.orchestration_mode),
             input=task.asdict(),
             instance_id=instance_id,
         )
