@@ -10,6 +10,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
     UniqueConstraint,
@@ -98,6 +99,48 @@ class Message(Base):
     )
 
     __table_args__ = (Index("idx_messages_session_created", "session_id", "created_at"),)
+
+
+class AttachmentRecord(Base):
+    """消息附件（`doc/data-model.md` §3.2，ADR-021）。
+
+    为什么放数据库而不是文件系统：附件要么与消息同生共死（删会话就该一起没），
+    要么就得引入一套孤儿清理与卷挂载；前者用 `ON DELETE CASCADE` 一行解决，
+    后者要动 `deploy/`。代价是库体积，因此上传侧对单文件大小与单消息数量都有硬上限
+    （`app/attachments/spec.py`）。
+
+    `session_id` 可空是**故意的**：草稿态下会话还不存在（`doc/api.md` §4.2），
+    附件必须先能上传；等首条消息落库时再回填 `session_id` / `message_id`。
+    """
+
+    __tablename__ = "attachments"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    session_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("sessions.id", ondelete="CASCADE"), nullable=True
+    )
+    message_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("messages.id", ondelete="CASCADE"), nullable=True
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    mime: Mapped[str] = mapped_column(String(120), default="", nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    # 原始字节，**所有类型都留档**（ADR-024）：图片要转 base64 进模型请求；文本与文档
+    # 除了提示词里用的正文（`text_content`）之外，原件本身也要能下载回来。
+    # 代价是库体积，由 `app/attachments/spec.py` 的单文件 / 单消息硬上限约束。
+    data: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    text_content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+
+    __table_args__ = (
+        Index("idx_attachments_message", "message_id"),
+        Index("idx_attachments_session", "session_id"),
+    )
 
 
 class WorkflowRun(Base):
@@ -1146,6 +1189,13 @@ def list_sessions(
     摘要由「首条用户消息 + 最新一次 workflow 终态」构成，供前端历史列表直接
     渲染，无需逐会话二次请求（`doc/api.md` §5.13）。
 
+    **只返回至少有一条 `messages` 的会话**（接口层兜底，`doc/api.md` §5.13 /
+    `doc/data-model.md` §3 生命周期不变量）：前端在首条消息提交时才建会话，
+    绕过前端直接 `POST /sessions` 造出的空行不该堆在历史列表里。`total` 与
+    `rows` 用同一条过滤条件，否则分页会错位。判定用「存在消息」而非「存在
+    `role=user` 的消息」——消息先于 workflow 写入（§4.4），所以跑过任务的
+    会话必然命中，不会被误过滤。
+
     返回 `(items, total)`；`items` 每项为 `_session_to_dict` 基础上额外注入
     `title`（首条用户消息截断）与 `latest_workflow_status`（可空）。
     """
@@ -1155,9 +1205,21 @@ def list_sessions(
     page = max(page, 1)
     page_size = max(min(page_size, 100), 1)
     with get_session_factory()() as session:
-        total = session.scalar(select(func.count()).select_from(SessionRecord)) or 0
+        # 用 `IN (SELECT session_id FROM messages)` 而不是 `EXISTS(关联子查询)`：
+        # 后者会被 SQLAlchemy 编译成自带 FROM 的非关联子查询（`FROM messages, sessions`），
+        # 语义退化成「只要库里存在任意一条消息就全部通过」，过滤形同虚设。
+        has_message = SessionRecord.id.in_(select(Message.session_id))
+        total = (
+            session.scalar(
+                select(func.count())
+                .select_from(SessionRecord)
+                .where(has_message)
+            )
+            or 0
+        )
         rows = session.scalars(
             select(SessionRecord)
+            .where(has_message)
             .order_by(SessionRecord.updated_at.desc())
             .offset((page - 1) * page_size)
             .limit(page_size)
@@ -1430,6 +1492,261 @@ def list_messages(
         return ([_message_to_dict(row) for row in reversed(rows)], int(total))
 
 
+def _attachment_meta_columns() -> tuple[Any, ...]:
+    """列表回读用的列集合：**刻意排除 `data` 与 `text_content`**。
+
+    两者都是大字段：`data` 最坏是一份 5 MB 的原件，一份 4 附件的消息回读列表时
+    等于把 20 MB 字节从库搬到进程里再扔掉。`has_original` 交给数据库算——
+    `data IS NOT NULL` 是一个布尔表达式，不需要把 `data` 本身取出来。
+    """
+
+    return (
+        AttachmentRecord.id,
+        AttachmentRecord.session_id,
+        AttachmentRecord.message_id,
+        AttachmentRecord.name,
+        AttachmentRecord.mime,
+        AttachmentRecord.size_bytes,
+        AttachmentRecord.kind,
+        AttachmentRecord.status,
+        AttachmentRecord.error,
+        AttachmentRecord.created_at,
+        AttachmentRecord.data.is_not(None).label("has_original"),
+    )
+
+
+def _attachment_meta(
+    row: AttachmentRecord, has_original: bool | None = None
+) -> dict[str, Any]:
+    """附件的展示字段。**不含** `data` / `text_content`：列表与消息回读都走这里，
+    字节只在下载与执行阶段按 id 单独取。
+
+    `has_original` 是给界面用的：没有字节的行（ADR-024 之前落库的文本/文档附件）
+    不该显示一个必然 404 的下载入口。走 `_attachment_meta_columns()` 取行时由数据库
+    算好并显式传入；直接拿 ORM 对象时（单行读取，`data` 本来就在手边）自行推导。
+    """
+
+    if has_original is None:
+        has_original = getattr(row, "data", None) is not None
+
+    return {
+        "id": str(row.id),
+        "session_id": str(row.session_id) if row.session_id else None,
+        "message_id": str(row.message_id) if row.message_id else None,
+        "name": row.name,
+        "mime": row.mime,
+        "size_bytes": int(row.size_bytes or 0),
+        "kind": row.kind,
+        "status": row.status,
+        "error": row.error,
+        "has_original": has_original,
+        "created_at": row.created_at,
+    }
+
+
+def create_attachment(
+    *,
+    name: str,
+    mime: str,
+    kind: str,
+    status: str,
+    size_bytes: int,
+    data: bytes | None = None,
+    text_content: str | None = None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    row = AttachmentRecord(
+        id=uuid.uuid4(),
+        name=name,
+        mime=mime,
+        kind=kind,
+        status=status,
+        size_bytes=size_bytes,
+        data=data,
+        text_content=text_content,
+        error=error,
+    )
+    with get_session_factory()() as session:
+        session.add(row)
+        session.commit()
+        session.refresh(row)
+        return _attachment_meta(row)
+
+
+def get_attachment(attachment_id: str | uuid.UUID) -> dict[str, Any] | None:
+    """取附件元数据；不含字节与正文。"""
+
+    with get_session_factory()() as session:
+        row = session.get(AttachmentRecord, _as_uuid(attachment_id))
+        return _attachment_meta(row) if row else None
+
+
+def get_attachment_content(attachment_id: str | uuid.UUID) -> dict[str, Any] | None:
+    """取附件**含字节与正文**的完整行，供下载与执行阶段使用。"""
+
+    with get_session_factory()() as session:
+        row = session.get(AttachmentRecord, _as_uuid(attachment_id))
+        if row is None:
+            return None
+        payload = _attachment_meta(row)
+        payload["data"] = bytes(row.data) if row.data is not None else None
+        payload["text_content"] = row.text_content
+        return payload
+
+
+def delete_attachment(attachment_id: str | uuid.UUID) -> bool:
+    with get_session_factory()() as session:
+        row = session.get(AttachmentRecord, _as_uuid(attachment_id))
+        if row is None:
+            return False
+        session.delete(row)
+        session.commit()
+        return True
+
+
+def link_attachments(
+    attachment_ids: list[str],
+    *,
+    message_id: str | uuid.UUID,
+    session_id: str | uuid.UUID,
+) -> list[str]:
+    """把尚未归属任何消息的附件挂到消息上，返回真正挂上的 id。
+
+    **只接受 `message_id IS NULL` 的行**：附件 id 是可猜的（uuid4 只是难以枚举，
+    不是权限），若允许改挂已归属的附件，任何人都能把别人消息里的附件挪走。
+    没挂上的 id 会出现在返回值里（缺失）而不抛错——由接口层决定怎么报，
+    因为「id 不存在」与「已经挂过了」对用户是同一件事：这个附件用不上。
+    """
+
+    wanted: list[uuid.UUID] = []
+    for value in attachment_ids:
+        try:
+            wanted.append(_as_uuid(value))
+        except (ValueError, AttributeError):
+            continue
+    if not wanted:
+        return []
+
+    linked: list[str] = []
+    with get_session_factory()() as session:
+        rows = session.scalars(
+            select(AttachmentRecord).where(
+                AttachmentRecord.id.in_(wanted),
+                AttachmentRecord.message_id.is_(None),
+            )
+        ).all()
+        message_uuid = _as_uuid(message_id)
+        session_uuid = _as_uuid(session_id)
+        for row in rows:
+            row.message_id = message_uuid
+            row.session_id = session_uuid
+            linked.append(str(row.id))
+        session.commit()
+
+    order = {value: index for index, value in enumerate(attachment_ids)}
+    return sorted(linked, key=lambda item: order.get(item, len(order)))
+
+
+def _attachment_meta_statement(message_ids: list[uuid.UUID]) -> Any:
+    """`list_attachments_for_messages` 的唯一查询语句。
+
+    单独抽出来是为了能被测试直接编译断言：**这条语句绝不能出现 `attachments.data`**。
+    """
+
+    return (
+        select(*_attachment_meta_columns())
+        .where(AttachmentRecord.message_id.in_(message_ids))
+        .order_by(AttachmentRecord.created_at)
+    )
+
+
+def list_attachments_for_messages(
+    message_ids: list[str],
+) -> dict[str, list[dict[str, Any]]]:
+    """一次取多条消息的附件，按 `message_id` 分组；顺序按上传时间。
+
+    只 SELECT 元数据列（见 `_attachment_meta_columns`）：消息列表是整页回读，
+    把每份附件的 `data` 一起读出来会白白搬运几十 MB。
+    """
+
+    if not message_ids:
+        return {}
+    wanted: list[uuid.UUID] = []
+    for value in message_ids:
+        try:
+            wanted.append(_as_uuid(value))
+        except (ValueError, AttributeError):
+            continue
+    if not wanted:
+        return {}
+
+    with get_session_factory()() as session:
+        rows = session.execute(_attachment_meta_statement(wanted)).all()
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        grouped.setdefault(str(row.message_id), []).append(
+            _attachment_meta(row, row.has_original)
+        )
+    return grouped
+
+
+def list_attachments_for_session(session_id: str | uuid.UUID) -> list[dict[str, Any]]:
+    """会话内全部附件的元数据（不含字节与正文），按上传时间。
+
+    与 `list_attachments_for_messages` 同口径、同列：只取元数据列，
+    `has_original` 由库侧 `data IS NOT NULL` 算出。
+    """
+
+    try:
+        wanted = _as_uuid(session_id)
+    except (ValueError, AttributeError):
+        return []
+
+    with get_session_factory()() as session:
+        rows = session.execute(
+            select(*_attachment_meta_columns())
+            .where(AttachmentRecord.session_id == wanted)
+            .order_by(AttachmentRecord.created_at)
+        ).all()
+    return [_attachment_meta(row, row.has_original) for row in rows]
+
+
+def load_attachment_payloads(attachment_ids: list[str]) -> list[dict[str, Any]]:
+    """按传入顺序取附件的完整内容（含字节与正文），供执行阶段构造模型输入。
+
+    顺序即用户上传顺序——提示词里附件的编号与界面上的顺序必须一致，
+    否则用户在界面上看到「附件 1 是发票」，模型读到的却是另一份。
+    """
+
+    if not attachment_ids:
+        return []
+    wanted: list[uuid.UUID] = []
+    for value in attachment_ids:
+        try:
+            wanted.append(_as_uuid(value))
+        except (ValueError, AttributeError):
+            continue
+    if not wanted:
+        return []
+
+    with get_session_factory()() as session:
+        rows = session.scalars(
+            select(AttachmentRecord).where(AttachmentRecord.id.in_(wanted))
+        ).all()
+
+    by_id = {str(row.id): row for row in rows}
+    payloads: list[dict[str, Any]] = []
+    for value in attachment_ids:
+        row = by_id.get(str(value))
+        if row is None:
+            continue
+        item = _attachment_meta(row)
+        item["data"] = bytes(row.data) if row.data is not None else None
+        item["text_content"] = row.text_content
+        payloads.append(item)
+    return payloads
+
+
 def get_latest_workflow(
     session_id: str | uuid.UUID,
     *,
@@ -1454,6 +1771,30 @@ def get_workflow_run(workflow_id: str | uuid.UUID) -> dict[str, Any] | None:
     with get_session_factory()() as session:
         row = session.get(WorkflowRun, _as_uuid(workflow_id))
         return _row_to_dict(row) if row else None
+
+
+def list_workflows_for_session(
+    session_id: str | uuid.UUID,
+    *,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    """按创建时间**升序**列出会话的全部 Workflow（`doc/api.md` §5.18）。
+
+    升序是语义要求而不是排序偏好：前端按顺序给每个对话编号（第 1 / 2 / 3 个对话）。
+    倒序会让既有对话的编号随着新对话一起跳动，用户就没法用「对话 3」指代那一次工作流了。
+    """
+
+    from sqlalchemy import select
+
+    statement = (
+        select(WorkflowRun)
+        .where(WorkflowRun.session_id == _as_uuid(session_id))
+        .order_by(WorkflowRun.created_at.asc())
+        .limit(limit)
+    )
+    with get_session_factory()() as session:
+        rows = session.scalars(statement).all()
+        return [_row_to_dict(row) for row in rows]
 
 
 _REGISTRY_COLUMN_MIGRATIONS: dict[str, tuple[tuple[str, str], ...]] = {

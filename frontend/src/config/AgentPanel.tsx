@@ -14,6 +14,8 @@ import {
   parseInteger,
   type NoticeState,
 } from "./shared";
+import { InlineConfirm } from "../components/InlineConfirm";
+import { AgentGlyph } from "../components/AgentGlyph";
 
 const REASONING_LABELS: Record<string, string> = {
   none: "无推理",
@@ -89,7 +91,9 @@ function buildAgentPatch(agent: Agent, form: AgentForm): Record<string, unknown>
   return patch;
 }
 
-const monogramOf = (agent: Agent): string => agent.name.slice(0, 1);
+// 头像位原先在这里取显示名首字当 monogram（`agent.name.slice(0, 1)`）。现在改由
+// `AgentGlyph` 按 role 解析角色图标 —— 单字中文方块认不出是谁，而且同一个 Agent
+// 在协作画布上画的是机器人，两处对不上。解析口径集中在 `components/AgentGlyph.tsx`。
 
 /**
  * 单个角色卡片（网格里一行多个）。
@@ -121,8 +125,8 @@ export function AgentRoleCard({
         title={`配置「${agent.name}」的模型绑定与参数`}
       >
         <span className="cfg-agent-top">
-          <span className={`cfg-monogram cfg-agent-avatar tint-${active ? "green" : "blue"}`} aria-hidden="true">
-            {monogramOf(agent)}
+          <span className={`cfg-monogram cfg-agent-avatar tint-${active ? "green" : "blue"}`}>
+            <AgentGlyph role={agent.role} name={agent.name} size={17} />
           </span>
           <span className="cfg-agent-title">
             <span className="cfg-agent-name">
@@ -156,15 +160,18 @@ export function AgentRoleCard({
       </button>
 
       {onDelete && (
-        <button
-          type="button"
-          className="cfg-agent-delete"
-          onClick={onDelete}
-          aria-label={`删除角色 ${agent.name}`}
-          title="删除该自定义角色"
+        <InlineConfirm
+          label={`删除自定义角色「${agent.name}」`}
+          confirmLabel="删除"
+          triggerClassName="cfg-agent-delete"
+          triggerLabel={`删除角色 ${agent.name}`}
+          triggerTitle="删除该自定义角色，其模型覆盖配置会一并清除"
+          slotClassName="cfg-agent-delete-slot"
+          size="sm"
+          onConfirm={() => onDelete?.()}
         >
           <Trash2 size={14} aria-hidden="true" />
-        </button>
+        </InlineConfirm>
       )}
     </div>
   );
@@ -235,12 +242,12 @@ export function AgentTuningPanel({
     }
   };
 
+  /** 清除该角色的全部覆盖；二次确认由按钮上的 InlineConfirm 给出，这里只负责执行。 */
   const clearAll = async () => {
     if (!agent.override_keys.length) {
       setNotice({ tone: "bad", text: "该角色当前没有覆盖值。" });
       return;
     }
-    if (!window.confirm(`清除「${agent.name}」的全部覆盖，回退环境配置与默认路由？`)) return;
     setSaving(true);
     try {
       await api.patchAgentConfig(agent.id, {
@@ -286,9 +293,18 @@ export function AgentTuningPanel({
           <button type="submit" form="agent-tuning-form" className="cfg-primary" disabled={saving || Boolean(problem)}>
             {saving ? "保存中…" : "保存覆盖"}
           </button>
-          <button type="button" className="cfg-quiet" onClick={() => void clearAll()} disabled={saving}>
+          <InlineConfirm
+            label={`清除「${agent.name}」的全部覆盖`}
+            confirmLabel="确认清除"
+            question="回退到环境配置与默认路由"
+            triggerClassName="cfg-quiet"
+            triggerLabel={`清除「${agent.name}」的全部覆盖`}
+            triggerTitle="清除该角色的全部覆盖值，回退到环境配置与默认路由"
+            disabled={saving}
+            onConfirm={() => void clearAll()}
+          >
             清除全部覆盖
-          </button>
+          </InlineConfirm>
           <button
             type="button"
             className="cfg-quiet"
@@ -308,8 +324,8 @@ export function AgentTuningPanel({
       }
     >
       <div className="cfg-agent-modal-head">
-        <span className={`cfg-monogram cfg-agent-avatar tint-${active ? "green" : "blue"}`} aria-hidden="true">
-          {monogramOf(agent)}
+        <span className={`cfg-monogram cfg-agent-avatar tint-${active ? "green" : "blue"}`}>
+          <AgentGlyph role={agent.role} name={agent.name} size={17} />
         </span>
         <div>
           <Chip tone="blue">{agent.role}</Chip>
@@ -598,7 +614,6 @@ export function AgentPanel({ activeAgentId }: { activeAgentId?: string }) {
   };
 
   const remove = async (agent: Agent) => {
-    if (!window.confirm(`删除自定义角色「${agent.name}」？其模型覆盖配置会一并清除。`)) return;
     setBusy(true);
     try {
       await api.deleteAgentRegistry(agent.id);

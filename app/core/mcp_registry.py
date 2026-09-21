@@ -287,9 +287,33 @@ def _server_view(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _sync_orchestration_tools(rows: list[dict[str, Any]] | None = None) -> None:
+    """把登记表的变更告诉编排层（ADR-026）。
+
+    编排层不读数据库——工具枚举在**每次执行**时都会发生，那条路径上不能有 IO。
+    所以配置面必须在改动之后主动失效编排层的条目缓存，否则用户新建的 Server
+    要等进程重启才生效（master 的 `CompositeToolRegistry` 从 `_registered_servers_cache`
+    读条目，失效它 + 注册表实例缓存即可让下一次 `build_tool_registry()` 重建）。
+
+    延迟 import，且失败只记日志：登记表已经改完了，通知不到不该让配置保存本身报错。
+    """
+
+    try:
+        from app.mcp.registry import (
+            reset_registered_servers_cache,
+            reset_tool_registry_cache,
+        )
+    except ModuleNotFoundError:  # pragma: no cover - app.mcp 缺失时的既有回退
+        return
+    reset_registered_servers_cache()
+    reset_tool_registry_cache()
+
+
 def list_servers(*, rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     server_rows = checkpoint.list_mcp_servers() if rows is None else rows
     items = [_server_view(row) for row in server_rows]
+    # 顺带同步一次：用户打开「工具与配置」就是在看配置，此刻刷新最不容易漏。
+    _sync_orchestration_tools(server_rows)
     return {"items": items, "total": len(items)}
 
 
@@ -355,6 +379,7 @@ def create_server(
         transport=resolved_transport,
         actor=actor,
     )
+    _sync_orchestration_tools()
     return _server_view(row)
 
 
@@ -411,6 +436,7 @@ def update_server(
         actor=actor,
         fields=",".join(sorted(fields)) or "none",
     )
+    _sync_orchestration_tools()
     return _server_view(row)
 
 
@@ -418,6 +444,7 @@ def delete_server(server_id: str, *, actor: str | None = None) -> None:
     if not checkpoint.delete_mcp_server(server_id):
         raise McpServerNotFoundError(server_id)
     log_event(logger, "config.mcp_server.deleted", server_id=server_id, actor=actor)
+    _sync_orchestration_tools()
 
 
 # --------------------------------------------------------------------------- #
@@ -474,6 +501,7 @@ def discover_server(
         server_id=server_id,
         tools=len(discovered["tool_names"]),
     )
+    _sync_orchestration_tools()
     return {
         "server_id": server_id,
         "server_info": discovered["server_info"],

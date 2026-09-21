@@ -16,6 +16,9 @@ pytest 长时间无输出，后面的用例根本不会执行）。所以这里�
 DSN 钉成一个自足的内存 SQLite：查询会因「表不存在」快速失败，正好落回应用层
 既定的「配置库里没有覆盖行 → 用环境默认值」分支，语义与无覆盖行一致。
 要让这组用例对着真实 PostgreSQL 跑，设 `MACP_UNIT_DATABASE_URL`。
+
+MCP 注册表快照同理：`app/mcp/registry.py` 的条目快照默认会去读 `mcp_server_registry`
+表，这里固定为空（ADR-026）。它属于「编排层不读数据库」那条边界，单测不应因此连 PG。
 """
 
 from __future__ import annotations
@@ -135,3 +138,16 @@ def memory_conversation() -> MemoryConversationMemory:
     set_conversation_memory_factory(lambda: memory)
     yield memory
     set_conversation_memory_factory(None)
+
+
+@pytest.fixture(autouse=True)
+def memory_mcp_registry(monkeypatch) -> None:
+    """编排层的 MCP 注册表快照固定为空（不给它机会去读真实 PostgreSQL）。
+
+    需要真实条目的用例（`tests/unit/test_registry_servers.py`）自己在用例里把它
+    重置为 `None` 并替换表的读取，从而仍然覆盖「加载」这条路径。
+    """
+
+    from app.mcp import registry as mcp_registry
+
+    monkeypatch.setattr(mcp_registry, "_registered_servers_cache", [])

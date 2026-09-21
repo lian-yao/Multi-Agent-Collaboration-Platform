@@ -13,7 +13,9 @@
     "lucide-react": "^0.468.0",
     "morphicons": "^1.7.1",
     "react": "19.1.1",
-    "react-dom": "19.1.1"
+    "react-dom": "19.1.1",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@types/react": "19.1.12",

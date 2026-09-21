@@ -14,12 +14,14 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import asdict, dataclass
+from collections.abc import Sequence
+from dataclasses import asdict, dataclass, field
 from datetime import timedelta
 from typing import Any
 
 import dapr.ext.workflow as wf
 
+from app.attachments import AttachmentPayload, load_payloads
 from app.config import AgentSettings
 from app.core.agent_config import resolve_agent_settings
 from app.core.tool_audit import AuditedToolRegistry
@@ -51,7 +53,11 @@ from app.orchestration.pipeline_graph import (
     role_for_stage,
     run_role_stage,
 )
-from app.orchestration.tools import ToolRegistry, default_tool_registry
+from app.orchestration.tools import (
+    ToolRegistry,
+    default_tool_registry,
+    session_scoped_registry,
+)
 from app.observability.metrics import flush_metrics, record_workflow_terminal
 from app.workflows.state import save_step_result
 
@@ -80,6 +86,19 @@ class WorkflowTask:
     message_id: str | None = None
     hold_seconds: int = 0
     use_fake_model: bool = False
+    orchestration_mode: str | None = None
+    """单次执行的编排模式覆盖（`static` / `dynamic`）；None 表示用服务端配置。
+
+    `WorkflowService.schedule` 据此选择工作流名，见 ADR-019。
+    """
+
+    attachment_ids: list[str] = field(default_factory=list)
+    """随本条消息上传的附件 id（ADR-021）。
+
+    **只传 id 不传内容**：附件里可能有一张 5 MB 的图片，把 base64 塞进工作流输入
+    会直接顶爆 Dapr gRPC 的默认 4 MB 载荷上限。执行阶段按 id 取正文，
+    见 `app.attachments.load_payloads`。
+    """
 
     def asdict(self) -> dict[str, Any]:
         return asdict(self)
@@ -137,6 +156,7 @@ def advance_pipeline_stage(
     run_id: str | None = None,
     workflow_run_id: str | None = None,
     tool_registry: ToolRegistry | None = None,
+    attachments: Sequence[AttachmentPayload] = (),
     session_id: str | None = None,
     agent_run_id: str | None = None,
 ) -> dict[str, Any]:
@@ -144,6 +164,9 @@ def advance_pipeline_stage(
 
     ``session_id`` / ``agent_run_id`` 用于从会话记忆读出本轮之前的上下文并注入提示词
     （F-06，接线口径见 ADR-019）；缺省时按「没有历史」执行。
+
+    ``attachments`` 用来给本次执行挂上「读本次会话附件」的工具（`app/tools/session_files.py`）：
+    附件正文只注入接收原始任务的那一步，下游阶段想回头看原始文件就得自己按需读。
     """
 
     stage = _to_stage(step)
@@ -161,6 +184,9 @@ def advance_pipeline_stage(
         result = fake_stage_result(stage.value, task, previous=previous)
     else:
         registry = tool_registry if tool_registry is not None else default_tool_registry()
+        # 会话文件工具先挂、审计后包：这样读文件也算一次被审计的工具调用
+        # （谁读了哪份附件，`tool_calls` 表里查得到）。
+        registry = session_scoped_registry(registry, session_id)
         if registry is not None and run_id:
             registry = AuditedToolRegistry(
                 registry,
@@ -177,6 +203,7 @@ def advance_pipeline_stage(
             tool_scope=workflow_run_id or workflow_id or run_id,
             workflow_id=workflow_id,
             history=_session_history(session_id, agent_run_id),
+            attachments=attachments,
         )
     updated = complete_step(state, stage, result)
     return {**build_step_result(updated), "result": result}
@@ -222,6 +249,13 @@ def _run_stage_activity(
         or ctx.workflow_id
     )
     use_fake_model = bool(task.get("use_fake_model"))
+    # 附件只在**接收原始任务的那一步**注入（静态链路即 collect）：下游拿到的是
+    # 上游产出的正文，再塞一遍附件既无新增信息，又让图片在每次调用里重复计费。
+    attachments = (
+        ()
+        if use_fake_model
+        else tuple(load_payloads([str(value) for value in task.get("attachment_ids") or []]))
+    )
     outcome = advance_pipeline_stage(
         state,
         stage,
@@ -233,7 +267,8 @@ def _run_stage_activity(
         workflow_id=workflow_id,
         run_id=task.get("agent_run_id"),
         workflow_run_id=workflow_id,
-        session_id=task.get("session_id"),
+        attachments=attachments,
+        session_id=str(task["session_id"]) if task.get("session_id") else None,
         agent_run_id=task.get("agent_run_id"),
     )
     _record_checkpoint(

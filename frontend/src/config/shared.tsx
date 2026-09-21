@@ -17,6 +17,36 @@ export function formatTime(value: string | null | undefined): string {
   return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString("zh-CN");
 }
 
+/**
+ * 历史记录、消息气泡、大纲用的紧凑时间戳：**必带日期**。
+ *
+ * 原来这些位置只显示 `HH:mm`，于是「昨天的 14:12」和「今天的 14:12」在界面上完全
+ * 一样——历史会话列表因此看不出哪条是新的。反过来，今天的记录再重复一遍完整日期
+ * 也没有信息量，所以按远近分三档：今天 / 昨天 / 「M月D日」，跨年才补年份。
+ *
+ * `now` 可注入：冒烟测试必须能固定「今天是哪天」，否则断言会跟着系统时钟漂。
+ */
+export function formatStamp(value: string | null | undefined, now: Date = new Date()): string {
+  if (!value) return "—";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+
+  const clock = `${String(parsed.getHours()).padStart(2, "0")}:${String(parsed.getMinutes()).padStart(2, "0")}`;
+  const sameDay = (left: Date, right: Date) =>
+    left.getFullYear() === right.getFullYear() &&
+    left.getMonth() === right.getMonth() &&
+    left.getDate() === right.getDate();
+
+  if (sameDay(parsed, now)) return `今天 ${clock}`;
+  // 用日期构造而不是减 24 小时：后者在夏令时切换那天会偏一天。
+  const yesterday = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+  if (sameDay(parsed, yesterday)) return `昨天 ${clock}`;
+  if (parsed.getFullYear() === now.getFullYear()) {
+    return `${parsed.getMonth() + 1}月${parsed.getDate()}日 ${clock}`;
+  }
+  return `${parsed.getFullYear()}年${parsed.getMonth() + 1}月${parsed.getDate()}日 ${clock}`;
+}
+
 /** 卡片里只展示一小段描述，完整内容收进折叠区。 */
 export function truncate(text: string, max = 96): string {
   const compact = text.replace(/\s+/g, " ").trim();

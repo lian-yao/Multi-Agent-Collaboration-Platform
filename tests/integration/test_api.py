@@ -103,7 +103,7 @@ def test_list_sessions_returns_summaries(monkeypatch) -> None:
     monkeypatch.setattr(api_main, "get_workflow_service", lambda: workflow_service)
     client = TestClient(app)
 
-    # 建两个会话：一个发消息（产生 workflow），一个只创建不发消息（无 workflow）。
+    # 两个都发过消息的会话：摘要 =「首条用户消息 + 最新 workflow 终态」。
     first = client.post("/api/v1/sessions", json={"user_id": "demo-user"}).json()
     first_id = first["id"]
     client.post(
@@ -113,6 +113,10 @@ def test_list_sessions_returns_summaries(monkeypatch) -> None:
 
     second = client.post("/api/v1/sessions", json={"user_id": "demo-user"}).json()
     second_id = second["id"]
+    client.post(
+        f"/api/v1/sessions/{second_id}/messages",
+        json={"content": "再帮我画一张趋势图"},
+    )
 
     response = client.get("/api/v1/sessions")
     assert response.status_code == 200
@@ -124,25 +128,59 @@ def test_list_sessions_returns_summaries(monkeypatch) -> None:
     assert len(payload["items"]) == 2
 
     # 按 updated_at 倒序：后建的 second 在前。
+    assert [item["id"] for item in payload["items"]] == [second_id, first_id]
+
     titles = {item["id"]: item["title"] for item in payload["items"]}
     assert titles[first_id] == "帮我分析这份数据"
-    assert titles[second_id] == "（暂无消息）"
+    assert titles[second_id] == "再帮我画一张趋势图"
 
     # 有 workflow 的会话带 latest_workflow_status 与 latest_workflow_id。
     by_id = {item["id"]: item for item in payload["items"]}
     assert by_id[first_id]["latest_workflow_status"] == "running"
     assert by_id[first_id]["latest_workflow_id"] is not None
-    assert by_id[second_id]["latest_workflow_status"] is None
-    assert by_id[second_id]["latest_workflow_id"] is None
+
+
+def test_list_sessions_hides_sessions_without_messages(monkeypatch) -> None:
+    """没有消息的会话不出现在历史列表里，`total` 同条件过滤（`doc/api.md` §5.13）。
+
+    空会话只可能来自绕过前端直接 `POST /sessions`（前端草稿态不落库）；接口层要兜住它，
+    否则列表会被无意义的空行堆满、`total` 与分页也会跟着错位。
+    """
+    store = InMemoryApiStore()
+    monkeypatch.setattr(api_main, "api_store", store)
+    client = TestClient(app)
+
+    empty = client.post("/api/v1/sessions", json={"user_id": "demo-user"}).json()
+    assert client.get("/api/v1/sessions").json()["total"] == 0
+
+    real = client.post("/api/v1/sessions", json={"user_id": "demo-user"}).json()
+    client.post(
+        f"/api/v1/sessions/{real['id']}/messages",
+        json={"content": "有内容才该被记录"},
+    )
+
+    payload = client.get("/api/v1/sessions").json()
+    assert payload["total"] == 1
+    assert [item["id"] for item in payload["items"]] == [real["id"]]
+    assert empty["id"] not in {item["id"] for item in payload["items"]}
+
+    # 被过滤只是不出现在列表里，`GET /sessions/{id}` 仍按 §4.2 返回它（删除入口要用）。
+    assert client.get(f"/api/v1/sessions/{empty['id']}").status_code == 200
 
 
 def test_list_sessions_pagination(monkeypatch) -> None:
     store = InMemoryApiStore()
     monkeypatch.setattr(api_main, "api_store", store)
+    monkeypatch.setattr(api_main, "get_workflow_service", lambda: FakeWorkflowService())
     client = TestClient(app)
 
-    for _ in range(3):
-        client.post("/api/v1/sessions", json={"user_id": "demo-user"})
+    # 每个会话都得先发一条消息：空会话会被 §5.13 的服务端过滤挡住，不进列表。
+    for index in range(3):
+        created = client.post("/api/v1/sessions", json={"user_id": "demo-user"}).json()
+        client.post(
+            f"/api/v1/sessions/{created['id']}/messages",
+            json={"content": f"第 {index + 1} 条消息"},
+        )
 
     page_one = client.get("/api/v1/sessions?page=1&page_size=2")
     assert page_one.status_code == 200
@@ -299,3 +337,145 @@ def test_send_message_appends_user_message_to_conversation_memory(monkeypatch) -
     assert stored.content == "第一轮问题"
     assert stored.id == accepted.json()["message_id"]
     assert stored.agent_run_id == accepted.json()["agent_run_id"]
+
+
+def test_send_message_passes_orchestration_mode(monkeypatch) -> None:
+    """单次执行的编排模式覆盖必须原样送到调度器（ADR-019、`doc/api.md` §4.4）。"""
+
+    store = InMemoryApiStore()
+    workflow_service = FakeWorkflowService()
+    monkeypatch.setattr(api_main, "api_store", store)
+    monkeypatch.setattr(api_main, "get_workflow_service", lambda: workflow_service)
+    client = TestClient(app)
+
+    session_id = client.post("/api/v1/sessions", json={"user_id": "demo-user"}).json()["id"]
+
+    default_call = client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"content": "默认模式"},
+    )
+    dynamic_call = client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"content": "动态模式", "orchestration_mode": "dynamic"},
+    )
+    bogus_call = client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"content": "非法模式", "orchestration_mode": "autonomous"},
+    )
+
+    assert default_call.status_code == 202
+    assert dynamic_call.status_code == 202
+    # 未支持的取值由契约拒绝，而不是悄悄退回 static——否则「我选了动态」会静默失效。
+    assert bogus_call.status_code == 422
+    assert [
+        task.orchestration_mode for task in workflow_service.scheduled_tasks
+    ] == [None, "dynamic"]
+
+
+class _AlwaysAvailableSandbox:
+    """可用后端的最小替身。
+
+    `unavailable_reason()` 与 `available()` 必须自洽——接口层只用前者判可用
+    （`app/api/main.py::_sandbox_availability`），只实现 `available()` 的替身
+    会让这条用例测的是替身自己的缺方法。
+    """
+
+    def available(self) -> bool:
+        return True
+
+    def unavailable_reason(self) -> str | None:
+        return None
+
+
+def test_sandbox_status_reports_denied_backend(monkeypatch) -> None:
+    """沙箱状态是只读诊断：说清当前能不能用、为什么不能用。"""
+
+    from app.sandbox import SandboxSettings
+
+    monkeypatch.setattr(
+        api_main,
+        "get_sandbox_settings",
+        lambda: SandboxSettings(backend="denied", timeout_seconds=7),
+    )
+    client = TestClient(app)
+
+    response = client.get("/api/v1/config/sandbox")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["backend"] == "denied"
+    assert payload["available"] is False
+    assert "denied" in payload["reason"]
+    assert payload["limits"]["timeout_seconds"] == 7
+    # 运行期没有写入口：这些参数属部署期安全边界。
+    assert client.put("/api/v1/config/sandbox", json={"timeout_seconds": 999}).status_code == 405
+
+
+def test_sandbox_status_reports_available_docker_backend(monkeypatch) -> None:
+    from app.sandbox import SandboxSettings
+
+    monkeypatch.setattr(
+        api_main,
+        "get_sandbox_settings",
+        lambda: SandboxSettings(backend="docker", image="python:3.12-slim"),
+    )
+    monkeypatch.setattr(api_main, "build_sandbox", lambda settings: _AlwaysAvailableSandbox())
+    client = TestClient(app)
+
+    payload = client.get("/api/v1/config/sandbox").json()
+
+    assert payload["available"] is True
+    assert payload["reason"] is None
+    assert payload["image"] == "python:3.12-slim"
+
+
+def test_sandbox_status_surfaces_backend_reason_verbatim(monkeypatch) -> None:
+    """不可用原因由后端给出，接口层原样透传、不概括成兜底文案。
+
+    这条是「套接字没挂」能被用户看见的唯一保证：以前接口层只把 `available()` 的 False
+    翻译成一句猜测的话，真实原因（`FileNotFoundError`）只能去翻容器日志。
+    """
+
+    from app.sandbox import SandboxSettings
+
+    detail = "Docker 守护进程不可达: FileNotFoundError: 套接字不存在"
+
+    class _ProbeFails:
+        def available(self) -> bool:
+            return False
+
+        def unavailable_reason(self) -> str:
+            return detail
+
+    monkeypatch.setattr(
+        api_main, "get_sandbox_settings", lambda: SandboxSettings(backend="docker")
+    )
+    monkeypatch.setattr(api_main, "build_sandbox", lambda settings: _ProbeFails())
+    client = TestClient(app)
+
+    payload = client.get("/api/v1/config/sandbox").json()
+
+    assert payload["available"] is False
+    assert payload["reason"] == detail
+
+
+def test_sandbox_status_survives_a_crashing_probe(monkeypatch) -> None:
+    """探测自己抛异常时也要回 200 与原因：这是诊断接口，它 500 就没人能诊断了。"""
+
+    from app.sandbox import SandboxSettings
+
+    def explode(settings):
+        raise ImportError("No module named 'docker'")
+
+    monkeypatch.setattr(
+        api_main, "get_sandbox_settings", lambda: SandboxSettings(backend="docker")
+    )
+    monkeypatch.setattr(api_main, "build_sandbox", explode)
+    client = TestClient(app)
+
+    response = client.get("/api/v1/config/sandbox")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["available"] is False
+    assert "ImportError" in payload["reason"]

@@ -53,6 +53,16 @@ class Sandbox(Protocol):
 
     def available(self) -> bool: ...
 
+    def unavailable_reason(self) -> str | None:
+        """不可用的**具体原因**；可用时返回 `None`。
+
+        为什么不只留 `available()`：界面上的「执行边界」分区要把「为什么不可用」
+        显示出来（`doc/api.md` §5.15）。只回布尔值时调用方只能写一句猜测的兜底文案，
+        真实原因（套接字没挂 / 镜像不在宿主机 / 根本装不上 Docker SDK）就丢了。
+        """
+
+        ...
+
     def run(self, code: str, *, language: str = "python") -> SandboxResult: ...
 
 
@@ -66,6 +76,9 @@ class DeniedSandbox:
 
     def available(self) -> bool:
         return False
+
+    def unavailable_reason(self) -> str | None:
+        return self._reason
 
     def run(self, code: str, *, language: str = "python") -> SandboxResult:
         raise SandboxUnavailable(self._reason)

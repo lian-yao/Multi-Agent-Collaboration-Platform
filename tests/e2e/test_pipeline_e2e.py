@@ -118,9 +118,19 @@ def test_pipeline_runs_three_stages_in_order_with_real_tools(
             "expression": e2e_env.model.expressions[index]
         }
 
-    # 注册表是成员 C 的真实接入点，四个内置工具都被发现并绑定给模型。
+    # 注册表是成员 C 的真实接入点：四个进程级内置工具，加上两个**会话级**附件工具。
+    # 后两个只在绑定会话的执行里存在（`app/tools/session_files.py` + ADR-025），
+    # 所以不会出现在 `GET /tools` 的静态目录里（doc/api.md §5.3）——这里顺带钉住
+    # 「执行时确实绑给了模型」这件事。
     bound = {tool["function"]["name"] for tool in e2e_env.model.bound_tools}
-    assert bound == {"calculator", "code_execution", "sql_query", "web_search"}
+    assert bound == {
+        "calculator",
+        "code_execution",
+        "sql_query",
+        "web_search",
+        "list_session_files",
+        "read_session_file",
+    }
 
     # 工具观察结果确实回填给了模型（每个阶段的第二次调用都带 ToolMessage）。
     assert len(e2e_env.model.calls) == 6

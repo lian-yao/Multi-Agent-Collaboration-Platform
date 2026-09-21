@@ -14,15 +14,15 @@
  * ```
  *
  * 退出码 0 = 全通过。**覆盖边界**：只跑不依赖 effects 的渲染路径（组件树挂载、JSX、
- * hooks 顺序、空态、以及用显式 props 驱动的模型区块），外加两组读文件的静态断言
- * （样式表版式、副路由语义）。真正需要点击与 effects 的交互路径仍要人工在浏览器里
- * 过一遍——见 `doc/testing.md` §3.3。
+ * hooks 顺序、空态、以及用显式 props 驱动的模型区块），外加四组读文件的静态断言
+ * （样式表版式、副路由语义、全站禁用原生对话框、自定义 Provider 加号图标与模型上下文查表）。
+ * 真正需要点击与 effects 的交互路径仍要人工在浏览器里过一遍——见 `doc/testing.md` §3.3。
  *
  * 注意：角色路由面板挂在「Agent 团队」页、采样面板挂在「任务记录」页，都不在
  * `RuntimeConfig` 里，所以这里单独挂载一次，避免换页后新位置无人验证。
  */
 
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { renderToStaticMarkup } from "react-dom/server";
 import { AgentPanel, AgentRoleCard, AgentTuningPanel } from "../src/config/AgentPanel";
@@ -31,7 +31,15 @@ import { ModelSection } from "../src/config/ModelSection";
 import { RuntimeSampling } from "../src/records/Inspection";
 import { RecordsPage } from "../src/records/RecordsPage";
 import { PageTabs } from "../src/components/PageTabs";
-import type { Agent, ProviderRegistryDetail } from "../src/types/api";
+import { InlineConfirm, InlineConfirmBar } from "../src/components/InlineConfirm";
+import { ProviderMark } from "../src/config/providerIcons";
+import { AgentGlyph, agentIconKey, AGENT_ICON_GLYPHS, FALLBACK_AGENT_ICON, type AgentIconKey } from "../src/components/AgentGlyph";
+import { resolveKnownContextTokens } from "../src/config/modelCapabilities";
+import { draftProblem, draftToPayload, parseMcpImport, type McpImportDraft } from "../src/config/mcpConfig";
+import { entriesToRecord, recordToEntries, samePairs } from "../src/config/KeyValueFields";
+import { McpImportModal } from "../src/config/McpImportModal";
+import { SandboxBoundary } from "../src/config/SandboxPanel";
+import type { Agent, ProviderRegistryDetail, SandboxStatus } from "../src/types/api";
 
 (globalThis as Record<string, unknown>).fetch = async () => ({
   ok: true,
@@ -52,7 +60,7 @@ try {
   check("配置页整体可静态渲染", false, cause instanceof Error ? cause.message : String(cause));
 }
 
-check("渲染出 3 个分区入口", ["Provider", "默认路由", "MCP 工具"].every((label) => page.includes(label)), page.slice(0, 300));
+check("渲染出 4 个分区入口", ["Provider", "默认路由", "MCP 工具", "执行边界"].every((label) => page.includes(label)), page.slice(0, 300));
 check(
   "配置页不再携带已迁走的分区",
   !page.includes("运行采样") && !page.includes("Agent 角色"),
@@ -68,7 +76,7 @@ check(
 );
 check(
   "副路由带 aria-selected 与 tab 角色",
-  (page.match(/role="tab"/g) ?? []).length === 3 && page.includes('aria-selected="true"'),
+  (page.match(/role="tab"/g) ?? []).length === 4 && page.includes('aria-selected="true"'),
   String((page.match(/role="tab"/g) ?? []).length),
 );
 check(
@@ -129,6 +137,68 @@ check(
   "表单应放进弹窗，不在卡片网格里",
 );
 
+/* ---- 角色头像：按 role 解析图标（components/AgentGlyph.tsx），配置页与协作画布共用 ---- */
+
+const avatarMarkup =
+  card.match(/class="cfg-monogram cfg-agent-avatar[^"]*"[^>]*>([\s\S]*?)<\/span>/)?.[1] ?? "";
+check(
+  "角色头像位画图标，不再塞显示名首字",
+  avatarMarkup.includes("<svg") && !/[\u4e00-\u9fff]/.test(avatarMarkup),
+  `头像位内容：${avatarMarkup || "（没切到样式块）"}`,
+);
+check(
+  "头像图标与 role 对上（analyst → 折线图）",
+  avatarMarkup.includes("lucide-chart-line"),
+  avatarMarkup.slice(0, 160),
+);
+
+const iconCases: [string, string, AgentIconKey][] = [
+  ["collector", "信息收集 Agent", "search"],
+  ["analyst", "数据分析 Agent", "chart"],
+  ["reporter", "报告生成 Agent", "report"],
+  ["summarizer", "摘要 Agent", "summary"],
+  ["translator", "翻译 Agent", "translate"],
+  ["reviewer", "审核 Agent", "review"],
+];
+check(
+  "role 语义键决定图标（内置三角色 + 常见自定义角色）",
+  iconCases.every(([role, name, expected]) => agentIconKey(role, name) === expected),
+  iconCases.map(([r, n, e]) => `${r}→${agentIconKey(r, n)}（应为 ${e}）`).join("；"),
+);
+check(
+  "role 优先于显示名，改显示名不会换图标",
+  agentIconKey("summarizer", "信息收集 Agent") === "summary",
+  `实际 ${agentIconKey("summarizer", "信息收集 Agent")}`,
+);
+check(
+  "role 匹配不到就看显示名，都匹配不到回退机器人",
+  agentIconKey("agent-7", "报告生成 Agent") === "report" && agentIconKey("agent-7") === FALLBACK_AGENT_ICON,
+  `实际 ${agentIconKey("agent-7")} / ${agentIconKey("agent-7", "报告生成 Agent")}`,
+);
+
+const iconKeys = Object.keys(AGENT_ICON_GLYPHS) as AgentIconKey[];
+const iconClasses = iconKeys.map((key) => {
+  const Glyph = AGENT_ICON_GLYPHS[key];
+  return renderToStaticMarkup(<Glyph size={16} />).match(/lucide-[a-z0-9-]+/g)?.[0] ?? "";
+});
+check(
+  "每张角色图标都能渲染出图形",
+  iconClasses.every((name) => name.startsWith("lucide-")),
+  iconClasses.filter((name) => !name.startsWith("lucide-")).join("、"),
+);
+check(
+  "图标键与图形一一对应，没有两键共用一张图",
+  new Set(iconClasses).size === iconKeys.length,
+  `键 ${iconKeys.length} 个、图形 ${new Set(iconClasses).size} 张`,
+);
+check(
+  "三种内置角色渲染出三张不同图形",
+  renderToStaticMarkup(<AgentGlyph role="collector" size={17} />) !==
+    renderToStaticMarkup(<AgentGlyph role="analyst" size={17} />) &&
+    renderToStaticMarkup(<AgentGlyph role="analyst" size={17} />) !==
+      renderToStaticMarkup(<AgentGlyph role="reporter" size={17} />),
+);
+
 /* ---- 角色配置面板（props 驱动）：表单在这里 ---- */
 
 let tuning = "";
@@ -181,7 +251,7 @@ try {
       sessionId={null}
       onOpenRun={() => undefined}
       onOpenSession={() => undefined}
-      onDeleteSession={() => undefined}
+      onDeleteSession={async () => undefined}
     />,
   );
   check("任务记录页可静态渲染", records.length > 200, `长度 ${records.length}`);
@@ -344,6 +414,384 @@ check("渲染出启用/停用开关", (section.match(/role="switch"/g) ?? []).le
 check("渲染出批量引入入口", section.includes("批量引入") && section.includes("手动登记"));
 check("模型行是整卡展开手柄且不再有独立调参按钮", section.includes("aria-expanded") && !section.includes("特化调参") && section.includes("cfg-model-chevron"));
 check("模型行不再渲染无效的能力徽标", !section.includes("能力") && !section.includes("图像"));
+
+/* ---- 危险操作的行内二次确认 + 全站禁用原生对话框 ---- */
+
+const trigger = renderToStaticMarkup(
+  <InlineConfirm
+    label="删除会话「演示」"
+    triggerClassName="cfg-quiet danger"
+    triggerLabel="删除会话：演示"
+    slotClassName="record-run-delete-slot"
+    size="sm"
+    onConfirm={() => undefined}
+  >
+    删除
+  </InlineConfirm>,
+);
+check(
+  "未点击时只渲染触发按钮，不渲染确认条",
+  trigger.includes("cfg-quiet danger") && !trigger.includes("ui-confirm-yes") && !trigger.includes("取消"),
+  trigger,
+);
+check(
+  "宿主 slot 类名落在外层（各区域靠它复用绝对定位）",
+  trigger.includes("ui-confirm-slot") && trigger.includes("record-run-delete-slot"),
+  trigger,
+);
+
+const bar = renderToStaticMarkup(
+  <InlineConfirmBar
+    question="仍要强制级联删除？"
+    confirmLabel="强制删除"
+    onConfirm={() => undefined}
+    onCancel={() => undefined}
+  />,
+);
+check(
+  "确认条带问句 + 确认 + 取消，且确认按钮不是原生对话框",
+  bar.includes("仍要强制级联删除？") && bar.includes("强制删除") && bar.includes("取消"),
+  bar,
+);
+check(
+  "确认条语义正确（role=group + 两个 button，无 confirm/alert）",
+  bar.includes('role="group"') && bar.includes('class="ui-confirm-yes"') && bar.includes('class="ui-confirm-no"'),
+  bar,
+);
+
+// 读文件断言：确认条容器要和触发按钮**同形**——圆角 6px（`.sidebar-user-item-delete`
+// 与 `.cfg-quiet` 同款）、不画自己的描边（否则按钮自带的边会和容器边叠成「框套框」，
+// 用户 2026-09-16 反馈过），间距压到 2px。
+const confirmCss = readFileSync(
+  join(process.cwd(), "src", "components", "inline-confirm.css"),
+  "utf8",
+);
+const confirmRule = /\.ui-confirm\s*\{([^}]*)\}/.exec(confirmCss)?.[1] ?? "";
+check(
+  "确认条容器与触发按钮同形（圆角 6px、无描边、间距 2px）",
+  /border-radius:\s*6px/.test(confirmRule) &&
+    /border:\s*0/.test(confirmRule) &&
+    /padding:\s*2px/.test(confirmRule) &&
+    /gap:\s*2px/.test(confirmRule),
+  confirmRule.trim() || "没读到 .ui-confirm 规则",
+);
+
+// 读文件断言：原生对话框由宿主提供，沙箱 iframe（无 allow-modals）、浏览器
+// 「阻止此页面创建更多对话框」、Electron/CEF 外壳都会屏蔽它；被屏蔽时 confirm()
+// 不弹窗、直接返回 false，挂在返回值上的删除逻辑就会静默失效（点了没反应）。
+const banned = /window\.(confirm|alert|prompt)\s*\(/;
+const srcRoot = join(process.cwd(), "src");
+const offenders: string[] = [];
+for (const rel of readdirSync(srcRoot, { recursive: true }) as string[]) {
+  if (!/\.(ts|tsx)$/.test(rel)) continue;
+  if (banned.test(readFileSync(join(srcRoot, rel), "utf8"))) offenders.push(rel);
+}
+check(
+  "全站不再使用 window.confirm / alert / prompt",
+  offenders.length === 0,
+  `仍在使用：${offenders.join(", ")}`,
+);
+
+// 「自定义」Provider 的图标位必须是加号，而不是把中文「自定义」当 monogram 塞进方块
+// （三字会缩到很小、且和品牌白底方块不同形）。品牌预设仍走品牌标。
+const customMark = renderToStaticMarkup(
+  <ProviderMark presetType="openai-compatible" label="自定义" size={30} />,
+);
+const brandMark = renderToStaticMarkup(
+  <ProviderMark presetType="openai" label="OA" size={30} />,
+);
+check(
+  "自定义 Provider 用加号占位（不渲染「自定义」文字）",
+  customMark.includes("cfg-mark-add") && !customMark.includes("自定义"),
+  customMark.slice(0, 160),
+);
+check(
+  "品牌预设仍渲染品牌标而不是加号",
+  brandMark.includes("cfg-mark") && !brandMark.includes("cfg-mark-add"),
+  brandMark.slice(0, 120),
+);
+
+// 常见模型的上下文窗口自动识别：查表在 modelCapabilities.ts，接线在 ModelSection 的两个入口
+// （「手动登记模型」与「特化调参」）。文案一致性由 describeContextHint 统一保证。
+const capabilities = readFileSync(
+  join(process.cwd(), "src", "config", "modelCapabilities.ts"),
+  "utf8",
+);
+check(
+  "常见模型上下文表与查询函数就位",
+  /KNOWN_CONTEXT_TOKENS/.test(capabilities) && /export function resolveKnownContextTokens/.test(capabilities),
+  capabilities.slice(0, 120),
+);
+check(
+  "上下文窗口按模型名归一化命中（含日期后缀回退）",
+  resolveKnownContextTokens("openai/gpt-4o") === 128000 &&
+    resolveKnownContextTokens("claude-sonnet-4-5-20250929") === 200000 &&
+    resolveKnownContextTokens("gemini-2.5-pro") === 1048576 &&
+    resolveKnownContextTokens("某个没听过的模型") === null,
+  `gpt-4o=${resolveKnownContextTokens("openai/gpt-4o")} sonnet=${resolveKnownContextTokens("claude-sonnet-4-5-20250929")} 未知=${resolveKnownContextTokens("某个没听过的模型")}`,
+);
+const modelSource = readFileSync(
+  join(process.cwd(), "src", "config", "ModelSection.tsx"),
+  "utf8",
+);
+check(
+  "两个模型入口都接了自动识别且手改后停手",
+  (modelSource.match(/resolveKnownContextTokens\(/g) ?? []).length >= 2 &&
+    (modelSource.match(/contextTouched/g) ?? []).length >= 4,
+  `resolveKnownContextTokens x${(modelSource.match(/resolveKnownContextTokens\(/g) ?? []).length} / contextTouched x${(modelSource.match(/contextTouched/g) ?? []).length}`,
+);
+
+/* ---- MCP：粘贴导入的解析、归一化与校验（mcpConfig.ts / KeyValueFields.tsx） ---- */
+// MCP 生态里每个客户端都有自己一份 JSON 约定，导入前必须先归一化；下面按四种输入形态各测
+// 一遍，并锁住两条约定：表单与导入共用同一份校验，请求体只带该传输用得上的字段。
+const baseDraft: McpImportDraft = {
+  id: "x",
+  name: "x",
+  transport: "stdio",
+  command: "npx",
+  args: [],
+  env: {},
+  cwd: "",
+  url: "",
+  headers: {},
+};
+const firstDraft = (text: string): McpImportDraft => parseMcpImport(text).drafts[0];
+
+const claudeStyle = parseMcpImport(
+  JSON.stringify({
+    mcpServers: {
+      filesystem: { command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "/data"] },
+      notion: { type: "http", url: "https://mcp.example.com/mcp", headers: { Authorization: "Bearer x" } },
+    },
+  }),
+);
+check(
+  "mcpServers 映射：逐条解析，并按 command/url 推断传输",
+  claudeStyle.shape === "mcpServers-map" &&
+    claudeStyle.issues.length === 0 &&
+    claudeStyle.drafts.length === 2 &&
+    claudeStyle.drafts[0].id === "filesystem" &&
+    claudeStyle.drafts[0].transport === "stdio" &&
+    claudeStyle.drafts[0].args.length === 3 &&
+    claudeStyle.drafts[1].id === "notion" &&
+    claudeStyle.drafts[1].transport === "http" &&
+    claudeStyle.drafts[1].headers.Authorization === "Bearer x",
+  JSON.stringify(claudeStyle.drafts.map((draft) => [draft.id, draft.transport])),
+);
+
+const listStyle = parseMcpImport(
+  JSON.stringify({ mcpServers: [{ id: "notion", type: "streamable-http", url: "https://mcp.example.com/mcp" }] }),
+);
+const missingId = parseMcpImport(JSON.stringify({ mcpServers: [{ url: "https://x.example.com/mcp" }] }));
+check(
+  "数组形态可解析；streamable-http 归一成 http，缺 ID 的条目给出原因",
+  listStyle.shape === "mcpServers-list" &&
+    listStyle.drafts.length === 1 &&
+    listStyle.drafts[0].transport === "http" &&
+    missingId.drafts.length === 0 &&
+    missingId.issues.length === 1,
+  `${JSON.stringify(listStyle.drafts.map((draft) => [draft.id, draft.transport]))} / ${missingId.issues.length} issues`,
+);
+
+const bareStyle = parseMcpImport(JSON.stringify({ time: { command: "uvx", args: ["mcp-server-time"] } }));
+check(
+  "裸映射（顶层键即 ID）可用，非参数对象不被当成 Server",
+  bareStyle.shape === "server-map" &&
+    bareStyle.drafts.length === 1 &&
+    bareStyle.drafts[0].id === "time" &&
+    bareStyle.drafts[0].transport === "stdio",
+  `${bareStyle.shape}/${bareStyle.drafts.length}`,
+);
+
+const messy = parseMcpImport(
+  JSON.stringify({
+    mcpServers: {
+      "bad id!": { command: "npx" },
+      noUrl: { type: "sse" },
+      wrongProto: { url: "ftp://example.com/mcp" },
+      ok: { command: "npx", args: ["-y", "pkg"] },
+    },
+  }),
+);
+check(
+  "非法条目逐条给出原因，而不是静默丢弃",
+  messy.drafts.length === 1 && messy.drafts[0].id === "ok" && messy.issues.length === 3,
+  JSON.stringify(messy.issues),
+);
+
+check(
+  "JSON 语法错误向上抛出，由弹层转成可读提示",
+  (() => {
+    try {
+      parseMcpImport("{ nope");
+      return false;
+    } catch (cause) {
+      return cause instanceof SyntaxError;
+    }
+  })(),
+);
+
+const stdioPayload = draftToPayload(firstDraft(JSON.stringify({ mcpServers: { fs: { command: "npx" } } })));
+const httpPayload = draftToPayload(
+  firstDraft(JSON.stringify({ mcpServers: { gh: { type: "http", url: "https://x.example.com/mcp" } } })),
+);
+check(
+  "草稿转请求体按传输裁剪字段（本地不带 url，远程不带 command/args/env）",
+  !("url" in stdioPayload) &&
+    stdioPayload.command === "npx" &&
+    !("command" in httpPayload) &&
+    httpPayload.url === "https://x.example.com/mcp",
+  JSON.stringify([stdioPayload, httpPayload]),
+);
+
+check(
+  "校验口径与后端一致：ID 字符集 / 本地缺命令 / 远程缺地址 / 协议不匹配",
+  draftProblem({ ...baseDraft, id: "a b" }).includes("ID 只允许") &&
+    draftProblem({ ...baseDraft, command: "" }).includes("必须填写启动命令") &&
+    draftProblem({ ...baseDraft, transport: "sse", command: "", url: "" }).includes("必须填写地址") &&
+    draftProblem({ ...baseDraft, transport: "ws", command: "", url: "https://x.example.com" }).includes("ws://") &&
+    draftProblem(baseDraft) === "",
+  [
+    draftProblem({ ...baseDraft, id: "a b" }),
+    draftProblem({ ...baseDraft, command: "" }),
+    draftProblem({ ...baseDraft, transport: "sse", command: "", url: "" }),
+  ].join(" | "),
+);
+
+check(
+  "键值对取值：空行忽略、空键报错、重复键报错、比较按项不看引用",
+  entriesToRecord([
+    { id: "1", key: "A", value: "1" },
+    { id: "2", key: "", value: "" },
+  ])?.A === "1" &&
+    entriesToRecord([{ id: "1", key: "", value: "v" }]) === null &&
+    entriesToRecord([
+      { id: "1", key: "A", value: "1" },
+      { id: "2", key: "A", value: "2" },
+    ]) === null &&
+    samePairs({ A: "1" }, { A: "1" }) &&
+    !samePairs({ A: "1" }, { A: "1", B: "2" }) &&
+    recordToEntries({ A: "1" }, "p").length === 1,
+  "见断言条件",
+);
+
+// 静态约定：面板不再自带一套校验（旧实现直接调 parsePairs/formatPairs 解析文本域），
+// 且三个交互入口（粘贴导入、分组下拉、键值对编辑器）确实接在渲染树里。
+const mcpPanelSource = readFileSync(join(process.cwd(), "src", "config", "McpPanel.tsx"), "utf8");
+check(
+  "MCP 面板：校验单一来源，且三个入口都接上",
+  /draftProblem\(/.test(mcpPanelSource) &&
+    !/parsePairs\(/.test(mcpPanelSource) &&
+    !/formatPairs\(/.test(mcpPanelSource) &&
+    /<KeyValueFields/.test(mcpPanelSource) &&
+    /TRANSPORT_GROUPS\.map/.test(mcpPanelSource) &&
+    /<McpImportModal/.test(mcpPanelSource),
+  `draftProblem=${/draftProblem\(/.test(mcpPanelSource)} KeyValueFields=${/<KeyValueFields/.test(mcpPanelSource)}`,
+);
+
+const mcpImportSource = readFileSync(join(process.cwd(), "src", "config", "McpImportModal.tsx"), "utf8");
+const mcpCss = readFileSync(join(process.cwd(), "src", "config", "config.css"), "utf8");
+check(
+  "导入弹层样式前缀与「模型批量引入」不撞名（后者占用 cfg-import-*）",
+  /cfg-mcp-import-/.test(mcpImportSource) &&
+    !/className="cfg-import-/.test(mcpImportSource) &&
+    /\.cfg-mcp-import-item\s*\{/.test(mcpCss) &&
+    /\.cfg-kv-row\s*\{/.test(mcpCss) &&
+    /\.cfg-kv\s*\{[^}]*grid-column/.test(mcpCss),
+  `mcp-import-* = ${(mcpCss.match(/\.cfg-mcp-import-/g) ?? []).length} 条规则`,
+);
+
+// 弹层平时只在点击后才挂载，静态渲染够不到，所以按显式 props 单独挂一次
+// （同 `AgentRoleCard` 的既有做法）。`initialText` 让它能覆盖「有内容」的分支。
+const importModalMarkup = renderToStaticMarkup(
+  <McpImportModal
+    existingIds={["filesystem"]}
+    initialText={JSON.stringify({
+      mcpServers: {
+        filesystem: { command: "npx", args: ["-y", "pkg"] },
+        notion: { type: "http", url: "https://mcp.example.com/mcp" },
+      },
+    })}
+    onClose={() => {}}
+    onSaved={async () => {}}
+  />,
+);
+check(
+  "粘贴导入弹层：有内容时逐条预览，并标出会撞车的 ID",
+  importModalMarkup.includes("cfg-mcp-import-item") &&
+    importModalMarkup.includes("可登记") &&
+    importModalMarkup.includes("notion") &&
+    importModalMarkup.includes("cfg-mcp-import-item dup") &&
+    importModalMarkup.includes("ID 已存在"),
+  importModalMarkup.slice(0, 160),
+);
+
+const emptyImportMarkup = renderToStaticMarkup(
+  <McpImportModal existingIds={[]} onClose={() => {}} onSaved={async () => {}} />,
+);
+check(
+  "粘贴导入弹层：空态可渲染，且不渲染条目行",
+  emptyImportMarkup.length > 200 &&
+    emptyImportMarkup.includes("cfg-mcp-import-head") &&
+    !emptyImportMarkup.includes("cfg-mcp-import-item"),
+  `长度 ${emptyImportMarkup.length}`,
+);
+
+// 「执行边界」是只读分区：限额属部署期安全边界，后端没有写接口，前端也不能有编辑控件。
+const sandboxUnavailable: SandboxStatus = {
+  backend: "docker",
+  image: "python:3.12-slim",
+  available: false,
+  reason: "Docker 守护进程不可达；常见原因是 backend 容器未挂载 /var/run/docker.sock。",
+  limits: {
+    timeout_seconds: 15,
+    memory_limit: "256m",
+    cpu_limit: 0.5,
+    pids_limit: 64,
+    network_enabled: false,
+    output_limit_chars: 4000,
+    max_code_chars: 20000,
+  },
+};
+const boundaryMarkup = renderToStaticMarkup(<SandboxBoundary status={sandboxUnavailable} />);
+check(
+  "执行边界：不可用时给出原因与逐项限额",
+  boundaryMarkup.includes("不可用") &&
+    boundaryMarkup.includes("Docker 守护进程不可达") &&
+    boundaryMarkup.includes("python:3.12-slim") &&
+    boundaryMarkup.includes("15 秒") &&
+    boundaryMarkup.includes("0.5 核") &&
+    boundaryMarkup.includes("256m") &&
+    boundaryMarkup.includes("禁用") &&
+    boundaryMarkup.includes("4000 字符"),
+  boundaryMarkup.slice(0, 160),
+);
+
+check(
+  "执行边界：只读——没有任何可编辑控件",
+  !/<input|<select|<textarea/.test(boundaryMarkup),
+  boundaryMarkup.slice(0, 160),
+);
+
+const sandboxAvailable = renderToStaticMarkup(
+  <SandboxBoundary status={{ ...sandboxUnavailable, available: true, reason: null }} />,
+);
+check(
+  "执行边界：可用时不渲染原因行",
+  sandboxAvailable.includes("可用") &&
+    !sandboxAvailable.includes("Docker 守护进程不可达") &&
+    !sandboxAvailable.includes("cfg-alert"),
+  sandboxAvailable.slice(0, 160),
+);
+
+const configPageSource = readFileSync(join(process.cwd(), "src", "config", "ConfigPage.tsx"), "utf8");
+check(
+  "工具与配置：执行边界成为第四个分区",
+  page.includes("执行边界") &&
+    /id:\s*"sandbox"/.test(configPageSource) &&
+    /<SandboxPanel\s*\/>/.test(configPageSource),
+  "",
+);
 
 const passed = results.filter(([ok]) => ok).length;
 for (const [ok, label] of results) console.log(`${ok ? "PASS" : "FAIL"}  ${label}`);

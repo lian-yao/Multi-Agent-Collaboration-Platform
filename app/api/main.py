@@ -1,18 +1,28 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import logging
 import uuid
 from datetime import datetime
 from typing import Any, Callable, Literal
+from urllib.parse import quote
 
+from dapr.clients.exceptions import DaprGrpcError
 from fastapi import FastAPI, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, FiniteFloat, field_validator, model_validator
 from prometheus_client import CONTENT_TYPE_LATEST
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
+from app.api.stage_trace import read_stage_traces
 from app.api.store import SqlApiStore
 from app.api.inspection import InspectionStore
+from app.attachments import (
+    MAX_FILES_PER_MESSAGE,
+    AttachmentRejected,
+    prepare_upload,
+)
 from app.config import get_settings
 from app.core import mcp_registry, model_registry
 from app.core.agent_config import (
@@ -52,6 +62,7 @@ from app.memory import MessageRole, MessageStatus, SessionMessage
 from app.memory.runtime import conversation_memory
 from app.observability.logging import get_logger, log_event
 from app.observability.metrics import render_prometheus_metrics
+from app.sandbox import build_sandbox, get_sandbox_settings
 from app.workflows.pipeline import WorkflowTask
 from app.workflows.service import get_workflow_service
 
@@ -117,7 +128,70 @@ class SessionListResponse(BaseModel):
 
 
 class MessageRequest(BaseModel):
-    content: str = Field(min_length=1)
+    content: str = ""
+    """消息正文。**可以只带附件不带文字**（截图提问是很常见的用法），
+    因此这里不再要求 `min_length=1`，改由下面的校验保证二者不全空。"""
+
+    attachment_ids: list[str] = Field(
+        default_factory=list, max_length=MAX_FILES_PER_MESSAGE
+    )
+    """先经 `POST /api/v1/attachments` 上传得到的附件 id（`doc/api.md` §5.16）。
+
+    只传 id 不传内容：附件内容可能是一张 5 MB 的图片，塞进请求体会同时顶爆
+    Dapr 的活动输入体积上限与模型请求体积上限。
+    """
+
+    orchestration_mode: Literal["static", "dynamic"] | None = None
+    """单次执行的编排模式覆盖（ADR-019）。
+
+    省略时用服务端 `AGENT_ORCHESTRATION_MODE`（默认 `static`）。
+    """
+
+    @model_validator(mode="after")
+    def _require_content_or_attachment(self) -> MessageRequest:
+        if not self.content.strip() and not self.attachment_ids:
+            raise ValueError("content 与 attachment_ids 不能同时为空。")
+        return self
+
+
+class AttachmentResponse(BaseModel):
+    id: str
+    session_id: str | None = None
+    message_id: str | None = None
+    name: str
+    mime: str = ""
+    size_bytes: int = 0
+    kind: str
+    """`image` / `text` / `document`——按「怎么被模型消费」分类，不是文件类型。"""
+
+    status: str
+    """`ready` / `failed`。`failed` 是**上传成功但解析失败**（例如扫描版 PDF）：
+    附件仍然在，但正文取不出来，前端要显式标注，不能让用户以为它被用上了。"""
+
+    error: str | None = None
+    has_original: bool = False
+    """原件字节是否还在库里（ADR-024）。
+
+    `False` 只出现在 ADR-024 之前落库的文本/文档附件上（那时字节用完即弃）。
+    界面据此决定要不要给「下载原件」入口——不显示一个必然 404 的链接。
+    """
+
+    created_at: datetime
+
+
+class AttachmentUploadRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    mime: str = Field(default="", max_length=120)
+    data_base64: str = ""
+    """base64 编码的原始字节（可带 `data:` 前缀，服务端会剥掉）。
+
+    用 JSON + base64 而不是 multipart：`python-multipart` 在本项目里只是
+    `mcp` 的传递依赖，把它变成上传链路的一等依赖需要改 `pyproject.toml` 与锁文件；
+    base64 有约 33% 的体积开销，但换来零新增依赖与前后端统一的 JSON 契约。
+
+    这里**不设** `min_length`：空文件由 `prepare_upload` 报 `ATTACHMENT_EMPTY`，
+    那个错误码比 "String should have at least 1 character" 对用户有意义得多。
+    """
 
 
 class MessageResponse(BaseModel):
@@ -128,6 +202,7 @@ class MessageResponse(BaseModel):
     agent_run_id: str | None = None
     status: str
     created_at: datetime
+    attachments: list[AttachmentResponse] = Field(default_factory=list)
 
 
 class MessageAcceptedResponse(BaseModel):
@@ -136,6 +211,13 @@ class MessageAcceptedResponse(BaseModel):
     agent_run_id: str
     workflow_id: str
     status: str
+    attachments: list["AttachmentResponse"] = Field(default_factory=list)
+    unattached_attachment_ids: list[str] = Field(default_factory=list)
+    """请求里带了、但没能挂上这条消息的附件 id（不存在 / 已被别的消息挂走 / 格式非法）。
+
+    单独回一个字段而不是并进错误码：消息本身是发成功的，附件缺一个是**部分失败**，
+    报成 4xx 会让前端把已经发出去的消息当成没发出去。前端据此提示并保留本地文件。
+    """
 
 
 class MessageListResponse(BaseModel):
@@ -160,6 +242,18 @@ class WorkflowResponse(BaseModel):
 class SessionActionResponse(BaseModel):
     session: SessionResponse
     workflow: WorkflowResponse | None = None
+
+
+class WorkflowListResponse(BaseModel):
+    """会话的协作工作流列表（`doc/api.md` §5.18）。
+
+    **升序**返回，前端据此给每个对话编号（第 1 / 2 / 3 个对话）；`total` 是本次会话
+    实际的工作流条数，不是分页总数——这个列表不分页，一个会话的工作流条数就是它的
+    对话轮数，量级天然很小。
+    """
+
+    items: list[WorkflowResponse]
+    total: int
 
 
 class AgentResponse(BaseModel):
@@ -688,12 +782,54 @@ class ToolCallListResponse(BaseModel):
     availability: str = "not_integrated"
 
 
+class StageToolCallResponse(BaseModel):
+    """阶段轨迹里的单次工具调用（`doc/api.md` §5.17）。
+
+    `input` / `output` 与 §5.4 的 `tool_calls` 表同形；超长时换成
+    `{"truncated": true, "bytes": n, "preview": "…"}`——调用方据此显示「已截断」，
+    而不是拿到一段被静默剪掉的内容还以为看到了全部。
+    """
+
+    call_id: str
+    tool_name: str
+    status: str
+    input: Any = None
+    output: Any = None
+    error: str | None = None
+
+
+class StageTraceItemResponse(BaseModel):
+    """单个 Agent 阶段的执行轨迹。
+
+    `reason` 与「有轨迹」互斥：没有轨迹时它说明**为什么没有**（还没轮到 / 正在跑 /
+    状态已被清理 / 载荷损坏）。四种原因给的是四种不同的下一步动作，不能合并成一句
+    「暂无数据」。
+    """
+
+    stage: str
+    role: str
+    input: str | None = None
+    input_from: str | None = None
+    output: str | None = None
+    tool_calls: list[StageToolCallResponse] = Field(default_factory=list)
+    truncated: bool = False
+    reason: str | None = None
+
+
+class WorkflowStageTraceResponse(BaseModel):
+    workflow_id: str
+    mode: str
+    task: str | None = None
+    availability: str = "not_integrated"
+    reason: str | None = None
+    items: list[StageTraceItemResponse] = Field(default_factory=list)
+
+
 class MetricResponse(BaseModel):
     metric_name: str
     value: FiniteFloat
     labels: dict[str, Any]
     recorded_at: datetime
-
 
 class MetricListResponse(BaseModel):
     items: list[MetricResponse]
@@ -701,6 +837,33 @@ class MetricListResponse(BaseModel):
     page_size: int
     total: int
     availability: str = "not_integrated"
+
+
+class SandboxLimitsResponse(BaseModel):
+    """当前生效的沙箱限额，逐项对应 `SandboxSettings`（`doc/api.md` §5.15）。"""
+
+    timeout_seconds: int
+    memory_limit: str
+    cpu_limit: float
+    pids_limit: int
+    network_enabled: bool
+    output_limit_chars: int
+    max_code_chars: int
+
+
+class SandboxStatusResponse(BaseModel):
+    """敏感工具执行边界的只读视图。
+
+    **只读是刻意的**：这些参数是部署期安全边界（cgroup 限额、网络开关、后端选择）。
+    做成运行时可改的界面等于让 Web 操作者放宽自己容器的隔离——那不是一个功能，
+    是一个缺口。运行期唯一该被看见的信息是「现在到底能不能用、为什么不能用」。
+    """
+
+    backend: str
+    image: str
+    available: bool
+    reason: str | None = None
+    limits: SandboxLimitsResponse
 
 
 app = FastAPI(
@@ -887,6 +1050,98 @@ def delete_session(session_id: str) -> Response:
 
 
 @app.post(
+    "/api/v1/attachments",
+    response_model=AttachmentResponse,
+    status_code=201,
+    summary="上传附件（doc/api.md §5.16，ADR-021）",
+)
+def upload_attachment(payload: AttachmentUploadRequest) -> AttachmentResponse:
+    """登记一个附件：分类 → 解析正文 → 落库，返回元数据。
+
+    **不要求会话已存在**：草稿态下会话还不存在（`doc/api.md` §4.2），
+    而用户往往是先选文件再写文字。归属在发消息时才回填（`link_attachments`）。
+    """
+
+    raw = payload.data_base64.strip()
+    if "," in raw[:80] and raw.lstrip().startswith("data:"):
+        # 容忍前端直接给 FileReader 的 data URL。
+        raw = raw.split(",", 1)[1]
+    try:
+        data = base64.b64decode(raw, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ApiError(
+            "ATTACHMENT_INVALID_BASE64",
+            "附件内容不是合法的 base64。",
+            status.HTTP_400_BAD_REQUEST,
+        ) from exc
+
+    try:
+        prepared = prepare_upload(payload.name, data, payload.mime)
+    except AttachmentRejected as exc:
+        raise ApiError(exc.code, exc.message, status.HTTP_400_BAD_REQUEST) from exc
+    return AttachmentResponse.model_validate(api_store.create_attachment(**prepared))
+
+
+@app.get(
+    "/api/v1/attachments/{attachment_id}/content",
+    summary="下载附件原件（doc/api.md §5.16，ADR-024）",
+    response_class=Response,
+)
+def download_attachment(attachment_id: str) -> Response:
+    """回附件**原始字节**，供气泡里的缩略图、查看原图与下载原件使用。
+
+    原件对**所有类型**都留档（ADR-024）：用户在历史消息里点开附件，期望拿到的是他当初
+    传的那份文件，而不是我们抽取出来的纯文本。解析失败的附件（扫描版 PDF）同样有原件——
+    读不出正文不代表它不该能下载。
+
+    图片用 `inline`（缩略图与 `<img>` 要能直接渲染），其余用 `attachment`
+    （docx/xlsx 在浏览器里没有渲染器，`inline` 只会开出一个空白页）。
+
+    没有字节时（ADR-024 之前落库的文本/文档行）回 404 而不是空响应：空响应会被前端
+    当成一份有效内容渲染出来，「没内容」和「内容是空的」在这里是两件事。
+    """
+
+    row = api_store.get_attachment_content(attachment_id)
+    if row is None or row.get("data") is None:
+        raise ApiError(
+            "ATTACHMENT_CONTENT_UNAVAILABLE",
+            "该附件没有可下载的原件（早于原件留档策略落库的附件不含字节）。",
+            status.HTTP_404_NOT_FOUND,
+        )
+    name = str(row.get("name") or "attachment")
+    disposition = "inline" if str(row.get("kind") or "") == "image" else "attachment"
+    return Response(
+        content=row["data"],
+        media_type=row.get("mime") or "application/octet-stream",
+        headers={
+            # 文件名含中文时用 RFC 5987 形式，避免头部按 latin-1 编码报错。
+            "Content-Disposition": f"{disposition}; filename*=UTF-8''" + quote(name, safe="")
+        },
+    )
+
+
+@app.delete("/api/v1/attachments/{attachment_id}", status_code=204)
+def remove_attachment(attachment_id: str) -> Response:
+    """删除尚未发出的附件（用户在输入区点「移除」）。
+
+    已归属消息的附件**不允许**在这里删：那会让历史消息里的附件引用变成空洞，
+    历史记录该是只读的。删会话时由外键级联清掉（`AttachmentRecord`）。
+    """
+
+    row = api_store.get_attachment(attachment_id)
+    if row is None:
+        raise ApiError("ATTACHMENT_NOT_FOUND", "附件不存在。", status.HTTP_404_NOT_FOUND)
+    if row.get("message_id"):
+        raise ApiError(
+            "ATTACHMENT_ALREADY_SENT",
+            "该附件已随消息发出，不能单独删除。",
+            status.HTTP_409_CONFLICT,
+        )
+    api_store.delete_attachment(attachment_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@app.post(
     "/api/v1/sessions/{session_id}/messages",
     response_model=MessageAcceptedResponse,
     status_code=202,
@@ -902,6 +1157,20 @@ def send_message(session_id: str, payload: MessageRequest) -> MessageAcceptedRes
         content=payload.content,
         agent_run_id=agent_run["id"],
     )
+    # 附件归属在消息落库后回填；没挂上的 id 直接回给调用方核对，
+    # 不静默吞掉——「传了但没用上」是用户最容易被误导的一类失败（ADR-021）。
+    linked: list[str] = []
+    unattached: list[str] = []
+    if payload.attachment_ids:
+        linked = api_store.link_attachments(
+            payload.attachment_ids,
+            message_id=message["id"],
+            session_id=session_id,
+        )
+        linked_set = set(linked)
+        unattached = [
+            value for value in payload.attachment_ids if value not in linked_set
+        ]
     workflow_id = str(uuid.uuid4())
     api_store.create_workflow(
         workflow_id,
@@ -932,6 +1201,10 @@ def send_message(session_id: str, payload: MessageRequest) -> MessageAcceptedRes
                 session_id=session_id,
                 agent_run_id=agent_run["id"],
                 message_id=message["id"],
+                orchestration_mode=payload.orchestration_mode,
+                # 只传 id：附件内容可能是一张 5 MB 的图片，塞进工作流输入会顶爆
+                # Dapr 活动载荷上限；执行阶段按 id 取正文（ADR-021）。
+                attachment_ids=list(linked),
             )
         )
     except Exception as exc:
@@ -946,6 +1219,8 @@ def send_message(session_id: str, payload: MessageRequest) -> MessageAcceptedRes
         agent_run_id=agent_run["id"],
         workflow_id=workflow_id,
         status="pending",
+        attachments=[AttachmentResponse.model_validate(item) for item in api_store.list_attachments_for_messages([message["id"]]).get(message["id"], [])],
+        unattached_attachment_ids=unattached,
     )
 
 
@@ -957,11 +1232,33 @@ def list_session_messages(
 ) -> MessageListResponse:
     _session_or_404(session_id)
     items, total = api_store.list_messages(session_id, page=page, page_size=page_size)
+    grouped = api_store.list_attachments_for_messages([item["id"] for item in items])
     return MessageListResponse(
-        items=[MessageResponse.model_validate(item) for item in items],
+        items=[
+            MessageResponse.model_validate(
+                {**item, "attachments": grouped.get(item["id"], [])}
+            )
+            for item in items
+        ],
         page=page,
         page_size=page_size,
         total=total,
+    )
+
+
+@app.get("/api/v1/sessions/{session_id}/workflows", response_model=WorkflowListResponse)
+def list_session_workflows(session_id: str) -> WorkflowListResponse:
+    """只读：这个会话里每一次对话各自跑出的协作工作流（`doc/api.md` §5.18）。
+
+    全屏协作画布用它把「对话 1 / 2 / 3」列出来并支持回看：编号就是列表下标 + 1，
+    所以顺序必须是**创建时间升序**（由存储层保证，见 `list_workflows_for_session`）。
+    """
+
+    _session_or_404(session_id)
+    rows = api_store.list_workflows(session_id)
+    return WorkflowListResponse(
+        items=[_workflow_response(row) for row in rows],
+        total=len(rows),
     )
 
 
@@ -1286,6 +1583,53 @@ def list_tools(
     )
 
 
+def _sandbox_availability(settings) -> tuple[bool, str | None]:
+    """探测沙箱后端是否真的可用，并给出**具体**原因。
+
+    原因由后端自己给出（`Sandbox.unavailable_reason()`），不在这里猜：套接字没挂、
+    镜像不在宿主机、Docker SDK 没装上，是三件需要三种不同处理的事，界面上要分得开。
+    """
+
+    try:
+        detail = build_sandbox(settings).unavailable_reason()
+    except Exception as exc:  # 构建后端自身失败（例如没装 docker 包）
+        return False, f"探测沙箱时出错：{type(exc).__name__}: {exc}"
+    return (True, None) if detail is None else (False, detail)
+
+
+@app.get("/api/v1/config/sandbox", response_model=SandboxStatusResponse)
+def get_sandbox_status() -> SandboxStatusResponse:
+    """只读：敏感工具执行边界（`doc/api.md` §5.15）。
+
+    没有对应的写接口——沙箱限额属于部署期安全边界，刻意不做运行时可改。
+    """
+
+    settings = get_sandbox_settings()
+    available, reason = _sandbox_availability(settings)
+    log_event(
+        logger,
+        "sandbox.status",
+        backend=settings.backend,
+        available=available,
+        reason=reason,
+    )
+    return SandboxStatusResponse(
+        backend=settings.backend,
+        image=settings.image,
+        available=available,
+        reason=reason,
+        limits=SandboxLimitsResponse(
+            timeout_seconds=settings.timeout_seconds,
+            memory_limit=settings.memory_limit,
+            cpu_limit=settings.cpu_limit,
+            pids_limit=settings.pids_limit,
+            network_enabled=settings.network_enabled,
+            output_limit_chars=settings.output_limit_chars,
+            max_code_chars=settings.max_code_chars,
+        ),
+    )
+
+
 @app.get(
     "/api/v1/workflows/{workflow_id}/tool-calls",
     response_model=ToolCallListResponse,
@@ -1304,6 +1648,56 @@ def list_workflow_tool_calls(
     return ToolCallListResponse.model_validate(
         _inspection_read(inspection_store.tool_calls, workflow=workflow, page=page, page_size=page_size)
     )
+
+
+STATE_STORE_ERRORS: tuple[type[BaseException], ...] = (
+    DaprGrpcError,
+    OSError,
+    ConnectionError,
+    TimeoutError,
+    ValueError,
+    KeyError,
+)
+"""读状态存储会遇到的失败类型（`doc/api.md` §5.17）。
+
+`DaprGrpcError` 单独列出来是因为它**不在** `OSError` 家族里（它继承 `grpc.RpcError`）：
+漏掉它，「sidecar 没起来」就会表现成 500 而不是 `DATA_SOURCE_UNAVAILABLE` 503。
+"""
+
+
+@app.get(
+    "/api/v1/workflows/{workflow_id}/stages",
+    response_model=WorkflowStageTraceResponse,
+)
+def list_workflow_stage_traces(workflow_id: str) -> WorkflowStageTraceResponse:
+    """只读：本次执行里各个 Agent 实际做了什么（`doc/api.md` §5.17）。
+
+    这是执行台卡片弹窗的数据源。三个语义要分清：
+
+    - **404**：Workflow 不存在；
+    - **200 + `reason`**：这个阶段确实没有轨迹（还没轮到 / 正在跑 / 状态已被清理），
+      原因逐条写明，前端直接照着显示；
+    - **503**：状态存储（Dapr sidecar）读不到。**不**把它伪装成「这个阶段没有轨迹」——
+      前者是环境没起来，后者是任务还没跑到，两者的下一步动作完全不同。
+    """
+
+    workflow = get_workflow(workflow_id)
+    try:
+        data = read_stage_traces(workflow_id, checkpoint=workflow.checkpoint)
+    except STATE_STORE_ERRORS as exc:
+        log_event(
+            logger,
+            "workflow.stage_trace_unavailable",
+            level=logging.WARNING,
+            workflow_id=workflow_id,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        raise ApiError(
+            "DATA_SOURCE_UNAVAILABLE",
+            "阶段执行轨迹来自 Dapr 状态存储，当前读不到（请确认后端与 dapr-sidecar 都在运行）",
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+        ) from exc
+    return WorkflowStageTraceResponse.model_validate(data)
 
 
 @app.get("/api/v1/metrics", response_model=MetricListResponse)

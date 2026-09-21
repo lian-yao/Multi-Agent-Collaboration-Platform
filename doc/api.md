@@ -119,18 +119,29 @@
 
 1. 服务端校验 Session 状态。
 2. 持久化 Message、AgentRun、WorkflowRun。
-3. 调度 Dapr Workflow，返回 `202 Accepted`。
+3. 按编排模式调度 Dapr Workflow，返回 `202 Accepted`。
 4. 客户端轮询 Workflow，并重新读取消息列表获取最终回复。
 
-当前请求体只有 `content`：
+### 3.1 编排模式
+
+请求体字段：`content`（必填）与 `orchestration_mode`（可选）：
 
 ```json
-{ "content": "分析一篇技术文章的核心要点" }
+{ "content": "分析一篇技术文章的核心要点", "orchestration_mode": "dynamic" }
 ```
 
-当前不接受 `decision_agent_id`、Agent 列表、工具列表等字段。前端**不再提供**主决策 Agent
+| 模式 | 工作流 | 流程 |
+| --- | --- | --- |
+| `static`（默认） | `agent_pipeline` | 固定三步 `collect → analyze → report` |
+| `dynamic` | `agent_dynamic` | 规划节点按任务产出计划，再按依赖就绪度逐步执行 |
+
+`orchestration_mode` 只覆盖**这一次**执行；省略时用服务端 `AGENT_ORCHESTRATION_MODE`。
+细节见 `doc/orchestration.md`，决策见 ADR-019。
+
+当前仍不接受 `decision_agent_id`、Agent 列表、工具列表等字段。前端**不再提供**主决策 Agent
 选择器：它只改前端 state、后端不接受该字段，属于「选了也不生效」的假选择，已于 ADR-018 移除。
-参与哪些 Agent 由编排层决定，不由用户指定。
+参与哪些 Agent 由编排层决定，不由用户指定——`orchestration_mode` 选的是**编排方式**，
+不是「参与哪些 Agent」。
 
 ## 4. 已实现接口
 
@@ -150,6 +161,18 @@
 
 请求：`{ "user_id": "demo-user" }`，`user_id` 可为空。响应 `201`，返回 Session。
 
+**调用时机（会话生命周期）**——本接口是「把一条对话落到库里」的显式动作，前端**只在提交
+首条消息时**调用它（配合 §4.4，见 §7）。在此之前工作台处于**草稿态**：`session = null`，
+界面就是「新对话」模板。下面这些动作**都不得**调用本接口：
+
+- 应用初始化 / 刷新页面；
+- 点侧栏「新建任务」；
+- 删除当前会话后的回退。
+
+理由：会话在没有消息与 Workflow 时对用户零价值，而每次刷新都建一个会让历史列表被
+`（暂无消息）` 的空数据淹没（实测一次开发期积累 108 条空会话 vs 19 条真实会话）。
+草稿态下首条消息提交失败时，前端会尽力 `DELETE` 掉刚建的会话，不让它退化成空数据。
+
 ### 4.3 查询会话
 
 `GET /api/v1/sessions/{session_id}`
@@ -160,6 +183,34 @@
 
 `POST /api/v1/sessions/{session_id}/messages`
 
+请求体：
+
+```json
+{
+  "content": "对比两种方案的实测数据并生成报告",
+  "orchestration_mode": "dynamic",
+  "attachment_ids": ["b1c2d3e4-f5a6-4b7c-8d9e-0f1a2b3c4d5e"]
+}
+```
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `content` | 否 | 用户任务。**允许为空**，但此时必须有 `attachment_ids`（见下） |
+| `attachment_ids` | 否 | 先经 `POST /api/v1/attachments` 登记拿到的附件 id，最多 4 个（§5.16） |
+| `orchestration_mode` | 否 | 单次执行的编排模式覆盖，`static` / `dynamic`；省略时用服务端 `AGENT_ORCHESTRATION_MODE`（默认 `static`）。见 §3.1 与 `doc/orchestration.md` |
+
+`content` 与 `attachment_ids` **不能同时为空**（由模型校验器拦成 `422`）。放开 `content` 的
+`min_length=1` 是为了支持「只发一张截图、不打字」这种最常见的多模态用法（ADR-021）。
+
+非法 `orchestration_mode`（如 `"autonomous"`）由 `Literal` 校验拦成 `422`，**不静默退回 `static`**——
+「选了动态却悄悄变成固定流程」比直接报错更难排查。
+
+**执行期间 Agent 拿到的工具比 §5.3 的静态目录多两个**：`list_session_files` / `read_session_file`
+（ADR-025）按本次会话临时绑定，让 Agent 能按需读回这条会话里的附件正文。它们**不在**
+`GET /api/v1/tools` 里，因为那份目录描述的是进程级注册表；要看它们是否真被调用，读 §5.4 的
+工具调用记录。此外，附件内容本身也会随消息进入提示词（只进接收原始任务的根步骤），
+两条路是互补的：前者是"模型已经看见了"，后者是"模型需要时再看一遍"。
+
 响应 `202`：
 
 ```json
@@ -168,7 +219,22 @@
   "session_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
   "agent_run_id": "a1b2c3d4-e5f6-4a5b-9c8d-1e2f3a4b5c6d",
   "workflow_id": "e2f3a4b5-c6d7-4e8f-9a0b-1c2d3e4f5a6b",
-  "status": "pending"
+  "status": "pending",
+  "attachments": [
+    {
+      "id": "b1c2d3e4-f5a6-4b7c-8d9e-0f1a2b3c4d5e",
+      "session_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      "message_id": "c8a1d0a1-1f31-4a2e-9b7e-2f4c9a0b1c2d",
+      "name": "架构草图.png",
+      "mime": "image/png",
+      "size_bytes": 184320,
+      "kind": "image",
+      "status": "ready",
+      "error": null,
+      "created_at": "2026-09-17T10:00:00Z"
+    }
+  ],
+  "unattached_attachment_ids": []
 }
 ```
 
@@ -178,9 +244,21 @@
 不影响本次受理与响应），供同一会话后续轮次做上下文继承；报告正文由终态活动追加进记忆。
 对外字段与状态码不变，接线口径见 ADR-019。
 
+`unattached_attachment_ids` 是**部分失败**的专用出口：请求里带了、但没能挂上这条消息的附件 id
+（不存在 / 已被别的消息挂走）。**不并进错误码**——消息本身是发成功的，把它报成 `4xx` 会让前端把
+已经发出去的消息当成没发出去。
+
+调度到哪个工作流由编排模式决定（ADR-019）：`static` → `agent_pipeline`，
+`dynamic` → `agent_dynamic`；非法值一律退回 `static`。响应体不返回本次使用的模式，
+前端要展示请从 `GET /workflows/{id}` 的 `checkpoint` 读（动态模式带 `"mode": "dynamic"`）。
+
 ### 4.5 查询会话消息
 
 完成任务的报告由终态活动追加为 assistant 消息（ADR-008）；失败不追加报告。生产存储按最新消息分页，再在页内按时间升序返回。前端读取第一页最近 100 条，并在终态延迟补刷一次；完整历史加载尚未实现。
+
+每条消息带 `attachments`（该消息的附件列表，同 §4.4 的 `attachments` 结构；无附件时为空数组）。
+它由 `list_attachments_for_messages` 一次性成组取回，**不是逐条消息一次查询**——否则一页 100 条
+就是 100 次往返。
 
 `GET /api/v1/sessions/{session_id}/messages?page=1&page_size=20`
 
@@ -189,6 +267,9 @@
 ```json
 { "items": [], "page": 1, "page_size": 20, "total": 0 }
 ```
+
+`content` 为空 + `attachments` 非空是合法的（「只发一张截图」），前端在 `content` 为空时
+不渲染空的正文段落。
 
 ### 4.6 暂停会话
 
@@ -258,6 +339,13 @@ item 字段为 name、description、input_schema（JSON 对象）、status。数
 
 API 进程默认按 `MCP_TRANSPORT` 注入该目录（`InspectionStore(tool_catalog=tool_catalog)`）。注册表构建或读取失败返回 `503 DATA_SOURCE_UNAVAILABLE`，不吞掉错误伪装成空目录；只有显式构造为「未注入目录」的读取器才返回 availability=not_integrated。该接口只列目录，不探测每个工具的运行期可用性（例如沙箱后端是否可连）。
 
+**用户登记的 MCP Server 的工具现在也会出现在这里**（ADR-026，2026-09-19 起）。`RegistryServersToolRegistry`（`app/mcp/registry.py`）会把启用 Server 的**已发现**工具合成进来，所以目录的实际内容是「内置工具 + 已发现的登记工具」。两点需要注意：
+
+- **没「发现」过的 Server 不出现在目录里**：目录取自已发现的缓存（与 §5.11 同一条语义——「目录是配置的函数」），用户要在配置页点一次「发现」。读取发生在**每次执行**的工具枚举上，因此这条路径上不做任何 IO（进程内快照，配置变更时由配置面刷新）。
+- **重名时内置优先**：与内置工具同名的登记工具不进目录，服务端另记一条 `mcp.registry_tool_name_clash` 日志；`tool_options.disabled` 为真的工具同样不进目录。
+
+**会话级工具不在这个目录里，这是有意的**（ADR-025）。`list_session_files` / `read_session_file` 的作用域是**一次执行**（绑定当时的 `session_id`），它们由 `session_scoped_registry()` 在阶段执行前临时拼进注册表，因此不进进程级目录、也不会出现在本接口的返回里。把它们算进来会让「工具与配置」页出现两个既关不掉、又在无会话执行里不存在的开关——不给假开关是本项目反复在修的毛病。要看它们是否真的被调用，读 §5.4 的工具调用记录（会出现在 `tool_calls` 里）。调用方需要知道的唯一一件事是：**任何依赖本目录来判断「Agent 有哪些工具」的逻辑都不完整**，运行期的工具集合是「本目录 + 本次会话的会话级工具」。
+
 ### 5.4 查询 Workflow 工具调用
 
 GET /api/v1/workflows/{workflow_id}/tool-calls?page=1&page_size=20
@@ -272,7 +360,17 @@ item 字段为 metric_name、value（有限数值）、labels（JSON 对象）�
 
 `metrics` 表由 `app/core/checkpoint.py::MetricRecord` 定义，随 `init_checkpoint_schema()` 在 backend 进程启动时创建（见 `doc/data-model.md` §3）；从未启动过后端的空库会返回 `not_integrated`，这表示没建表，不等于“没有采样”。
 
-指标展示保留原始 metric_name、labels、采样时间，不累加分页中可能重复的采样值。Token 名称交接约定为 input_tokens/output_tokens/total_tokens，数值 0 显示为 0，缺少采样显示“暂无采样”；比率和耗时由采集方定义后写入，前端不估算。C 负责采集、去重和 labels.workflow_id（可选 agent_id/model）关联，B 负责建表与审计写入，D 只负责读取和呈现；此约定需 A/B/C 联调验收。
+指标展示保留原始 metric_name、labels、采样时间，不累加分页中可能重复的采样值。Token 名称交接约定为 input_tokens/output_tokens/total_tokens，数值 0 显示为 0，缺少采样显示“暂无采样”；比率和耗时由采集方定义后写入，前端不估算。C 负责采集、去重和 labels.workflow_id 关联，B 负责建表与审计写入，D 只负责读取和呈现；此约定需 A/B/C 联调验收。
+
+**实际标签集**（`app/observability/context.py::ObservationContext`）：阶段级标签由编排层通过
+`observed_stage(...)` 写入，static 与 dynamic 两条链路**当前都只传 `role`、不传 `agent_id`**
+（`app/orchestration/pipeline_graph.py`、`dynamic_graph.py`），所以落地采样上的标签是
+`workflow_id` / `stage` / `role`（Token 采样另有 `model`，阶段采样另有 `status`）。
+`role` 与 §4.9 Agent 目录的 `id` 同值（collector / analyst / reporter），是当前**唯一**能把
+Token 归到具体 Agent 的标签；`agent_id` 在采样里目前不存在。因此前端的归集顺序固定为
+**`agent_id` → `role` → `model` → 任务级**：只认 `agent_id` 会让三个 Agent 的 Token 全部退到
+`model` 一层、被合并成一个分组，界面上看就是「Token 没有分到 Agent 头上」（2026-09-21 实测）。
+采样里出现 `role` 却不用它，比少一个字段更糟——数据在，是读法错了。
 
 前端入口：工作台「任务记录」页（`frontend/src/Inspection.tsx::RuntimeSampling`）。它是**观测**而不是配置，因此不放在「工具与配置」页。有 Workflow 时按 `workflow_id` 过滤并在未到终态时轮询，终态停止；没有 Workflow 时退回全局采样。`labels` 以一排 `键 = 值` 小标签渲染，不展开成 JSON 块。
 
@@ -734,8 +832,11 @@ item 字段为 metric_name、value（有限数值）、labels（JSON 对象）�
   `env` 为 `{key: value}`，`cwd` 可选；此时 `url` 必须为空。
 - `transport` 为 `http`/`sse`/`ws` 时必填 `url`（`http(s)` / `ws(s)`），可选 `headers`；
   此时 `command`/`args`/`env`/`cwd` 必须为空。
-- `tool_options`：`{toolName: {disabled?: bool, allowAutoExecution?: bool}}`，
-  用于按工具开关与自动执行策略。
+- `tool_options`：`{toolName: {disabled?: bool, allowAutoExecution?: bool}}`。
+  `disabled` **真的生效**（ADR-026）：为真的工具不进 §5.3 的工具目录，因而不会绑给模型。
+  `allowAutoExecution` 仍然**不消费**——它要表达的是「调用前需要人工确认」，而 HITL 还没做；
+  没有审批环节就无法正确表达这个语义，硬解释成「不暴露给模型」会让用户以为自己设的是
+  「需要审批」而实际是「工具消失」。因此也不给它做界面开关（ADR-020 同一取向）。
 - `tool_count` / `discovered_at` / `server_info` 来自 `discovered` 缓存；
   从未发现过时 `tool_count` 为 `0`、后两者为 `null`。
 
@@ -757,6 +858,10 @@ item 字段为 metric_name、value（有限数值）、labels（JSON 对象）�
 失败（连接不上、握手失败、列工具报错、超时 15 秒）返回 `502 MCP_DISCOVERY_FAILED`，
 `message` 为归一化后的错误原因，不含凭据与命令全文中的敏感值。发现结果**只**写
 `discovered` 缓存，不改 `enabled`。
+
+发现结果**立即**对 Agent 生效（ADR-026）：服务端在写完缓存后会刷新编排层的工具快照，
+下一次执行就能看到这批工具，**不需要重启进程**。Server 的新增 / 修改 / 删除同理
+（`app/core/mcp_registry.py::_sync_orchestration_tools`）。
 
 `GET /api/v1/config/mcp/tools`：按 Server 分组的**紧凑**工具目录，供配置页渲染卡片。
 **不**内联 `input_schema`——Schema 体积大且多数时候不影响「这个工具要不要开」的判断：
@@ -835,7 +940,15 @@ item 字段为 metric_name、value（有限数值）、labels（JSON 对象）�
 
 按 `updated_at` 倒序分页返回历史会话，供「任务记录 → 历史会话」分区展示。会话与消息
 持久化在 PostgreSQL（`doc/data-model.md` §3），重启不丢失；本接口是把它们重新「捞出来」
-的唯一入口——前端每次刷新都 `createSession` 开新会话，旧会话必须通过本接口才能再次看到。
+的唯一入口。
+
+**服务端过滤（接口层兜底）**：只返回**至少有一条 `messages` 记录**的会话；`items` 与 `total`
+按同一条过滤条件计算，否则分页会错位。前端已按 §4.2 的调用时机在首条消息提交时才建会话
+（刷新与「新建任务」都停留在不落库的草稿态），正常链路不会产生空会话——这条过滤是接口层
+的兜底，防止绕过前端直接 `POST /sessions` 造出空行堆在历史列表里。
+
+判定条件是「存在消息」而非「存在 `role=user` 的消息」：消息在 workflow 之前写入（§4.4），
+所以**任何真正跑过任务的会话都必然命中**，不会把有 workflow 的会话误过滤掉。
 
 每个列表项在 §4.2 Session 字段之外，额外携带两个摘要字段，省去逐会话二次请求：
 
@@ -859,8 +972,9 @@ item 字段为 metric_name、value（有限数值）、labels（JSON 对象）�
 }
 ```
 
-- `title`：该会话**首条** `role=user` 消息的内容，截断到 60 字（超长加省略号）；无任何
-  消息时为 `「暂无消息」`。
+- `title`：该会话**首条** `role=user` 消息的内容，截断到 60 字（超长加省略号）。服务端过滤
+  已经保证列表每一项都至少有消息，所以「无消息」的回退文案在列表里实际不可达，保留它只为
+  字段契约完整（消息内容为空串时回退为 `「无文本消息」`）。
 - `latest_workflow_status` / `latest_workflow_id`：该会话 `created_at` 最新的一条 Workflow
   的终态与 ID；从未提交过任务时为 `null`。前端据此用 §4.8 的 `GET /workflows/{id}` 恢复执行台。
 
@@ -880,8 +994,281 @@ item 字段为 metric_name、value（有限数值）、labels（JSON 对象）�
 - `metrics` 按 `labels.workflow_id` 删除（尽力而为，失败不阻断主流程）。
 
 前端在「侧栏当前任务下拉」与「任务记录 → 历史会话」两处提供删除入口，删除前必须
-二次确认；若删除的是当前会话，前端会回退到一个全新会话，避免工作台继续指向已删除
-的会话。
+二次确认（一律用行内确认，禁用原生对话框，见 §7）；若删除的是当前会话，前端回退到
+**草稿态**的新对话模板（`session = null`，**不**新建会话），避免工作台继续指向已删除
+的会话。两处入口都必须在**删除请求成功后**重新拉取 §5.13 的列表再渲染，否则会出现
+「删掉了但列表里还在」的假象（侧栏下拉原先只在展开时拉一次；记录页原先与删除并发拉取，
+存在竞态）。
+
+### 5.15 查询执行边界（沙箱状态，只读）
+
+`GET /api/v1/config/sandbox`
+
+响应 `200`：
+
+```json
+{
+  "backend": "docker",
+  "image": "multi-agent-collaboration-platform-backend:latest",
+  "available": true,
+  "reason": null,
+  "limits": {
+    "timeout_seconds": 15,
+    "memory_limit": "256m",
+    "cpu_limit": 0.5,
+    "pids_limit": 64,
+    "network_enabled": false,
+    "output_limit_chars": 4000,
+    "max_code_chars": 20000
+  }
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `backend` | `docker`（容器隔离）或 `denied`（显式拒绝执行） |
+| `image` | 容器隔离使用的镜像 |
+| `available` | 探测结果：守护进程可达**且**镜像已在宿主机 |
+| `reason` | 不可用时的**具体原因**；可用时为 `null` |
+| `limits` | 当前生效限额，逐项对应 `SandboxSettings` |
+
+`reason` 由后端自己给出（`Sandbox.unavailable_reason()`），不是接口层的兜底文案——**套接字没挂、
+镜像不在宿主机、没装 Docker SDK 是三件需要三种不同处理的事**，界面上要分得开。探测本身炸了也
+回 `200` 加原因：这是诊断接口，它自己 500 就没人能诊断了。
+
+探测是**两件事**，缺一不可：
+
+1. 守护进程可达（`ping`）；
+2. 沙箱镜像已在**宿主机**上。沙箱容器是 backend 通过宿主机套接字创建的**兄弟容器**（ADR-023），
+   镜像不在宿主机时只 `ping` 会得到「绿灯、但第一次执行代码就失败」的假象。
+
+镜像缺失时 `reason` 会给出三条可执行的路：宿主机 `docker pull`、把 `SANDBOX_IMAGE` 指到本地
+已有镜像、或开 `SANDBOX_AUTO_PULL_IMAGE`（默认**关**——拉取可能长时间阻塞，安全边界组件应当
+失败得快、原因得准）。
+
+**只读，没有写接口**（`PUT`/`POST` 返回 `405`）。这些参数是部署期安全边界——做成运行时可改的
+界面等于让 Web 操作者放宽自己容器的隔离，那样的开关必然是个假开关。决策与理由见 ADR-020；
+「沙箱在部署里真正可用」是 ADR-023。
+
+前端入口：「工具与配置 → 执行边界」，只展示不编辑。
+
+### 5.16 多模态附件（上传 / 下载 / 删除）
+
+支撑「图片理解、文档理解」（ADR-021）。附件是**一等资源**：先上传登记拿到 id，发消息时用
+`attachment_ids` 引用（§4.4）。**内容不进消息体、不进编排链路**——Dapr 的 gRPC 默认限制 4 MB，
+链路里流动的永远只是 id。
+
+#### 5.16.1 上传并解析
+
+`POST /api/v1/attachments`
+
+```json
+{
+  "name": "架构草图.png",
+  "mime": "image/png",
+  "data_base64": "iVBORw0KGgoAAAANSUhEUg..."
+}
+```
+
+| 字段 | 必填 | 说明 |
+| --- | --- | --- |
+| `name` | 是 | 原始文件名，服务端会做折叠与清洗（`sanitize_name`） |
+| `mime` | 否 | 浏览器给的 MIME；缺失时按 `application/octet-stream` 处理 |
+| `data_base64` | 是 | 文件字节的 base64（**不带** `data:` 前缀；带前缀也收） |
+
+用 JSON + base64 而不是 multipart：`python-multipart` 当前只是 `mcp` 的传递依赖，
+为一个上传接口把它提成一等依赖要动 `uv.lock`，收益不抵代价（ADR-021）。
+
+响应 `201`：附件对象（与 §4.4 响应里的 `attachments` 同构）。
+
+| 字段 | 说明 |
+| --- | --- |
+| `kind` | `image` / `text` / `document` |
+| `status` | `ready` / `failed`（登记成功但正文与页面图**都**取不到，`error` 说明原因） |
+| `size_bytes` | 原始字节数。**注意是原文件大小**，不是抽取出来的文本长度 |
+| `has_original` | 原件字节是否还在库里（ADR-024）。`false` 只出现在旧策略之前落库的附件上——界面据此决定要不要给「打开原件」入口，不给必然 404 的链接 |
+| `text_content` | **不在响应里回传**。它只在执行阶段被读进提示词；原件另由 §5.16.2 提供下载 |
+
+`ready` 有两种形态，**受理字段完全一样、区别只在 `text_content` 与 `error`**：
+
+- **有正文**：`text_content` 非空，`error` 一般为空；
+- **无正文但有页面图**：扫描版 PDF，或内嵌字体子集字符码冲突的 PDF。执行阶段把页面渲成 PNG、
+  当图片附件走视觉通路（ADR-027），此时 `text_content` 为 `null`，`error` 里带一句**降级说明**
+  （如「这份 PDF 没有文本层（扫描件），已改用页面图像提供正文。」）。**前端必须显示这句说明**，
+  否则用户会以为正文是被正常提取出来的。
+
+`failed` **仍然是登记成功的附件**（有 id、可挂消息、会出现在气泡里）。它只是没进模型上下文——
+这一点必须如实显示。ADR-027 之后扫描件不再落到这里（页面能渲成图就报 `ready`），
+剩下的 `failed` 是「正文与页面图都取不到」：加密文档、渲染组件缺失（`error` 会点明
+`pypdfium2`）、上传时探测通过但执行时渲染失败的极端情况。
+
+错误码：
+
+| 状态 | 码 | 触发条件 |
+| --- | --- | --- |
+| 400 | `ATTACHMENT_INVALID_BASE64` | `data_base64` 不是合法 base64 |
+| 400 | `ATTACHMENT_EMPTY` | 零字节 |
+| 400 | `ATTACHMENT_TOO_LARGE` | 超过 5 MB |
+| 400 | `ATTACHMENT_TYPE_UNSUPPORTED` | 扩展名不在白名单 |
+
+校验顺序即上表顺序：先解 base64，再判空与大小，最后判类型。**不支持的类型与超限一律在上传时拒**
+（`AttachmentRejected` → `400`）——收下一个永远用不上的附件，等于在界面上给用户一个「我传上去了」
+的假信号。
+
+限额（`app/attachments/spec.py`，前端 `frontend/src/workspace/attachments.ts` 持同一份口径）：
+单文件 5 MB / 单条消息 4 个 / 单文件 2 万字符 / 单条消息合计 4 万字符。前端那份**只做即时反馈**，
+准入判据始终在服务端。
+
+#### 5.16.2 读取附件原件
+
+`GET /api/v1/attachments/{attachment_id}/content`
+
+回**原件字节**（ADR-024），按类型选处置方式：
+
+- 图片：`Content-Type` 为登记的 `mime`，`Content-Disposition: inline`——气泡里的缩略图与
+  「查看原图」要能直接渲染；
+- 文本 / 文档（**含解析失败的附件**）：同一份原件，`Content-Disposition: attachment`——
+  txt/docx/xlsx 在浏览器里没有渲染器，`inline` 只会开出一个空白页；
+- id 不存在，或该行早于原件留档策略落库（`has_original=false`）：`404
+  ATTACHMENT_CONTENT_UNAVAILABLE`。
+
+回 `404` 而不是空响应：空响应会被前端当成一份有效内容渲染出来，「没内容」和「内容是空的」是两件事。
+
+响应头带 RFC 5987 的 `Content-Disposition`（中文文件名用 `filename*=UTF-8''...`，避免头部按
+latin-1 编码报错）。
+
+前端用法：气泡里的条目在 `has_original=true` 时**本身就是这个地址的链接**——图片新窗口看原图，
+其余带 `download` 属性直接存成上传时的文件名。`has_original=false` 的旧行不给入口，因为那会是
+一个必然 404 的链接。
+
+#### 5.16.3 删除附件
+
+`DELETE /api/v1/attachments/{attachment_id}`
+
+| 状态 | 码 | 情况 |
+| --- | --- | --- |
+| 204 | — | 未归属任何消息（`message_id IS NULL`），已删除 |
+| 404 | `ATTACHMENT_NOT_FOUND` | id 不存在 |
+| 409 | `ATTACHMENT_ALREADY_SENT` | 已随消息发出，不能单独删除 |
+
+已归属消息的附件**不允许**单独删：那会让历史消息里的附件引用变成空洞，历史记录该是只读的。
+删会话时由外键级联清掉（`ON DELETE CASCADE`，见 `doc/data-model.md` §3.1）。要清理请连消息一起删
+（会话级联见 §5.14）。
+
+前端在「移除 chip」与「换任务」时调用它清理未发出的附件，失败不阻断界面
+（最坏情况只留一条未归属的附件行）。
+
+### 5.17 查询阶段执行轨迹（只读）
+
+`GET /api/v1/workflows/{workflow_id}/stages`
+
+执行台卡片弹窗（`frontend/src/workspace/AgentStageModal.tsx`）的数据源。与 §5.4 的分工是：
+**§5.4 回答「这次任务调了哪些工具」，§5.17 回答「哪个 Agent 收到什么、调了什么、产出了什么」**，
+两者不互相替代。
+
+响应 `200`：
+
+```json
+{
+  "workflow_id": "…",
+  "mode": "static",
+  "task": "统计上季度华东区的退货率",
+  "availability": "available",
+  "reason": null,
+  "items": [
+    {
+      "stage": "analyze",
+      "role": "analyst",
+      "input": "已收齐三类原始数据……",
+      "input_from": "collect",
+      "output": "整体退货率 4.8%……",
+      "tool_calls": [
+        {
+          "call_id": "…", "tool_name": "calculator", "status": "succeeded",
+          "input": {"expression": "128/2680"}, "output": {"result": 0.0478}, "error": null
+        }
+      ],
+      "truncated": false,
+      "reason": null
+    }
+  ]
+}
+```
+
+- `items` 按阶段固定顺序返回 `collect` / `analyze` / `report`（当前静态链路的三个阶段）。
+- `input` 是本阶段**实际读到的上游正文**，`input_from` 标明它来自哪一步；根阶段两者都是 `null`
+  （它收到的就是原始任务 `task`，不重复回传一份）。
+- `tool_calls` 的元素结构与 §5.4 的 `tool_calls` 表同形。上限定为**单段正文 8000 字符、
+  单次工具入参/出参 4000 字符**，超限不只是截断：正文被截断时 `truncated=true`，工具载荷则换成
+  `{"truncated": true, "bytes": n, "preview": "…"}`。界面据此显示「已截断」——
+  静默剪掉一段内容再当作全部展示，比不显示更糟。
+- `reason` 与「有轨迹」互斥，写的是**为什么没有**：还没轮到 / 正在执行（轨迹在阶段完成后才落盘）/
+  阶段已完成但状态已被清理 / 载荷无法解析。四种原因指向四种不同的下一步动作，前端必须原样显示，
+  不得改写为「暂无数据」。
+- `mode` 为 `dynamic` 时 `availability=not_integrated`、`items=[]`、`reason` 说明动态链路当前
+  不落盘逐步骤轨迹（ADR-019）；界面同样原样显示这句原因。
+
+| 状态 | 码 | 情况 |
+| --- | --- | --- |
+| 200 | — | 读到轨迹，或该阶段确实还没有轨迹（看 `reason`） |
+| 404 | `WORKFLOW_NOT_FOUND` | Workflow 不存在 |
+| 503 | `DATA_SOURCE_UNAVAILABLE` | 状态存储（Dapr sidecar）读不到 |
+
+**数据来源与边界**：轨迹取自 Dapr State Store 里 `_record_checkpoint` 写入的阶段状态
+（`app/api/stage_trace.py`）。因此 503 与 200+`reason` 必须分开——前者是环境没起来，后者是任务
+还没跑到。模型内部的隐藏推理（reasoning / thinking 块）**不在本接口范围内**：编排层只落盘行动与
+结论，接口不伪造中间过程。该接口**只读**：不写状态存储、不建表，也不触发任何阶段重跑。
+
+### 5.18 查询会话的历史工作流（只读）
+
+`GET /api/v1/sessions/{session_id}/workflows`
+
+全屏协作画布（`frontend/src/workspace/CollabCanvas.tsx`）的数据源之一。与 §5.13 的分工是：
+**§5.13 列的是「有哪些会话」，§5.18 列的是「这个会话里每一次对话各自跑出的协作工作流」**。
+一次提交（一次对话）对应一条 Workflow，编号就是返回列表的**下标 + 1**。
+
+响应 `200`：
+
+```json
+{
+  "items": [
+    {
+      "id": "wf-…", "session_id": "s-…", "agent_run_id": "run-…",
+      "status": "completed", "current_step": null,
+      "checkpoint": {"status": "completed", "current_step": null,
+                     "completed_steps": ["collect", "analyze", "report"],
+                     "updated_at": "…"},
+      "created_at": "…", "updated_at": "…", "completed_at": "…"
+    },
+    {
+      "id": "wf-…", "session_id": "s-…", "agent_run_id": "run-…",
+      "status": "running", "current_step": "report",
+      "checkpoint": {"status": "running", "current_step": "report",
+                     "completed_steps": ["collect", "analyze"],
+                     "updated_at": "…"},
+      "created_at": "…", "updated_at": "…", "completed_at": null
+    }
+  ],
+  "total": 2
+}
+```
+
+- **必须升序返回（按 `created_at`）**。编号由位置决定，倒序会让「对话 1」在新增一次对话后
+  变成原来的「对话 2」，用户回看时点按的对话会整体错位。存储层只提供升序读法
+  （`app/core/checkpoint.py::list_workflows_for_session`），接口不做二次排序。
+- 元素结构与 §4.8 的 Workflow 同形，字段含义一致。
+- `total` 是本次会话实际的工作流条数。**该列表不分页**：一个会话的工作流条数就是它的对话轮数，
+  量级天然很小；上限由存储层的 `limit`（默认 200）兜底。
+- 只读：不建会话、不建 Workflow。草稿态会话（还没有提交过消息）返回 `items: []`，
+  前端据此显示空画布而不是报错。
+- 前端不要用它替换「当前任务」下拉——那个下拉取的是 `latest_workflow_id`（§5.13），
+  本接口不承担「哪个是当前任务」的判定。
+
+| 状态 | 码 | 情况 |
+| --- | --- | --- |
+| 200 | — | 读到列表，可能为空 |
+| 404 | `SESSION_NOT_FOUND` | 会话不存在 |
+| 503 | `DATA_SOURCE_UNAVAILABLE` | 存储（PostgreSQL / Dapr）读不到 |
 
 ## 6. 规划接口（当前未实现）
 
@@ -906,7 +1293,9 @@ POST /api/v1/agents/{agent_id}/run
 
 ## 7. 前端对接约束
 
-- 初始化顺序：并行调用 `GET /agents` 与 `POST /sessions`。
+- 初始化顺序：只调用 `GET /agents`，**不**建会话（草稿态，见 §4.2）。会话在提交首条消息时
+  由 `POST /sessions`（§4.2）接着 `POST /sessions/{id}/messages`（§4.4）连成一步完成，用户
+  只感知到「发出去了一条消息」。页面刷新回到草稿态，看历史会话走 §5.13。
 - 发送消息后保存 `workflow_id`，每 2 秒轮询一次 Workflow；终态为 `completed`、`failed`、`cancelled` 时停止轮询。
 - Token 与调用明细由 §5 读取；区分加载、失败、未接入、无记录、有记录，运行时轮询，终态补刷。切换 Workflow 时丢弃旧请求结果；调用和指标独立失败，不能阻断会话功能。任务标题取用户消息摘要。
 - Provider 配置（§5.8）已有前端入口：页面直接读写生效配置，**不需要令牌**（ADR-015）。页面只提交被改动的字段，凭据输入框留空表示不修改；由于响应不含密钥，页面不会回显凭据原值。其余只读展示继续走 §5.1 / §4.9 / §5.2 与 §5.8 的 `GET`。
@@ -930,6 +1319,8 @@ POST /api/v1/agents/{agent_id}/run
      （名字、`role · 状态`、生效模型、Temperature、覆盖项数，以及「当前阶段」标记）；
      编辑表单在 `AgentTuningPanel` 里，点开方块后挂在网格下方，同一时刻只编辑一个角色。
      网格里不放输入项——六个输入框会把同一行的其它方块顶变形。
+     方块左上角的 34px 图标位放**角色图标**（按 `role` 解析，见 ADR-029），不再放显示名首字；
+     解析器与协作画布节点共用，见「全站版式与控件复用」的 `AgentGlyph` 一条。
   3. 「任务记录」`frontend/src/records/RecordsPage.tsx` —— 执行结果的**观测**数据。
      内部再分三个副路由，分区依据是「记录产生的位置」而不是数据类型：
      `runs` 运行记录（当前会话最近一次执行的终态与检查点）、
@@ -944,26 +1335,108 @@ POST /api/v1/agents/{agent_id}/run
     旧 `.cfg-tabs` / `.cfg-tab` 已废弃，不要再新增。
   - 状态胶囊与状态文案唯一来源是 `components/Status.tsx`（`Status`、`statusText`、
     `toolCallStatusText`），不要在页面里各写一份映射。
+  - **Agent 角色图标的唯一来源是 `components/AgentGlyph.tsx`**（`AgentGlyph`、
+    `agentIconKey`、`AGENT_ICON_GLYPHS`），配置页角色方块与协作画布节点都调它。
+    口径：先按 `role` 匹配语义、再按显示名、最后回退机器人（`Bot`）；关键词表
+    `AGENT_ICON_RULES` **顺序即优先级**。加图标往表里加一行即可，不要在视图里另做映射
+    （两个视图各画各的，一致性会慢慢消失——这就是原先「配置页画首字、画布画机器人」
+    的成因，见 ADR-029）。画布上**状态优先于角色**：`failed` / `paused` / `running`
+    画各自的图形，其余才画角色图标。
+  - **危险操作的行内二次确认一律用 `components/InlineConfirm.tsx`**（`InlineConfirm`
+    触发式、`InlineConfirmBar` 直接渲染确认条），**全站禁止 `window.confirm` /
+    `alert` / `prompt`**。原生对话框由宿主提供：内置预览的 sandbox iframe（无
+    `allow-modals`）、浏览器「阻止此页面创建更多对话框」、Electron/CEF 外壳都会屏蔽它，
+    被屏蔽时 `confirm()` 不弹窗、直接返回 `false`，把删除挂在返回值上的写法会静默失效
+    （表现为「点了删除没反应」，2026-09-16 用户实测）。行内确认是普通 DOM，不可被屏蔽。
+    删除类入口的定位与悬停显隐挂在 slot 上（`.record-run-delete-slot`、
+    `.cfg-agent-delete-slot`），armed 后确认条要**原地替换**按钮、不产生位移。
+    后端先拒绝、再由用户升级的场景（如 Provider 的 `PROVIDER_IN_USE` 409 → 强制级联删除）
+    用 `InlineConfirmBar`，视觉与前者一致但不再套一层 armed 循环。
   - 设计令牌 `--cfg-*` 只定义在 `styles.css` 的 `:root`（唯一的全局样式表），
     另有 `config/config.css`（cfg 设计系统）与 `records/records.css`（观测卡片）。
 - 远端发现（§5.10 的 `discover`、§5.11 的 `discover`）只能由**用户显式操作**触发，
   不得在页面加载时自动调用：它会向用户填写的地址发起出站请求。
 - Agent 覆盖（§5.7）的前端入口：`GET /api/v1/config/agents` 一次取回全部角色与
   可选模型清单，`PATCH` 保存；表单默认不展开，点开角色方块后才渲染输入项。
-- 工作台内的三块视图职责互斥，不重复渲染同一份数据（ADR-018）：
-  1. **Agent 执行台**（`App.tsx` 内联，卡片类名 `dock-node cli-node`）——按 Workflow 的
+- 工作台内的四块视图职责互斥。ADR-018 定的是「三块视图不重复渲染同一份数据」，
+  **ADR-031 把对话流并入并改按时间划边界**——重复本身不是问题，**错位**才是：
+  | 视图 | 回答什么 | 时间面 |
+  | --- | --- | --- |
+  | 对话流（`.run-activity`） | 这一次执行**当下**跑到哪、调了什么、拿到了什么、产出了什么 | 进行中 |
+  | Agent 执行台弹窗（§5.17） | 单步的完整轨迹，含上游输入原文与截断标记 | 跑完之后回看 |
+  | 任务协作侧栏 | 任务级整体状态、协作画布、用量 | 任务级 |
+  | 任务记录页 | 跨任务的逐条工具调用与采样明细 | 审计 |
+  四个面都**只读**同一批服务端数据（§5.17 / §5.5），谁都不写、不缓存，因此不存在「以哪一份为准」。
+  1. **对话流**（`App.tsx::MessageBubble` + `workspace/RunActivity.tsx`）——消息正文与执行过程：
+     - 正文一律走 Markdown 渲染（`components/Markdown.tsx`，GFM）。**不得**再退回
+       `<p>{content}</p>`：模型按 Markdown 组织输出（标题、加粗、列表、表格、围栏代码块），
+       直接塞进 `<p>` 会把记号原样吐出，结构全丢。渲染层**不挂 `rehype-raw`**——
+       那等于把模型输出当 DOM 执行；`react-markdown` 默认不解析裸 HTML，这条要保持。
+     - 正文的**渐进揭示**（`components/useStreamText.ts`）是**呈现效果，不是流式传输**：
+       后端没有事件流，助手正文是工作流终态一次性落库的。因此前端不得据此宣称
+       「正在逐 token 接收」；真要流式得先在后端开只读事件流端点。
+       只对**本次会话新到达**的消息播放（历史会话整屏重放会让人以为任务在重新执行），
+       非浏览器环境与 `prefers-reduced-motion: reduce` 下降级为立即全文。
+     - 执行活动卡片摆在**提问之后、答复之前**（`reportIndex` 定位）：过程要出现在结果的
+       上一个位置；排到整段对话末尾会看起来像另一个任务。
+     - 逐步轨迹按 §5.17 如实呈现，三段小标题与执行台弹窗**逐字一致**
+       （**分配到的任务 → 执行轨迹 → 阶段产出**）；同一份字段在两处用两套词会被读成
+       两件事，冒烟里同时断言两条渲染路径。**不伪造思维链**——模型内部的隐藏推理没有落盘，
+       卡片只呈现落盘过的事实：**不写口径脚注，也不复述任务原文**（这两条脚注已按评审删除；
+       口径说明由执行台弹窗承载，见本条 2）。轨迹缺席时转述服务端给的具体原因，不留白。
+     - 与弹窗的唯一差别：**根步骤不铺输入原文**（用户的原始任务就在上方那条用户消息里）。
+     - 正在跑的那一步默认摊开、跑完的收成一行；摘要行必须仍写清
+       「谁 / 什么状态 / 动了几次工具」，否则收起就是信息丢失。
+  2. **Agent 执行台**（`App.tsx` 内联，卡片类名 `dock-node cli-node`）——按 Workflow 的
      `checkpoint.completed_steps` 与 `current_step` 展示阶段状态；不得在无 Workflow 时预填
-     三张 Agent 卡片。卡片点击打开**单个 Agent 的阶段详情弹窗**
-     （`frontend/src/workspace/AgentStageModal.tsx`），不改变右侧侧栏内容——侧栏是任务级
-     视图，不跟随单卡点击而变。
-  2. **任务协作侧栏**（`App.tsx::Inspector`）——只放任务级信息：整体状态、运行时长、
-     协作链路（`frontend/src/workspace/CollaborationGraph.tsx`）与用量统计
-     （`frontend/src/workspace/TaskUsage.tsx`）。协作链路按**波次**表达：波内并行、波间串行；
+     三张 Agent 卡片。卡片点击打开**单个 Agent 的执行轨迹弹窗**
+     （`frontend/src/workspace/AgentStageModal.tsx`，数据走 §5.17），不改变右侧侧栏内容——
+     侧栏是任务级视图，不跟随单卡点击而变。
+     弹窗回答的是「它收到了什么、调了什么、产出了什么」：分配到的任务（上游正文）、按序的工具
+     调用（含失败原因与截断标记）、阶段产出。**不放模型与参数**——角色绑定与调参属于
+     「Agent 团队」页；`AgentTraceView` 是其中的纯视图部分，按显式 props 驱动以便离屏冒烟挂载。
+     模型内部的隐藏推理没有落盘，弹窗如实说明这一点，不伪造「思维链」。
+  3. **任务协作侧栏**（`App.tsx::Inspector`）——只放任务级信息：整体状态、运行时长、
+     协作画布（`frontend/src/workspace/CollaborationGraph.tsx` → `GraphCanvas.tsx`）与用量统计
+     （`frontend/src/workspace/TaskUsage.tsx`）。协作画布按**波次**表达：波内并行、波间串行；
      当前后端是固定串行流水线，每波一个节点，编排层支持 fan-out 后只需把同波阶段放进
-     同一个数组。用量按采样原值展示、不累加，口径同 §5.5。
-  3. **任务记录页**——逐条工具调用与采样明细的唯一入口；侧栏与弹窗只给跳转入口。
+     同一个数组，同波多节点会自动圈进「并行协作区」框。用量按采样原值展示、不累加，口径同 §5.5。
+     **节点是圆形的 Agent 节点，回答的是「这个 Agent 是用什么跑的」**：圆面一个角色图标，
+     圆下方两行写名字与 `模型 · Token`（按角色归集），完整参数表在悬停面板里。节点**不是
+     执行轨迹的入口**——点了不跳 §5.17 的弹窗：执行台卡片已经承担那个入口，两块视图都能点进
+     同一份轨迹就又会混成一个。首尾另有 `任务` / `交付` 两个端子，说明任务从哪进来、结果从哪出去。
+     **连线记录上游这一步动过的工具**，画成连线上的一枚胶囊（`calculator ×1`），
+     把工具挂在边上而不是节点里，因为用户要看的是「这条数据是怎么被加工出来的」。
+     画法照 `Jasper-zh/Multi-Agent-Playground` 的 `GraphViewer.vue`：同一盒子里绝对定位的圆节点
+     加同尺寸 SVG 的三次贝塞尔边，**灰虚线 = 要走的边、蓝实线 = 已经走通的边**，进度靠颜色区分
+     而不是靠文字说明（ADR-028 决策 7）。节点与连线胶囊的悬停详情（参数全表、Token、分配到的
+     任务、阶段产出、工具入参出参）用 CSS `:hover` / `:focus-within` 驱动，不用 JS 状态：
+     DOM 常驻，键盘可达，离屏冒烟也能断言内容（ADR-028 决策 5）。
+     **这些浮层只在「全屏画布」里给**，侧栏紧凑档一个都不渲染：侧栏要回答的是「这个 Agent
+     用什么跑的」，圆下方那行 `模型 · Token` 就是答案，再挂一份带任务与产出的浮层等于把执行
+     轨迹搬回侧栏，与本条开头的四块视图分工（ADR-018 + ADR-031）冲突。
+     浮层贴节点**侧面**（面宽 380px、与圆留 14px），不挂正下方——挂下方会压住下一段链路，而
+     链路正是要给人看的东西；靠右（`x > 0.58w`）的节点自动翻到左侧，竖直方向按面高上限夹在
+     可见区内。内容按读图顺序排：**分配到的任务 → 阶段产出 → 本阶段工具调用 → 生效参数 →
+     Token 消耗**，参数与 Token 沉到最后（ADR-028 决策 8）。
+     **连线上的工具链胶囊（面宽 340px）同样贴侧面**，不挂胶囊正上/正下方：胶囊钉在画布中线上，
+     居中弹会正好盖住上游那一串节点（ADR-028 决策 9）。它的面高由两条约束取小——样式表里的
+     设计上限 `--cv-pop-max`，与内联算出的可容高度 `--cv-pop-fit`。
+     **节点不可拖**：位置本身在表达流程顺序，拖动既不写回数据也不改变后续行为（ADR-028 决策 8）。
+     侧栏给**「全屏画布」**入口（`frontend/src/workspace/CollabCanvas.tsx`，`position: fixed`
+     覆盖层，Esc 关闭）。画布顶部按 §5.18 列出该会话的每次对话（`对话 1 / 2 / 3`，编号 = 列表
+     下标 + 1），点一下切换；选中的不是当前对话时，轨迹与用量按那一份 Workflow 单独取
+     （§5.17 + §5.5），**不复用侧栏那一份**——复用会让「对话 1」显示成「对话 2」的数据。
+     §5.18 的列表只在画布打开时请求；拉不到就退化成「只有当前这一次对话」，不报错空白。
+     底部一行按「正在跑的 → 下一个还没跑的 → 全跑完了」依次退，报当前或下一步是谁。
+  4. **任务记录页**——逐条工具调用与采样明细的唯一入口；侧栏与弹窗只给跳转入口。
      原先工作台侧栏内嵌的 `WorkflowInspection`（调用链路 + 任务采样合体）已随 ADR-018 删除，
      记录页继续分别复用 `ToolCallRecords` / `RuntimeSampling`。
+- 时间戳统一走 `config/shared.tsx::formatStamp`：今天给「今天 HH:mm」、昨天给「昨天 HH:mm」、
+  更早补日期、跨年补年份。历史会话列表与消息气泡此前只显示 `HH:mm`，跨天后无法区分是哪一天；
+  各处**不得**再各写一份 `toLocaleTimeString`。
+- 弹窗与表单的确认行一律**右对齐**（`.cfg-modal-foot`、`.cfg-actions`）：主操作在右下角，
+  取消在左。新增按钮条时沿用这两个类，不要另起一个左对齐的容器。
 
 ## 8. 版本与变更规则
 

@@ -8,6 +8,7 @@
 | [requirements.txt](requirements.txt) | 依赖清单，供查看与了解 |
 | [architecture.md](architecture.md) | 系统架构与模块边界 |
 | [dapr-integration.md](dapr-integration.md) | Dapr × LangGraph 集成设计（开发基线，已落地） |
+| [orchestration.md](orchestration.md) | 编排模式：静态 / 动态两条链路的对照，以及档 3（自主协作）设计草案 |
 | [conventions.md](conventions.md) | 工程规范 |
 | [api.md](api.md) | REST API 契约（开发基线） |
 | [data-model.md](data-model.md) | 数据模型（开发基线） |

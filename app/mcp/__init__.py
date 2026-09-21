@@ -5,10 +5,12 @@ from app.mcp.config import McpSettings, get_mcp_settings
 from app.mcp.registry import (
     CompositeToolRegistry,
     InstrumentedToolRegistry,
+    SessionFileRegistry,
     build_tool_registry,
     reset_registered_servers_cache,
     reset_tool_registry_cache,
     tool_catalog,
+    with_session_files,
 )
 from app.mcp.server import build_mcp_server
 
@@ -17,10 +19,12 @@ __all__ = [
     "InstrumentedToolRegistry",
     "McpSettings",
     "McpToolRegistry",
+    "SessionFileRegistry",
     "build_mcp_server",
     "build_tool_registry",
     "get_mcp_settings",
     "reset_registered_servers_cache",
     "reset_tool_registry_cache",
     "tool_catalog",
+    "with_session_files",
 ]

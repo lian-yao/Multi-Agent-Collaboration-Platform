@@ -7,6 +7,36 @@
  * - `api_key` 只写不回读，所以响应里只有 `api_key_configured`。
  */
 
+export type AttachmentKind = "image" | "text" | "document" | "unsupported";
+
+/**
+ * 附件在「能不能被模型用上」这件事上的状态。
+ *
+ * `failed` 是**上传成功但正文没解析出来**（扫描版 PDF、CID 字体等）：
+ * 附件仍然在，但内容取不出来，界面必须显式标注，否则用户会以为它被用上了。
+ */
+export type AttachmentStatus = "ready" | "failed" | "unsupported";
+
+/** 已登记的附件（`doc/api.md` §5.16，ADR-021 / ADR-024）。 */
+export interface Attachment {
+  id: string;
+  session_id: string | null;
+  message_id: string | null;
+  name: string;
+  mime: string;
+  size_bytes: number;
+  kind: AttachmentKind;
+  status: AttachmentStatus;
+  error: string | null;
+  /** 原件字节是否还在库里（ADR-024）。`false` 只出现在该策略之前落库的附件上，
+   *  此时不给「打开原件」入口——界面上不该出现必然 404 的链接。 */
+  has_original: boolean;
+  created_at: string;
+}
+
+/** 编排模式（ADR-019）：`static` 固定三步链路，`dynamic` 由规划节点按任务分配角色。 */
+export type OrchestrationMode = "static" | "dynamic";
+
 export interface Message {
   id: string;
   session_id: string;
@@ -15,6 +45,7 @@ export interface Message {
   agent_run_id: string | null;
   status: string;
   created_at: string;
+  attachments: Attachment[];
 }
 
 export interface Session {
@@ -40,6 +71,15 @@ export type WorkflowStatus =
   | "failed"
   | "cancelled";
 
+/** 动态编排的计划步骤摘要（`app/orchestration/dynamic_graph.py::dynamic_checkpoint_summary`）。 */
+export interface PlanStepSummary {
+  id: string;
+  /** 角色 id（collector / analyst / reporter），不是阶段名。 */
+  role: string;
+  depends_on: string[];
+  status: "pending" | "completed" | "failed" | "skipped";
+}
+
 export interface Workflow {
   id: string;
   session_id: string | null;
@@ -51,6 +91,12 @@ export interface Workflow {
     current_step?: string | null;
     completed_steps?: string[];
     updated_at?: string;
+    /** 编排模式（ADR-019）：静态链路不写这个字段，动态链路为 `"dynamic"`。 */
+    mode?: string;
+    /** `llm` 表示规划节点真的产出了计划，`fallback` 表示降级到固定三步。 */
+    plan_source?: string;
+    /** 动态链路才有的协作计划；静态链路下为 undefined。 */
+    plan?: PlanStepSummary[];
   } | null;
   created_at: string;
   updated_at: string;
@@ -155,6 +201,14 @@ export interface MessageAccepted {
   agent_run_id: string;
   workflow_id: string;
   status: string;
+  attachments: Attachment[];
+  /**
+   * 请求里带了、但没能挂上这条消息的附件 id（不存在 / 已被别的消息挂走）。
+   *
+   * 单独一个字段而不是并进错误码：消息本身是发成功的，附件缺一个是**部分失败**，
+   * 报成 4xx 会让前端把已经发出去的消息当成没发出去。
+   */
+  unattached_attachment_ids: string[];
 }
 
 /** 三个只读列表接口（工具 / 指标 / 调用）共用的分页外壳。 */
@@ -165,6 +219,55 @@ export interface DataPage<T> {
   total: number;
   availability: "available" | "not_integrated";
 }
+
+/* -------------------------------------------------------------------------- */
+/* §5.17 阶段执行轨迹（执行台卡片弹窗的数据源）                                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 阶段轨迹里的一次工具调用。
+ *
+ * `input` / `output` 超长时服务端换成 `{truncated: true, bytes, preview}`——
+ * 界面据此显示「已截断」，而不是把一段被剪掉的内容当成全部。
+ */
+export interface StageToolCall {
+  call_id: string;
+  tool_name: string;
+  status: "running" | "succeeded" | "failed";
+  input: unknown;
+  output: unknown;
+  error: string | null;
+}
+
+/** 单个 Agent 阶段的执行轨迹；`reason` 与「有轨迹」互斥。 */
+export interface StageTraceItem {
+  stage: string;
+  role: string;
+  /** 本阶段收到的上游正文；根阶段为 `null`（它收到的就是原始任务）。 */
+  input: string | null;
+  /** 上游阶段 id，用于说明「输入来自哪一步」。 */
+  input_from: string | null;
+  /** 本阶段产出正文。 */
+  output: string | null;
+  tool_calls: StageToolCall[];
+  truncated: boolean;
+  /**
+   * 没有轨迹时的**具体**原因（还没轮到 / 正在跑 / 状态已被清理 / 载荷损坏）。
+   * 四种原因指向四种不同的下一步动作，界面必须原样显示，不要换成一句「暂无数据」。
+   */
+  reason: string | null;
+}
+
+export interface WorkflowStageTrace {
+  workflow_id: string;
+  mode: "static" | "dynamic";
+  task: string | null;
+  availability: "available" | "not_integrated";
+  /** 整条链路都没有轨迹时的原因（目前只有动态编排会走到这里）。 */
+  reason: string | null;
+  items: StageTraceItem[];
+}
+
 
 /* -------------------------------------------------------------------------- */
 /* §5.7 Agent 角色绑定与调参                                                    */
@@ -514,4 +617,31 @@ export interface ProviderPresetCategory {
 export interface ProviderPresetCatalog {
   items: ProviderPreset[];
   categories: ProviderPresetCategory[];
+}
+
+/* -------------------------------------------------------------------------- */
+/* §5.15 执行边界（沙箱状态，只读）                                            */
+/* -------------------------------------------------------------------------- */
+
+export interface SandboxLimits {
+  timeout_seconds: number;
+  memory_limit: string;
+  cpu_limit: number;
+  pids_limit: number;
+  network_enabled: boolean;
+  output_limit_chars: number;
+  max_code_chars: number;
+}
+
+/**
+ * 敏感工具执行边界。**只读**：限额属部署期安全边界，后端没有写接口，
+ * 前端也不提供编辑入口。
+ */
+export interface SandboxStatus {
+  backend: string;
+  image: string;
+  available: boolean;
+  /** 不可用时的可读原因；可用时为 `null`。 */
+  reason: string | null;
+  limits: SandboxLimits;
 }

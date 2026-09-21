@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from "react";
 import { api, ApiError } from "../api/client";
 import { PageTabs } from "../components/PageTabs";
+import { InlineConfirm, InlineConfirmBar } from "../components/InlineConfirm";
 import type {
   ProviderPreset,
   ProviderPresetCatalog,
@@ -109,7 +110,8 @@ function PresetPicker({
 const FALLBACK_PRESET: ProviderPreset = {
   preset_type: "openai-compatible",
   label: "OpenAI 兼容（自定义）",
-  monogram: "自定义",
+  // 图标位由 `ProviderMark` 按 preset_type 画加号，这个 monogram 只是接口字段的非空兜底。
+  monogram: "+",
   tint: "slate",
   category: "gateway",
   default_api_type: "openai-compatible",
@@ -429,6 +431,8 @@ export function ProviderPanel({ catalog }: { catalog: ProviderPresetCatalog | nu
   const [createOpen, setCreateOpen] = useState(false);
   const [notice, setNotice] = useState<NoticeState>(null);
   const [busy, setBusy] = useState(false);
+  /** 后端 409 之后待用户显式确认「强制级联删除」的 Provider id（行内确认条，不用原生对话框）。 */
+  const [forceTarget, setForceTarget] = useState<string | null>(null);
 
   // 刷新时要在异步回调里读到「当前选中」，用 ref 避免把 selectedId 塞进依赖数组。
   const selectedRef = useRef<string | null>(null);
@@ -480,6 +484,7 @@ export function ProviderPanel({ catalog }: { catalog: ProviderPresetCatalog | nu
   const select = async (id: string) => {
     setSelectedId(id);
     setNotice(null);
+    setForceTarget(null);
     await loadDetail(id);
   };
 
@@ -495,14 +500,9 @@ export function ProviderPanel({ catalog }: { catalog: ProviderPresetCatalog | nu
     }
   };
 
-  /** 仍有启用模型时后端返回 409 PROVIDER_IN_USE，此时再问一次是否强制级联删除。 */
+  /** 删除：第一跳由行内二次确认给出；仍有启用模型时后端返回 409，改由 InlineConfirmBar 再确认一次。 */
   const remove = async (provider: ProviderRegistry) => {
-    if (
-      !window.confirm(
-        `删除 Provider「${provider.name}」？其下 ${provider.model_count} 条模型条目会一并删除。`,
-      )
-    )
-      return;
+    setForceTarget(null);
     setBusy(true);
     try {
       await api.deleteProviderRegistry(provider.id);
@@ -510,18 +510,26 @@ export function ProviderPanel({ catalog }: { catalog: ProviderPresetCatalog | nu
       setNotice({ tone: "ok", text: `已删除 Provider ${provider.id}。` });
     } catch (cause) {
       if (cause instanceof ApiError && cause.code === "PROVIDER_IN_USE") {
-        if (window.confirm(`${cause.message}\n\n仍要强制级联删除吗？`)) {
-          try {
-            await api.deleteProviderRegistry(provider.id, true);
-            await refresh(null);
-            setNotice({ tone: "ok", text: `已强制删除 Provider ${provider.id}。` });
-          } catch (inner) {
-            setNotice({ tone: "bad", text: describeError(inner, "强制删除失败。") });
-          }
-        }
+        setNotice({ tone: "bad", text: cause.message });
+        setForceTarget(provider.id);
       } else {
         setNotice({ tone: "bad", text: describeError(cause, "删除失败。") });
       }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /** 409 之后用户显式升级为强制级联删除。 */
+  const forceRemove = async (provider: ProviderRegistry) => {
+    setForceTarget(null);
+    setBusy(true);
+    try {
+      await api.deleteProviderRegistry(provider.id, true);
+      await refresh(null);
+      setNotice({ tone: "ok", text: `已强制删除 Provider ${provider.id}。` });
+    } catch (cause) {
+      setNotice({ tone: "bad", text: describeError(cause, "强制删除失败。") });
     } finally {
       setBusy(false);
     }
@@ -639,14 +647,27 @@ export function ProviderPanel({ catalog }: { catalog: ProviderPresetCatalog | nu
                   >
                     编辑
                   </button>
-                  <button
-                    type="button"
-                    className="cfg-quiet danger"
-                    onClick={() => void remove(detail)}
+                  <InlineConfirm
+                    label={`删除 Provider「${detail.name}」`}
+                    confirmLabel="确认删除"
+                    question={`连带 ${detail.models.length} 条模型条目`}
+                    triggerClassName="cfg-quiet danger"
+                    triggerLabel={`删除 Provider：${detail.name}`}
+                    triggerTitle={`删除该 Provider，其下 ${detail.models.length} 条模型条目会一并删除`}
                     disabled={busy}
+                    onConfirm={() => void remove(detail)}
                   >
                     删除
-                  </button>
+                  </InlineConfirm>
+                  {forceTarget === detail.id && (
+                    <InlineConfirmBar
+                      question="仍有启用中的模型，仍要强制级联删除？"
+                      confirmLabel="强制删除"
+                      disabled={busy}
+                      onConfirm={() => void forceRemove(detail)}
+                      onCancel={() => setForceTarget(null)}
+                    />
+                  )}
                 </div>
               </div>
 

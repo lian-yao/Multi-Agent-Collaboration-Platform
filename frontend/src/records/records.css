@@ -181,10 +181,18 @@
   cursor: pointer;
 }
 
-.record-run-delete {
+/* 删除入口的宿主 slot：定位与显隐都挂在 slot 上，armed 后确认条原地替换按钮不会位移。
+   复合选择器是必要的——`.ui-confirm-slot` 的基础样式在 inline-confirm.css 里，
+   单类选择器的胜负取决于打包顺序，这里显式提高特异性。 */
+.ui-confirm-slot.record-run-delete-slot {
   position: absolute;
   top: 10px;
   right: 10px;
+  opacity: 0;
+  transition: opacity var(--cfg-ease, .16s cubic-bezier(.4, 0, .2, 1));
+}
+
+.record-run-delete {
   display: grid;
   place-items: center;
   width: 28px;
@@ -194,13 +202,12 @@
   background: transparent;
   color: var(--cfg-ink-3, #8499a2);
   cursor: pointer;
-  opacity: 0;
-  transition: opacity var(--cfg-ease, .16s cubic-bezier(.4, 0, .2, 1)),
-    background var(--cfg-ease, .16s cubic-bezier(.4, 0, .2, 1));
+  transition: background var(--cfg-ease, .16s cubic-bezier(.4, 0, .2, 1));
 }
 
-.record-run-session:hover .record-run-delete,
-.record-run-delete:focus-visible {
+/* 悬停、键盘聚焦、armed 后确认条持焦点：三种情况都要保持可见 */
+.record-run-session:hover .record-run-delete-slot,
+.ui-confirm-slot.record-run-delete-slot:focus-within {
   opacity: 1;
 }
 

@@ -38,15 +38,25 @@ const format = (metricName: string, value: number) =>
     ? `${(value / 1000).toFixed(1)}s`
     : value.toLocaleString("zh-CN");
 
-function scopeOf(metric: Metric): string {
-  const { agent_id: agentId, model } = metric.labels ?? {};
+/**
+ * 采样归到哪个作用域。
+ *
+ * `agent_id` 优先，但**后端目前打的是 `role`**（`app/observability/metrics.py` 的
+ * `_labels` 走上下文，标签集是 `role` / `stage` / `model`）。只认 `agent_id` 的后果是
+ * 三个 Agent 的 Token 全都退到 `model` 这一层、被合并成一个「gpt-5.5」分组——
+ * 侧栏看起来就是「没有按 Agent 记 Token」。`role` 与 Agent 目录的 `id` 同值
+ * （collector / analyst / reporter），所以它是可靠的中文别名。
+ */
+export function scopeOf(metric: Metric): string {
+  const { agent_id: agentId, role, model } = metric.labels ?? {};
   if (typeof agentId === "string" && agentId) return agentId;
+  if (typeof role === "string" && role) return role;
   if (typeof model === "string" && model) return model;
   return "任务级";
 }
 
-/** 纯函数：把采样聚成「作用域 → 指标 → 原值列表」，不做任何求和。 */
-export function groupUsage(metrics: Metric[]): UsageGroup[] {
+/** 作用域 → 指标名 → 采样原值列表。**只收集不求和**，求和会把重复采样算成虚高。 */
+function collectUsage(metrics: Metric[]): Map<string, Map<string, string[]>> {
   const grouped = new Map<string, Map<string, string[]>>();
   for (const metric of metrics) {
     const label = METRIC_LABEL[metric.metric_name];
@@ -57,10 +67,26 @@ export function groupUsage(metrics: Metric[]): UsageGroup[] {
     const rows = grouped.get(scope)!;
     rows.set(label, [...(rows.get(label) ?? []), format(metric.metric_name, metric.value)]);
   }
-  return [...grouped].map(([scope, rows]) => ({
+  return grouped;
+}
+
+/** 纯函数：把采样聚成「作用域 → 指标 → 原值列表」，不做任何求和。 */
+export function groupUsage(metrics: Metric[]): UsageGroup[] {
+  return [...collectUsage(metrics)].map(([scope, rows]) => ({
     scope,
     rows: [...rows].map(([label, values]) => ({ label, values })),
   }));
+}
+
+/**
+ * 单个 Agent 的用量行。协作画布的 Agent 卡片按角色 id 取自己那一份。
+ *
+ * 取不到就回空数组——**不是 0**：没有采样和用量为零是两件事，前者说明这一步
+ * 还没跑到或没开采样，后者才是真的没消耗。卡片据此显示「暂无采样」。
+ */
+export function usageFor(metrics: Metric[], agentId: string): UsageRow[] {
+  const rows = collectUsage(metrics).get(agentId);
+  return rows ? [...rows].map(([label, values]) => ({ label, values })) : [];
 }
 
 /** 纯展示层：按显式 props 驱动，可被离屏冒烟直接挂载。 */
@@ -110,22 +136,30 @@ export function TaskUsagePanel({
   );
 }
 
-/** 容器层：拉取本次 Workflow 的采样，未到终态时轮询。 */
-export function TaskUsage({
-  workflow,
-  onOpenRecords,
-}: {
-  workflow: Workflow;
-  onOpenRecords?: () => void;
-}) {
+/**
+ * 拉取某个 Workflow 的采样，未到终态时轮询。
+ *
+ * 做成 hook 而不是一个自带容器的组件：侧栏现在有两处要吃这份数据——用量面板与
+ * 协作画布的 Agent 卡片。各自拉一次会变成同一个接口两倍请求，而且两处可能落在
+ * 不同的采样批次上，卡片和面板显示的 Token 就对不上了。
+ */
+export function useWorkflowMetrics(workflow: Workflow | null): {
+  metrics: Metric[];
+  loading: boolean;
+  error: string;
+} {
   const [metrics, setMetrics] = useState<Metric[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(Boolean(workflow));
   const [error, setError] = useState("");
-  const terminal = ["completed", "failed", "cancelled"].includes(workflow.status);
+  const workflowId = workflow?.id ?? null;
+  const status = workflow?.status ?? "";
+  const updatedAt = workflow?.updated_at ?? "";
+  const terminal = ["completed", "failed", "cancelled"].includes(status);
 
   const read = useCallback(async () => {
+    if (!workflowId) return;
     try {
-      const page = await api.getMetrics(1, workflow.id);
+      const page = await api.getMetrics(1, workflowId);
       setMetrics(page.items);
       setError("");
     } catch (cause) {
@@ -133,11 +167,17 @@ export function TaskUsage({
     } finally {
       setLoading(false);
     }
-  }, [workflow.id]);
+  }, [workflowId]);
 
   useEffect(() => {
     let live = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    if (!workflowId) {
+      setMetrics([]);
+      setLoading(false);
+      setError("");
+      return;
+    }
     setLoading(true);
     setMetrics([]);
     async function tick() {
@@ -150,14 +190,7 @@ export function TaskUsage({
       live = false;
       if (timer) clearTimeout(timer);
     };
-  }, [read, terminal, workflow.updated_at]);
+  }, [read, terminal, updatedAt, workflowId]);
 
-  return (
-    <TaskUsagePanel
-      groups={groupUsage(metrics)}
-      loading={loading}
-      error={error}
-      onOpenRecords={onOpenRecords}
-    />
-  );
+  return { metrics, loading, error };
 }
