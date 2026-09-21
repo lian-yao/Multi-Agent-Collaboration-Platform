@@ -1144,6 +1144,67 @@ latin-1 编码报错）。
 前端在「移除 chip」与「换任务」时调用它清理未发出的附件，失败不阻断界面
 （最坏情况只留一条未归属的附件行）。
 
+### 5.17 查询阶段执行轨迹（只读）
+
+`GET /api/v1/workflows/{workflow_id}/stages`
+
+执行台卡片弹窗（`frontend/src/workspace/AgentStageModal.tsx`）的数据源。与 §5.4 的分工是：
+**§5.4 回答「这次任务调了哪些工具」，§5.17 回答「哪个 Agent 收到什么、调了什么、产出了什么」**，
+两者不互相替代。
+
+响应 `200`：
+
+```json
+{
+  "workflow_id": "…",
+  "mode": "static",
+  "task": "统计上季度华东区的退货率",
+  "availability": "available",
+  "reason": null,
+  "items": [
+    {
+      "stage": "analyze",
+      "role": "analyst",
+      "input": "已收齐三类原始数据……",
+      "input_from": "collect",
+      "output": "整体退货率 4.8%……",
+      "tool_calls": [
+        {
+          "call_id": "…", "tool_name": "calculator", "status": "succeeded",
+          "input": {"expression": "128/2680"}, "output": {"result": 0.0478}, "error": null
+        }
+      ],
+      "truncated": false,
+      "reason": null
+    }
+  ]
+}
+```
+
+- `items` 按阶段固定顺序返回 `collect` / `analyze` / `report`（当前静态链路的三个阶段）。
+- `input` 是本阶段**实际读到的上游正文**，`input_from` 标明它来自哪一步；根阶段两者都是 `null`
+  （它收到的就是原始任务 `task`，不重复回传一份）。
+- `tool_calls` 的元素结构与 §5.4 的 `tool_calls` 表同形。上限定为**单段正文 8000 字符、
+  单次工具入参/出参 4000 字符**，超限不只是截断：正文被截断时 `truncated=true`，工具载荷则换成
+  `{"truncated": true, "bytes": n, "preview": "…"}`。界面据此显示「已截断」——
+  静默剪掉一段内容再当作全部展示，比不显示更糟。
+- `reason` 与「有轨迹」互斥，写的是**为什么没有**：还没轮到 / 正在执行（轨迹在阶段完成后才落盘）/
+  阶段已完成但状态已被清理 / 载荷无法解析。四种原因指向四种不同的下一步动作，前端必须原样显示，
+  不得改写为「暂无数据」。
+- `mode` 为 `dynamic` 时 `availability=not_integrated`、`items=[]`、`reason` 说明动态链路当前
+  不落盘逐步骤轨迹（ADR-019）；界面同样原样显示这句原因。
+
+| 状态 | 码 | 情况 |
+| --- | --- | --- |
+| 200 | — | 读到轨迹，或该阶段确实还没有轨迹（看 `reason`） |
+| 404 | `WORKFLOW_NOT_FOUND` | Workflow 不存在 |
+| 503 | `DATA_SOURCE_UNAVAILABLE` | 状态存储（Dapr sidecar）读不到 |
+
+**数据来源与边界**：轨迹取自 Dapr State Store 里 `_record_checkpoint` 写入的阶段状态
+（`app/api/stage_trace.py`）。因此 503 与 200+`reason` 必须分开——前者是环境没起来，后者是任务
+还没跑到。模型内部的隐藏推理（reasoning / thinking 块）**不在本接口范围内**：编排层只落盘行动与
+结论，接口不伪造中间过程。该接口**只读**：不写状态存储、不建表，也不触发任何阶段重跑。
+
 ## 6. 规划接口（当前未实现）
 
 下列接口已列入设计方向，但当前 FastAPI 不提供路由，前端不得直接调用：
@@ -1226,9 +1287,13 @@ POST /api/v1/agents/{agent_id}/run
 - 工作台内的三块视图职责互斥，不重复渲染同一份数据（ADR-018）：
   1. **Agent 执行台**（`App.tsx` 内联，卡片类名 `dock-node cli-node`）——按 Workflow 的
      `checkpoint.completed_steps` 与 `current_step` 展示阶段状态；不得在无 Workflow 时预填
-     三张 Agent 卡片。卡片点击打开**单个 Agent 的阶段详情弹窗**
-     （`frontend/src/workspace/AgentStageModal.tsx`），不改变右侧侧栏内容——侧栏是任务级
-     视图，不跟随单卡点击而变。
+     三张 Agent 卡片。卡片点击打开**单个 Agent 的执行轨迹弹窗**
+     （`frontend/src/workspace/AgentStageModal.tsx`，数据走 §5.17），不改变右侧侧栏内容——
+     侧栏是任务级视图，不跟随单卡点击而变。
+     弹窗回答的是「它收到了什么、调了什么、产出了什么」：分配到的任务（上游正文）、按序的工具
+     调用（含失败原因与截断标记）、阶段产出。**不放模型与参数**——角色绑定与调参属于
+     「Agent 团队」页；`AgentTraceView` 是其中的纯视图部分，按显式 props 驱动以便离屏冒烟挂载。
+     模型内部的隐藏推理没有落盘，弹窗如实说明这一点，不伪造「思维链」。
   2. **任务协作侧栏**（`App.tsx::Inspector`）——只放任务级信息：整体状态、运行时长、
      协作链路（`frontend/src/workspace/CollaborationGraph.tsx`）与用量统计
      （`frontend/src/workspace/TaskUsage.tsx`）。协作链路按**波次**表达：波内并行、波间串行；
@@ -1237,6 +1302,11 @@ POST /api/v1/agents/{agent_id}/run
   3. **任务记录页**——逐条工具调用与采样明细的唯一入口；侧栏与弹窗只给跳转入口。
      原先工作台侧栏内嵌的 `WorkflowInspection`（调用链路 + 任务采样合体）已随 ADR-018 删除，
      记录页继续分别复用 `ToolCallRecords` / `RuntimeSampling`。
+- 时间戳统一走 `config/shared.tsx::formatStamp`：今天给「今天 HH:mm」、昨天给「昨天 HH:mm」、
+  更早补日期、跨年补年份。历史会话列表与消息气泡此前只显示 `HH:mm`，跨天后无法区分是哪一天；
+  各处**不得**再各写一份 `toLocaleTimeString`。
+- 弹窗与表单的确认行一律**右对齐**（`.cfg-modal-foot`、`.cfg-actions`）：主操作在右下角，
+  取消在左。新增按钮条时沿用这两个类，不要另起一个左对齐的容器。
 
 ## 8. 版本与变更规则
 

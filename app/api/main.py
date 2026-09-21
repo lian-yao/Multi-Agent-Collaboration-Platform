@@ -8,12 +8,14 @@ from datetime import datetime
 from typing import Any, Callable, Literal
 from urllib.parse import quote
 
+from dapr.clients.exceptions import DaprGrpcError
 from fastapi import FastAPI, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, FiniteFloat, field_validator, model_validator
 from prometheus_client import CONTENT_TYPE_LATEST
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
+from app.api.stage_trace import read_stage_traces
 from app.api.store import SqlApiStore
 from app.api.inspection import InspectionStore
 from app.attachments import (
@@ -766,12 +768,54 @@ class ToolCallListResponse(BaseModel):
     availability: str = "not_integrated"
 
 
+class StageToolCallResponse(BaseModel):
+    """阶段轨迹里的单次工具调用（`doc/api.md` §5.17）。
+
+    `input` / `output` 与 §5.4 的 `tool_calls` 表同形；超长时换成
+    `{"truncated": true, "bytes": n, "preview": "…"}`——调用方据此显示「已截断」，
+    而不是拿到一段被静默剪掉的内容还以为看到了全部。
+    """
+
+    call_id: str
+    tool_name: str
+    status: str
+    input: Any = None
+    output: Any = None
+    error: str | None = None
+
+
+class StageTraceItemResponse(BaseModel):
+    """单个 Agent 阶段的执行轨迹。
+
+    `reason` 与「有轨迹」互斥：没有轨迹时它说明**为什么没有**（还没轮到 / 正在跑 /
+    状态已被清理 / 载荷损坏）。四种原因给的是四种不同的下一步动作，不能合并成一句
+    「暂无数据」。
+    """
+
+    stage: str
+    role: str
+    input: str | None = None
+    input_from: str | None = None
+    output: str | None = None
+    tool_calls: list[StageToolCallResponse] = Field(default_factory=list)
+    truncated: bool = False
+    reason: str | None = None
+
+
+class WorkflowStageTraceResponse(BaseModel):
+    workflow_id: str
+    mode: str
+    task: str | None = None
+    availability: str = "not_integrated"
+    reason: str | None = None
+    items: list[StageTraceItemResponse] = Field(default_factory=list)
+
+
 class MetricResponse(BaseModel):
     metric_name: str
     value: FiniteFloat
     labels: dict[str, Any]
     recorded_at: datetime
-
 
 class MetricListResponse(BaseModel):
     items: list[MetricResponse]
@@ -1561,6 +1605,56 @@ def list_workflow_tool_calls(
     return ToolCallListResponse.model_validate(
         _inspection_read(inspection_store.tool_calls, workflow=workflow, page=page, page_size=page_size)
     )
+
+
+STATE_STORE_ERRORS: tuple[type[BaseException], ...] = (
+    DaprGrpcError,
+    OSError,
+    ConnectionError,
+    TimeoutError,
+    ValueError,
+    KeyError,
+)
+"""读状态存储会遇到的失败类型（`doc/api.md` §5.17）。
+
+`DaprGrpcError` 单独列出来是因为它**不在** `OSError` 家族里（它继承 `grpc.RpcError`）：
+漏掉它，「sidecar 没起来」就会表现成 500 而不是 `DATA_SOURCE_UNAVAILABLE` 503。
+"""
+
+
+@app.get(
+    "/api/v1/workflows/{workflow_id}/stages",
+    response_model=WorkflowStageTraceResponse,
+)
+def list_workflow_stage_traces(workflow_id: str) -> WorkflowStageTraceResponse:
+    """只读：本次执行里各个 Agent 实际做了什么（`doc/api.md` §5.17）。
+
+    这是执行台卡片弹窗的数据源。三个语义要分清：
+
+    - **404**：Workflow 不存在；
+    - **200 + `reason`**：这个阶段确实没有轨迹（还没轮到 / 正在跑 / 状态已被清理），
+      原因逐条写明，前端直接照着显示；
+    - **503**：状态存储（Dapr sidecar）读不到。**不**把它伪装成「这个阶段没有轨迹」——
+      前者是环境没起来，后者是任务还没跑到，两者的下一步动作完全不同。
+    """
+
+    workflow = get_workflow(workflow_id)
+    try:
+        data = read_stage_traces(workflow_id, checkpoint=workflow.checkpoint)
+    except STATE_STORE_ERRORS as exc:
+        log_event(
+            logger,
+            "workflow.stage_trace_unavailable",
+            level=logging.WARNING,
+            workflow_id=workflow_id,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        raise ApiError(
+            "DATA_SOURCE_UNAVAILABLE",
+            "阶段执行轨迹来自 Dapr 状态存储，当前读不到（请确认后端与 dapr-sidecar 都在运行）",
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+        ) from exc
+    return WorkflowStageTraceResponse.model_validate(data)
 
 
 @app.get("/api/v1/metrics", response_model=MetricListResponse)
