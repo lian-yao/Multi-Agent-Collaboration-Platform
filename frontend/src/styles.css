@@ -5241,14 +5241,6 @@ body {
 
 
 
-.run-task {
-  overflow:hidden;
-  text-overflow:ellipsis;
-  white-space:nowrap
-}
-
-
-
 /* 对话列比弹窗宽，共用的轨迹块在这里抬一档字号与行高；
  * 只调字号与留白，结构与配色仍与弹窗共用。 */
 .run-activity .ws-detail-section h4 {
