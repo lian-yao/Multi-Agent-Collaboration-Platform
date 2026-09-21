@@ -356,7 +356,17 @@ item 字段为 metric_name、value（有限数值）、labels（JSON 对象）�
 
 `metrics` 表由 `app/core/checkpoint.py::MetricRecord` 定义，随 `init_checkpoint_schema()` 在 backend 进程启动时创建（见 `doc/data-model.md` §3）；从未启动过后端的空库会返回 `not_integrated`，这表示没建表，不等于“没有采样”。
 
-指标展示保留原始 metric_name、labels、采样时间，不累加分页中可能重复的采样值。Token 名称交接约定为 input_tokens/output_tokens/total_tokens，数值 0 显示为 0，缺少采样显示“暂无采样”；比率和耗时由采集方定义后写入，前端不估算。C 负责采集、去重和 labels.workflow_id（可选 agent_id/model）关联，B 负责建表与审计写入，D 只负责读取和呈现；此约定需 A/B/C 联调验收。
+指标展示保留原始 metric_name、labels、采样时间，不累加分页中可能重复的采样值。Token 名称交接约定为 input_tokens/output_tokens/total_tokens，数值 0 显示为 0，缺少采样显示“暂无采样”；比率和耗时由采集方定义后写入，前端不估算。C 负责采集、去重和 labels.workflow_id 关联，B 负责建表与审计写入，D 只负责读取和呈现；此约定需 A/B/C 联调验收。
+
+**实际标签集**（`app/observability/context.py::ObservationContext`）：阶段级标签由编排层通过
+`observed_stage(...)` 写入，static 与 dynamic 两条链路**当前都只传 `role`、不传 `agent_id`**
+（`app/orchestration/pipeline_graph.py`、`dynamic_graph.py`），所以落地采样上的标签是
+`workflow_id` / `stage` / `role`（Token 采样另有 `model`，阶段采样另有 `status`）。
+`role` 与 §4.9 Agent 目录的 `id` 同值（collector / analyst / reporter），是当前**唯一**能把
+Token 归到具体 Agent 的标签；`agent_id` 在采样里目前不存在。因此前端的归集顺序固定为
+**`agent_id` → `role` → `model` → 任务级**：只认 `agent_id` 会让三个 Agent 的 Token 全部退到
+`model` 一层、被合并成一个分组，界面上看就是「Token 没有分到 Agent 头上」（2026-09-21 实测）。
+采样里出现 `role` 却不用它，比少一个字段更糟——数据在，是读法错了。
 
 前端入口：工作台「任务记录」页（`frontend/src/Inspection.tsx::RuntimeSampling`）。它是**观测**而不是配置，因此不放在「工具与配置」页。有 Workflow 时按 `workflow_id` 过滤并在未到终态时轮询，终态停止；没有 Workflow 时退回全局采样。`labels` 以一排 `键 = 值` 小标签渲染，不展开成 JSON 块。
 
@@ -1205,6 +1215,57 @@ latin-1 编码报错）。
 还没跑到。模型内部的隐藏推理（reasoning / thinking 块）**不在本接口范围内**：编排层只落盘行动与
 结论，接口不伪造中间过程。该接口**只读**：不写状态存储、不建表，也不触发任何阶段重跑。
 
+### 5.18 查询会话的历史工作流（只读）
+
+`GET /api/v1/sessions/{session_id}/workflows`
+
+全屏协作画布（`frontend/src/workspace/CollabCanvas.tsx`）的数据源之一。与 §5.13 的分工是：
+**§5.13 列的是「有哪些会话」，§5.18 列的是「这个会话里每一次对话各自跑出的协作工作流」**。
+一次提交（一次对话）对应一条 Workflow，编号就是返回列表的**下标 + 1**。
+
+响应 `200`：
+
+```json
+{
+  "items": [
+    {
+      "id": "wf-…", "session_id": "s-…", "agent_run_id": "run-…",
+      "status": "completed", "current_step": null,
+      "checkpoint": {"status": "completed", "current_step": null,
+                     "completed_steps": ["collect", "analyze", "report"],
+                     "updated_at": "…"},
+      "created_at": "…", "updated_at": "…", "completed_at": "…"
+    },
+    {
+      "id": "wf-…", "session_id": "s-…", "agent_run_id": "run-…",
+      "status": "running", "current_step": "report",
+      "checkpoint": {"status": "running", "current_step": "report",
+                     "completed_steps": ["collect", "analyze"],
+                     "updated_at": "…"},
+      "created_at": "…", "updated_at": "…", "completed_at": null
+    }
+  ],
+  "total": 2
+}
+```
+
+- **必须升序返回（按 `created_at`）**。编号由位置决定，倒序会让「对话 1」在新增一次对话后
+  变成原来的「对话 2」，用户回看时点按的对话会整体错位。存储层只提供升序读法
+  （`app/core/checkpoint.py::list_workflows_for_session`），接口不做二次排序。
+- 元素结构与 §4.8 的 Workflow 同形，字段含义一致。
+- `total` 是本次会话实际的工作流条数。**该列表不分页**：一个会话的工作流条数就是它的对话轮数，
+  量级天然很小；上限由存储层的 `limit`（默认 200）兜底。
+- 只读：不建会话、不建 Workflow。草稿态会话（还没有提交过消息）返回 `items: []`，
+  前端据此显示空画布而不是报错。
+- 前端不要用它替换「当前任务」下拉——那个下拉取的是 `latest_workflow_id`（§5.13），
+  本接口不承担「哪个是当前任务」的判定。
+
+| 状态 | 码 | 情况 |
+| --- | --- | --- |
+| 200 | — | 读到列表，可能为空 |
+| 404 | `SESSION_NOT_FOUND` | 会话不存在 |
+| 503 | `DATA_SOURCE_UNAVAILABLE` | 存储（PostgreSQL / Dapr）读不到 |
+
 ## 6. 规划接口（当前未实现）
 
 下列接口已列入设计方向，但当前 FastAPI 不提供路由，前端不得直接调用：
@@ -1295,10 +1356,23 @@ POST /api/v1/agents/{agent_id}/run
      「Agent 团队」页；`AgentTraceView` 是其中的纯视图部分，按显式 props 驱动以便离屏冒烟挂载。
      模型内部的隐藏推理没有落盘，弹窗如实说明这一点，不伪造「思维链」。
   2. **任务协作侧栏**（`App.tsx::Inspector`）——只放任务级信息：整体状态、运行时长、
-     协作链路（`frontend/src/workspace/CollaborationGraph.tsx`）与用量统计
-     （`frontend/src/workspace/TaskUsage.tsx`）。协作链路按**波次**表达：波内并行、波间串行；
+     协作画布（`frontend/src/workspace/CollaborationGraph.tsx`）与用量统计
+     （`frontend/src/workspace/TaskUsage.tsx`）。协作画布按**波次**表达：波内并行、波间串行；
      当前后端是固定串行流水线，每波一个节点，编排层支持 fan-out 后只需把同波阶段放进
      同一个数组。用量按采样原值展示、不累加，口径同 §5.5。
+     **节点是 Agent 卡片，回答的是「这个 Agent 是用什么跑的」**：生效模型与 Provider、参数
+     （卡片上只摊开 Temperature，其余参数仅在**被角色显式覆盖**时露出并带 `*` 标记）、
+     Token 消耗（按角色归集）、本阶段的工具调用次数。卡片**不是执行轨迹的入口**——点了不跳
+     §5.17 的弹窗：执行台卡片已经承担那个入口，两块视图都能点进同一份轨迹就又会混成一个。
+     **连线记录上游这一步动过的工具**（`工具链路：calculator ×1`），把工具挂在边上而不是节点里，
+     因为用户要看的是「这条数据是怎么被加工出来的」。
+     卡片与连线的悬停详情（参数全表、Token、分配到的任务、阶段产出、工具入参出参）用 CSS
+     `:hover` / `:focus-within` 驱动，不用 JS 状态：DOM 常驻，键盘可达，离屏冒烟也能断言内容。
+     侧栏给**「展开全屏画布」**入口（`frontend/src/workspace/CollabCanvas.tsx`，`position: fixed`
+     覆盖层，Esc 关闭）。画布顶部按 §5.18 列出该会话的每次对话（`对话 1 / 2 / 3`，编号 = 列表
+     下标 + 1），点一下切换；选中的不是当前对话时，轨迹与用量按那一份 Workflow 单独取
+     （§5.17 + §5.5），**不复用侧栏那一份**——复用会让「对话 1」显示成「对话 2」的数据。
+     §5.18 的列表只在画布打开时请求；拉不到就退化成「只有当前这一次对话」，不报错空白。
   3. **任务记录页**——逐条工具调用与采样明细的唯一入口；侧栏与弹窗只给跳转入口。
      原先工作台侧栏内嵌的 `WorkflowInspection`（调用链路 + 任务采样合体）已随 ADR-018 删除，
      记录页继续分别复用 `ToolCallRecords` / `RuntimeSampling`。

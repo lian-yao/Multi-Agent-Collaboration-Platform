@@ -121,6 +121,9 @@ class SqlApiStore:
     ) -> dict[str, Any] | None:
         return checkpoint.get_latest_workflow(session_id, statuses=statuses)
 
+    def list_workflows(self, session_id: str, *, limit: int = 200) -> list[dict[str, Any]]:
+        return checkpoint.list_workflows_for_session(session_id, limit=limit)
+
 
 class InMemoryApiStore:
     """Deterministic store for API tests and local contract checks."""
@@ -411,3 +414,11 @@ class InMemoryApiStore:
         if not rows:
             return None
         return max(rows, key=lambda row: row["created_at"]).copy()
+
+    def list_workflows(self, session_id: str, *, limit: int = 200) -> list[dict[str, Any]]:
+        # 与 SQL 实现同口径：按 `created_at` 升序（对话编号依赖这个顺序，见 §5.18）。
+        rows = sorted(
+            (row for row in self.workflows.values() if row["session_id"] == session_id),
+            key=lambda row: row["created_at"],
+        )
+        return [row.copy() for row in rows[:limit]]

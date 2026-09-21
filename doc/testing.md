@@ -94,6 +94,7 @@ cd deploy; .\start.ps1                     # 起完整环境
 | I-10 | Provider 配置读写 | `GET/PUT /api/v1/config/provider`：200 生效值与回退、422 校验、503 写失败、裸请求可写（不鉴权，ADR-015）；覆盖值落 `provider_configs` 并镜像 Redis，响应与日志不含密钥（ADR-014） | M4 |
 | I-11 | 多模态附件接口契约 | `POST /api/v1/attachments` 的 201、四类 400（非法 base64 / 空 / 超限 / 格式不支持）；发消息带上 `attachment_ids` 后附件归属回填且**只挂一次**（重复提交进 `unattached_attachment_ids`）；「只带图不带文字」可发送；`GET .../content` 对图片回 `inline`、对文本与文档（**含解析失败项**）回 `attachment` 原件、对无字节的旧行回 404；`DELETE` 未归属 204 / 已发出 409；删会话级联清附件（ADR-021 / ADR-024） | M5 |
 | I-12 | 执行边界诊断接口 | `GET /api/v1/config/sandbox`：200 时 `available` / `reason` 的语义；原因**原样透传**后端给出的文案（不再由接口层编兜底话术）；探测自身抛异常时仍回 200 + 原因；`PUT` / `POST` 一律 405（ADR-020 / ADR-023） | M5 |
+| I-13 | 会话的历史工作流列表（§5.18） | `GET /api/v1/sessions/{id}/workflows`：未知会话 404、草稿态会话回空列表（**不建会话**）、**乱序写入也必须按 `created_at` 升序返回**（对话编号由位置决定，倒序会让回看的编号整体错位）、只含本会话的工作流、运行中的那条要带出 `current_step` 与 `checkpoint` | M5（§4.9） |
 
 ### 2.3 端到端测试（E）
 
@@ -1013,6 +1014,128 @@ node_modules/.bin/esbuild rendercheck/workspace-smoke.tsx ... && node "$TEMP/wor
 但**核心不变量一条没松**：任何情况下都不许产出"像正文的垃圾"。
 `_assert_no_readable_text()` 把它固化成一个共用断言——`text` 必须是 `None` 或有真内容，
 且 `error` 必须交代清楚（能渲染就写"改走页面图像"，不能就报 `failed` + 原因）。
+
+### 4.8 执行台弹窗改为「执行轨迹」，时间补日期，确认行右对齐（2026-09-21，成员 D）
+
+§4.7 之后用户提的三处界面问题，一处是功能缺口、两处是版式：
+
+**1. 改动**
+
+| 文件 | 变化 |
+| --- | --- |
+| `app/api/stage_trace.py` | **新增**：只读读取 Dapr State Store 的阶段状态，还原 `content` / `previous` / `tool_calls` |
+| `app/api/main.py` | 新增 `GET /api/v1/workflows/{id}/stages`（§5.17）与三个响应模型 |
+| `frontend/src/workspace/AgentStageModal.tsx` | 重写为**执行轨迹**弹窗（`AgentTraceView` 纯视图）；删掉「角色与模型绑定」整块与随之为死的字段 / 导出 |
+| `frontend/src/config/shared.tsx` | 新增 `formatStamp(value, now = new Date())`：今天 / 昨天 / `M月D日 HH:mm` / 跨年补年份 |
+| `frontend/src/App.tsx` | 删掉只给 `HH:mm` 的本地时间实现，改走 `formatStamp` |
+| `frontend/src/workspace/workspace.css`、`config/config.css` | `.cfg-modal-foot` / `.cfg-actions` 加 `justify-content: flex-end` |
+
+弹窗回答的是「**它收到了什么、调了什么、产出了什么**」：分配到的任务（上游正文）、按序的工具调用
+（含失败原因与截断标记）、阶段产出。**不放模型与参数**——角色绑定与调参属于「Agent 团队」页。
+模型内部的隐藏推理没有落盘，弹窗如实说明，不伪造「思维链」。
+
+**2. 验证**
+
+```bash
+./.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider tests/unit/test_stage_trace.py \
+  tests/integration/test_stage_trace_api.py
+# 13 passed（9 + 4）
+
+./.venv/Scripts/python.exe -m pytest -q          # 全量（隔离存储 macp_test + redis/15）
+# 768 passed / 7 skipped in 14.41s
+
+cd frontend && npm run build                      # tsc --noEmit + vite build 通过（CSS 80.68 kB）
+node_modules/.bin/esbuild rendercheck/workspace-smoke.tsx ... && node "$TEMP/workspace-smoke.cjs"
+# 90/90 checks passed（+10）
+```
+
+**线上端到端**（`docker compose up -d --build backend frontend` 重建后，17m36s，两镜像 Built、
+容器 healthy）——要证的是 §5.17 在**真部署**（PostgreSQL + Dapr sidecar + 真实模型网关）上
+读得出轨迹，不是拿单测替身糊的：
+
+- 任务「用计算器算出 128/2680 的结果（保留四位小数）」→ workflow
+  `961af452-c680-49d9-8cf5-38c5d9fad431`，终态 `completed`，
+  `completed_steps=["collect","analyze","report"]`。
+- `GET /api/v1/workflows/{id}/stages` → `mode=static`、`availability=available`，三阶段齐全：
+  `collect` 是根阶段（`input=null`）且有 **1 次 `calculator` 调用**
+  （`{"expression":"128/2680"}` → `{"value":0.04776119402985075}`，`succeeded`）；
+  `analyze` 的 `input` 正是 `collect` 的产出切片（**上游接线生效**）；三者 `truncated: false`。
+- 镜像内产物核对：`dist/assets/*.css` 含 `ws-trace-` 与 5 处 `justify-content: flex-end`
+  ——新样式确实烤进了 nginx 镜像，不是只躺在宿主机源码里。
+
+**3. 边界（如实记录）**
+
+- **动态链路没有逐步骤轨迹**（ADR-019 不落盘）：接口回 `availability=not_integrated` + 原因，
+  界面原样显示这句，不改写成「暂无数据」。
+- **「没有轨迹」有四句不同的话**：尚未开始 / 正在执行（轨迹在阶段完成后才落盘）/ 已完成但状态
+  已被清理 / 载荷无法解析。混成一句会让用户去查错的地方。
+- 预览页路由表有**两处**（`rendercheck/preview_seed.py::ROUTES` 与 `build-preview.py`），
+  漏一处就提示「预览未收录」——本轮又踩了一次，已补。
+
+### 4.9 侧栏改为协作画布，会话工作流可编号回看（2026-09-21，成员 D）
+
+用户的反馈是「右侧栏的 Agent 卡片应该是记 Agent 的参数、Token 这些，和 Agent 执行台不一样」。
+根子上是**三块视图的分工没落到数据上**：侧栏此前展示的是执行进度，和执行台弹窗说的是同一件事。
+本轮把侧栏改成「这个 Agent 是用什么跑的」，并给它一个能回看历史对话的全屏画布。
+决策见 [ADR-028](decisions/028-sidebar-collaboration-canvas.md)。
+
+**1. 改动**
+
+| 文件 | 变化 |
+| --- | --- |
+| `app/core/checkpoint.py` | 新增 `list_workflows_for_session()`，**按 `created_at` 升序**返回（编号由位置决定，顺序是契约） |
+| `app/api/store.py` | `SqlApiStore` / `InMemoryApiStore` 实现 `list_workflows()`；内存实现同样排序 |
+| `app/api/main.py` | 新增 `GET /api/v1/sessions/{id}/workflows`（§5.18）与 `WorkflowListResponse` |
+| `frontend/src/workspace/collaboration.ts` | **新增**：纯模型（波次、参数、用量归集、工具链路、节点/连线/图），不依赖 React |
+| `frontend/src/workspace/CollaborationGraph.tsx` | 重写为 **Agent 卡片 + 连线**；移除「点击开弹窗」 |
+| `frontend/src/workspace/CollabCanvas.tsx` | **新增**：全屏画布，顶部 `对话 1 / 2 / 3` 编号切换，Esc 关闭 |
+| `frontend/src/workspace/TaskUsage.tsx` | 抽出 `useWorkflowMetrics()`（卡片与用量面板共用一次请求）与 `usageFor()`；新增 `scopeOf()` 的 `role` 兜底 |
+| `frontend/src/workspace/workspace.css` | `.collab-card*` / `.collab-hover`（CSS 驱动悬停）/ `.collab-overlay`（`fixed`，z-index 40） |
+| `frontend/src/api/client.ts`、`frontend/src/App.tsx` | 新接口封装；`Inspector` 接管画布状态与「别的对话单独取一份轨迹与用量」 |
+| `rendercheck/{preview_seed.py,build-preview.py,workspace-smoke.tsx}` | 两处路由登记；种子按**真实标签口径**（`role`/`stage`，无 `agent_id`）给；冒烟 +31 条 |
+
+**2. 修掉的真问题：Token 没有归到 Agent 头上**
+
+采样标签里**没有 `agent_id`**——编排层两条链路都只传 `role`
+（`app/orchestration/pipeline_graph.py`、`dynamic_graph.py` 调 `observed_stage(...)` 时只给 `role`），
+落地标签是 `workflow_id` / `stage` / `role`（Token 另有 `model`）。`scopeOf()` 原来只认 `agent_id`，
+于三个 Agent 的 Token 全部退到 `model` 一层、合并成一个 `gpt-5.5` 分组，界面上看就是
+「Token 没按 Agent 记」。归集顺序改为 `agent_id` → `role` → `model` → 任务级。
+`doc/api.md` §5.5 原文写的「可选 agent_id/model」也是**文档漂移**，已一并改正。
+
+**3. 验证**
+
+```bash
+./.venv/Scripts/python.exe -m pytest -q -p no:cacheprovider \
+  tests/integration/test_session_workflows_api.py tests/integration/test_stage_trace_api.py \
+  tests/unit/test_stage_trace.py
+# 18 passed（5 + 4 + 9）
+
+cd frontend && npm run build                      # tsc --noEmit + vite build 通过（CSS 86.76 kB / JS 417.37 kB）
+node_modules/.bin/esbuild rendercheck/workspace-smoke.tsx ... && node "$TEMP/workspace-smoke.cjs"
+# 121/121 checks passed（+31）
+node_modules/.bin/esbuild rendercheck/config-smoke.tsx ... && node "$TEMP/config-smoke.cjs"
+# 69/69 checks passed
+```
+
+`rendercheck/*.tsx` 单独过一遍 tsc：只剩既有的 `@types/node` 缺失噪音（`tsconfig.json` 的
+`include` 只有 `src`，覆盖不到本目录）。预览页重建：**42 条路由**，种子里能看到两个对话编号
+（`wf-preview-earlier` 是补出来的更早一次已完结对话），切到「对话 1」时它的
+`GET /workflows/{id}` / `/stages` / `/tool-calls` 三条也都有应答——不然预览里的历史对话会是空白。
+
+**4. 边界（如实记录）**
+
+- **卡片不再是执行轨迹的入口**：点了不跳 §5.17 弹窗。执行台卡片已经承担那个入口，两块视图都能
+  点进同一份轨迹就又会混成一个（ADR-018）。
+- **悬停详情用 CSS `:hover` / `:focus-within`，不用 JS 状态**：DOM 常驻 → 键盘可达，
+  离屏冒烟也能断言内容（JS 状态驱动的浮层在静态渲染里永远是空的）。
+- **工具链路的计数一律写出来，包括 `×1`**：只在多于一次时写计数会得到
+  `web_search ×3、sql_query` 这种半截话，读者无从判断后者调了几次。
+- **并行是「上游那一波」决定的**：连线 `kind` 看上游波次的节点数，不看两端是否同波——
+  依赖永远指向更低的波次，同波判断不可达。
+- **动态链路只有进度没有逐步骤轨迹**：画布能显示波次与状态，轨迹仍旧缺（见 §4.8 的边界）。
+- `app/core/checkpoint.py` 的 `list_workflows_for_session()` 属**只读新增**（B 的文件），
+  已登记 `分工.md` §4。
 
 ## 5. 失败处理约定
 - 任一用例失败：先复现，再定位，修复后将失败模式固化为新的测试或本文档约束；

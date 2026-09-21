@@ -286,6 +286,20 @@ Token 采样按阶段记录（total 1020 / 1344 / 3051）。踩坑与决策见�
   **本轮的验证边界**：依赖真实 PG 的 `tests/unit/test_mcp_registry.py`（Server CRUD）与
   全量基线（724 passed / 7 skipped）都要等 Docker 起来补跑；**backend 镜像未重建**，
   pypdfium2 只有在重建后才进容器。详见 `doc/testing.md` §4.6、§4.7。
+- 2026-09-21（阶段执行轨迹接口 §5.17 + 协作侧栏改为「配置与用量画布」ADR-028）：
+  Docker 起来后先补跑上一轮欠的全量回归 → **768 passed / 7 skipped / 0 failed in 14.41s**
+  （隔离存储 `macp_test` + `redis/15`；上一轮因 Docker 停摆而没跑的
+  `tests/unit/test_mcp_registry.py` 这次跑过，ADR-026 的回归缺口关闭）。
+  新增两个只读接口：`GET /workflows/{id}/stages`（§5.17，9 + 4 例）、
+  `GET /sessions/{id}/workflows`（§5.18，5 例）。前端 `npm run build` 通过
+  （CSS 86.76 kB / JS 417.37 kB）；`config-smoke` **69/69**、`workspace-smoke` **121/121**
+  （90 → 121）、预览页 **42 条路由**。**线上端到端跑过一遍**：`docker compose up -d --build
+  backend frontend` 重建后，任务「用计算器算出 128/2680…」→ workflow `961af452-…` 终态
+  `completed`，`GET /stages` 逐阶段读得出产出、上游接线与一次真实的 `calculator` 调用
+  （`128/2680 → 0.04776119402985075`），镜像里 `dist/assets/*.css` 也核到了新样式——
+  不是拿单测替身糊的。顺带修掉一处**文档漂移**：§5.5 原写采样标签含 `agent_id`，
+  实际编排层两条链路都只传 `role`，照原文实现的前端把三个 Agent 的 Token 合并成了一个
+  `model` 分组（看起来像"数据丢了"，其实是读法错了）。详见 `doc/testing.md` §4.8、§4.9。
 - 注意事项：数据库读取用例使用 SQLite 内存表与注入目录数据，MCP 用例走内存协议往返而非
   跨进程 stdio，因此不代表真实 PostgreSQL、真实 MCP Server 或浏览器端到端验收。
   E-04/E-05 的 Web 侧与部署脚本已在本轮补上实跑证据（见上两条），

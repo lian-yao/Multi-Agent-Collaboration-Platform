@@ -242,6 +242,18 @@ class SessionActionResponse(BaseModel):
     workflow: WorkflowResponse | None = None
 
 
+class WorkflowListResponse(BaseModel):
+    """会话的协作工作流列表（`doc/api.md` §5.18）。
+
+    **升序**返回，前端据此给每个对话编号（第 1 / 2 / 3 个对话）；`total` 是本次会话
+    实际的工作流条数，不是分页总数——这个列表不分页，一个会话的工作流条数就是它的
+    对话轮数，量级天然很小。
+    """
+
+    items: list[WorkflowResponse]
+    total: int
+
+
 class AgentResponse(BaseModel):
     """生效的 Agent 配置（`doc/api.md` §5.2、§5.7）。
 
@@ -1216,6 +1228,22 @@ def list_session_messages(
         page=page,
         page_size=page_size,
         total=total,
+    )
+
+
+@app.get("/api/v1/sessions/{session_id}/workflows", response_model=WorkflowListResponse)
+def list_session_workflows(session_id: str) -> WorkflowListResponse:
+    """只读：这个会话里每一次对话各自跑出的协作工作流（`doc/api.md` §5.18）。
+
+    全屏协作画布用它把「对话 1 / 2 / 3」列出来并支持回看：编号就是列表下标 + 1，
+    所以顺序必须是**创建时间升序**（由存储层保证，见 `list_workflows_for_session`）。
+    """
+
+    _session_or_404(session_id)
+    rows = api_store.list_workflows(session_id)
+    return WorkflowListResponse(
+        items=[_workflow_response(row) for row in rows],
+        total=len(rows),
     )
 
 

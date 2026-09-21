@@ -1773,6 +1773,30 @@ def get_workflow_run(workflow_id: str | uuid.UUID) -> dict[str, Any] | None:
         return _row_to_dict(row) if row else None
 
 
+def list_workflows_for_session(
+    session_id: str | uuid.UUID,
+    *,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    """按创建时间**升序**列出会话的全部 Workflow（`doc/api.md` §5.18）。
+
+    升序是语义要求而不是排序偏好：前端按顺序给每个对话编号（第 1 / 2 / 3 个对话）。
+    倒序会让既有对话的编号随着新对话一起跳动，用户就没法用「对话 3」指代那一次工作流了。
+    """
+
+    from sqlalchemy import select
+
+    statement = (
+        select(WorkflowRun)
+        .where(WorkflowRun.session_id == _as_uuid(session_id))
+        .order_by(WorkflowRun.created_at.asc())
+        .limit(limit)
+    )
+    with get_session_factory()() as session:
+        rows = session.scalars(statement).all()
+        return [_row_to_dict(row) for row in rows]
+
+
 _REGISTRY_COLUMN_MIGRATIONS: dict[str, tuple[tuple[str, str], ...]] = {
     # ADR-017 给两张既有表新增的列。`create_all` 只建缺失的**表**，不会给已存在的表补列，
     # 因此升级一个跑过旧版本的环境时必须显式补。
