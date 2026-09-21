@@ -404,6 +404,68 @@ check(
   JSON.stringify(parallelLayout.groups[0]),
 );
 
+/* 扇出 → 并行 → 汇聚：三波混合形状。
+   上面那条只覆盖「同波两根 + 一起汇入」，验不出「上游一个、下游摊开、后面再收回来」。
+   而动态链路真正要表达的正是后者：规划模型按任务把一步拆成两路并行、再合并收尾。
+   数据形状与后端 `dynamic_checkpoint_summary` 的输出逐字段一致
+   （id / role / depends_on / status），所以这条用例同时锁住前后端契约——
+   后端给得出这个形状，画布就必须画成「串行 → 并行 → 串行汇聚」。 */
+const fanOutGraph = buildCollaboration({
+  stages: collabStages,
+  agents: collabAgents,
+  workflow: {
+    ...collabWorkflow,
+    status: "running",
+    current_step: null,
+    checkpoint: {
+      mode: "dynamic",
+      status: "running",
+      current_step: null,
+      completed_steps: ["s1", "s2", "s3"],
+      plan: [
+        { id: "s1", role: "collector", depends_on: [], status: "completed" },
+        { id: "s2", role: "collector", depends_on: ["s1"], status: "completed" },
+        { id: "s3", role: "analyst", depends_on: ["s1"], status: "completed" },
+        { id: "s4", role: "reporter", depends_on: ["s2", "s3"], status: "pending" },
+      ],
+    },
+  },
+  completed: new Set(["s1", "s2", "s3"]),
+  traces: null,
+});
+
+check(
+  "模型：一个上游分叉出的两个下游落在同一波",
+  fanOutGraph.waves.map((wave) => wave.length).join(",") === "1,2,1",
+  `实际 ${fanOutGraph.waves.map((wave) => wave.length).join(",")}`,
+);
+check(
+  "模型：只有分叉那一波带并行标记",
+  !fanOutGraph.nodes[0].parallel &&
+    fanOutGraph.nodes[1].parallel &&
+    fanOutGraph.nodes[2].parallel &&
+    !fanOutGraph.nodes[3].parallel,
+);
+check(
+  "模型：单上游是串行边，多上游是并行汇入",
+  fanOutGraph.edges.map((edge) => edge.kind).join(",") === "serial,serial,parallel,parallel",
+  fanOutGraph.edges.map((edge) => `${edge.from}->${edge.to}:${edge.kind}`).join(" "),
+);
+
+const fanOutLayout = layoutCollaboration(fanOutGraph, 720);
+const fanOutAgents = fanOutLayout.nodes.filter((node) => node.kind === "agent");
+check(
+  "画布：三波各占一行，分叉那一行摊开两个",
+  new Set(fanOutAgents.map((node) => node.y)).size === 3 &&
+    fanOutAgents.filter((node) => node.y === fanOutAgents[1].y).length === 2,
+  JSON.stringify(fanOutAgents.map((node) => [node.x, node.y])),
+);
+check(
+  "画布：只有分叉那一波画并行协作区",
+  fanOutLayout.groups.length === 1,
+  `实际 ${fanOutLayout.groups.length}`,
+);
+
 // 等待态下底部那行得指「下一步是谁」，不能退回到最后一个跑完的（那正是最容易看错的时候）
 const partialCanvas = renderToStaticMarkup(
   <CollabCanvas open graph={parallelGraph} onClose={() => undefined} />,

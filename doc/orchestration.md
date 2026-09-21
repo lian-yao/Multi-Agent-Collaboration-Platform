@@ -137,6 +137,24 @@ curl -X POST .../sessions/{id}/messages \
 非法取值：请求体由 Pydantic `Literal` 拦成 `422`（**不静默退回 static**——「我选了动态」
 却悄悄变成固定流程，比直接报错更难查）；服务端配置读到非法值时退回 `static`。
 
+### 2.6 画布怎么消费计划
+
+前端协作画布（ADR-018 / ADR-028）不认「拓扑」，只认 `checkpoint.plan` 的字段。
+**并行与串行是算出来的，不是画死的**——这是「动态编排能被画出来」的全部依据：
+
+| 字段 | 消费处 | 结果 |
+| --- | --- | --- |
+| `plan[].depends_on` | `collaboration.ts::levelOf()` | 无依赖 = 第 0 波；其余 = 「所有依赖里最深波次 + 1」 |
+| 同波节点数 | `collaboration.ts::buildCollaboration()` | > 1 则该波标 `parallel`，画布横排并画「并行协作区」框 |
+| 边的两端波次 | 同上 | 上游单节点 = `serial` 边；上游多节点 = 并行汇入 |
+| `plan[].status` | `collaboration.ts::planStepStatus()` | `completed` / `running` / `pending` / `skipped`（**`skipped` 与 `pending` 语义相反**，不能合并） |
+
+静态链路的 `depends_on` 是一条链，算出来是三波各一个节点；动态计划扇出时，算出来就有并行波。
+**画布没有「串行节点」的专有分支**，静态链路只是它的一种输入（[ADR-030](decisions/030-multi-agent-topology-support.md)）。
+
+一条必须知道的口径：动态链路的 `/stages` 返回 `not_integrated`（`app/api/stage_trace.py`），
+所以动态画布**形状齐、详情空**——节点与并行关系来自 `plan`，每步的输入/产出/工具调用没有。
+
 ---
 
 ## 3. 档 3：真·多智能体自主协作（设计草案）

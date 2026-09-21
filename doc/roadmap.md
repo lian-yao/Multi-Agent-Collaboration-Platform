@@ -467,3 +467,37 @@ MCP Server 并点「发现」，`mcp_server_registry` 表与 §5.11 目录都齐
 `workspace-smoke` **80/80**。**backend 镜像未重建**，pypdfium2 要重建后才进容器。
 详情见 `doc/testing.md` §4.7。
 
+### 后续演进：多智能体拓扑支持面盘点，与画布并行能力的可验证化（2026-09-21，成员 D）
+
+评审时对着 LangGraph 官方那六种多智能体拓扑图问「能不能智能识别并编排各种架构」。
+本轮的答复是**把边界写清楚**（[ADR-030](decisions/030-multi-agent-topology-support.md)），
+并把画布的并行能力补成**可验证**的——这一点之前既没有测试守，预览页也看不到。
+
+| 六种拓扑 | 现状 | 说明 |
+| --- | --- | --- |
+| Single Agent | **已支持** | `app/orchestration/graph.py` |
+| Custom（DAG 子集） | **已支持** | planner 产出的依赖 DAG：同波并行、跨波串行 |
+| 静态三步流水线 | **已支持** | Custom 的退化情形（`pipeline.py`） |
+| Supervisor（监督者） | **半套** | 只有开头的「一次性规划」，没有 handoff 与二次决策 |
+| Hierarchical / Network / Agent as tools | **未实现** → 档 3 | 需要第二层 / 运行期改图 / Agent 互调 |
+| 反思回路 / HITL | **未实现** → 档 3 | 全仓 `reflect\|revision\|评审` 零命中；`pause` 是整实例暂停 |
+
+**本轮交付**：
+
+- `workspace-smoke` 新增「扇出 → 并行 → 汇聚」三波形状断言（154 → **159**）。画布**没有**
+  「串行节点」的专有分支这件事，从此由断言守着；数据形状与后端
+  `dynamic_checkpoint_summary` 逐字段对齐（`id` / `role` / `depends_on` / `status`）；
+- 预览页新增一条**动态编排对话**（`preview_seed.py` 的 `DYNAMIC_PLAN` +
+  `build-preview.py` 的三条路由，路由 42 → **45**）：切到「对话 3」即可看到「并行协作区」，
+  不需要起后端、不需要真实模型；
+- 预览与后端同口径：动态链路 `/stages` 仍是 `not_integrated`（`doc/api.md` §5.17），
+  所以动态画布**形状齐、详情空**——不把「未集成」显示成「没跑」。
+
+**仍未做**（本轮明确不动，见 `doc/orchestration.md` §3）：执行层并行（属 A，前置是
+`results` 并发安全合并）、前端编排模式开关（默认 `static`，`app/config.py`）、
+Supervisor 的 handoff 与二次规划（属 A）。
+
+**验证边界**：改动集中在 `frontend/rendercheck/`，已跑 `workspace-smoke` **159/159**、
+`config-smoke` 与 `npm run build`；动态并行画布用无头 Chrome 按真实组件 + 真实样式实渲截图确认。
+详情见 `doc/testing.md` §4.14。
+

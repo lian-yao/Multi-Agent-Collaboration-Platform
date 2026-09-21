@@ -1449,6 +1449,48 @@ Windows 下 `file://` 的**盘符会混进 pathname**，于是 `GET /api/v1/...`
 - 15 张图标进包，JS 419.13 → **424.97 kB**（CSS 86.25 kB）；`lucide-react` 按图标 tree-shake。
 - 没做后端 `icon` 字段：那要动 `agent_registry` 的库表与 §5.7 的响应契约，否决理由见 ADR-029。
 
+### 4.14 多智能体拓扑支持面盘点，画布并行能力可验证化（2026-09-21，成员 D）
+
+**1. 改了什么**
+
+| 文件 | 改动 |
+| --- | --- |
+| `frontend/rendercheck/workspace-smoke.tsx` | 新增「扇出 → 并行 → 汇聚」三波形状断言，**154 → 159** |
+| `frontend/rendercheck/preview_seed.py` | 新增 `DYNAMIC_PLAN` / `DYNAMIC_TRACE_REASON` / `new_dynamic_workflow()`；`stage_traces()` 增动态分支 |
+| `frontend/rendercheck/build-preview.py` | 注入动态工作流三条路由（42 → **45** 条） |
+
+**2. 为什么补这组断言**
+
+原有用例只覆盖「同波两个节点 + 一起汇入」一种形状，而动态链路真正要表达的是
+「**一个上游分叉成两路并行、再合并收尾**」。缺这条时，「画布支持动态并行」只能靠读代码相信。
+数据形状取后端 `dynamic_checkpoint_summary` 的四个字段（`id` / `role` / `depends_on` / `status`），
+所以同一条用例同时锁住前后端契约。
+
+断言清单（5 条）：波次分组 `1,2,1` / 只有分叉波带 `parallel` / 边口径
+`serial,serial,parallel,parallel` / 三波各占一行且中间行两个 / 只有分叉波画「并行协作区」。
+
+**3. 预览页为什么能证明「不是只能画串行」**
+
+`stage_traces()` 原来只按静态三步返回、`mode` 恒为 `static`——**预览页结构上看不到动态画布**。
+新增的动态对话（`checkpoint.mode = "dynamic"` + 带 `depends_on` 的 `plan`）走的是与后端
+`app/api/stage_trace.py::read_stage_traces` 相同的 `not_integrated` 分支，
+所以预览与真实环境口径一致：**形状齐（来自 `plan`）、详情空（未集成）**。
+
+**4. 实渲截图（SSR 量不到宽度，必须客户端渲染）**
+
+把画布渲成图时踩到一次：`renderToStaticMarkup` 下 `useElementSize` 量到宽度 0，
+布局退化成紧凑档、画出来挤在左侧且并行框溢出边界。**改用客户端渲染**（esbuild
+`--platform=browser` + `createRoot` + `chrome --headless --screenshot`）后宽度正常。
+教训：**画布的几何断言要走真实测量路径**，SSR 只能验结构与状态，验不了排布。
+
+**5. 边界（如实记录）**
+
+- 执行层仍未并行：`dynamic_graph.py` 的 `ready[0]` 与 `dynamic.py` 的顺序循环都在 A 线；
+  计划声明同波时，图在说并行、实跑没并行（ADR-030「代价」一节）。
+- 角色池只有三个（`RoleId`），池外角色会让整份计划作废并回退固定三步。
+- 前端**没有**编排模式开关；默认 `static`（`app/config.py:65`），要看动态画布需服务端配置或请求体字段。
+- 未跑全量 pytest：Docker Desktop 未启动（同前几轮）。
+
 ## 5. 失败处理约定
 - 任一用例失败：先复现，再定位，修复后将失败模式固化为新的测试或本文档约束；
 - 对 Dapr/编排等共享行为，先写测试或同步补测试，不允许“看起来正确”代替；

@@ -122,6 +122,11 @@ def flatten() -> dict:
     # 更早的已完结对话，预览里因此能看到两个对话编号，且切到「对话 1」也有数据。
     S.STATE["workflows"][WORKFLOW_ID] = workflow
     S.STATE["tool_calls"][WORKFLOW_ID] = tool_calls
+    # 动态编排的一条对话（ADR-019）：`checkpoint.plan` 带 `depends_on` → 画布画
+    # 「扇出 → 并行 → 汇聚」。必须放在 `session_workflows` 之前——「对话 N」的编号
+    # 就是这个列表算出来的，晚放它会少一条。
+    dynamic = S.new_dynamic_workflow(SESSION_ID)
+    dynamic_id = dynamic["id"]
     history = S.session_workflows(SESSION_ID)["items"]
     early_id = history[0]["id"]
 
@@ -186,6 +191,12 @@ def flatten() -> dict:
         # 弹窗打开时就能看到完整的输入 → 工具调用 → 产出。
         f"GET /api/v1/workflows/{WORKFLOW_ID}/stages":
             S.stage_traces(WORKFLOW_ID, done=S.STEPS),
+        # 动态编排那条对话：画布的形状来自 `checkpoint.plan`（`/stages` 对它返回
+        # `not_integrated`，详情区只能给说明），这三条答得上才能切过去看并行画布。
+        f"GET /api/v1/workflows/{dynamic_id}": dynamic,
+        f"GET /api/v1/workflows/{dynamic_id}/tool-calls":
+            S.page(S.STATE["tool_calls"][dynamic_id]),
+        f"GET /api/v1/workflows/{dynamic_id}/stages": S.stage_traces(dynamic_id),
         "GET /api/v1/metrics": S.page(S.metrics_for(WORKFLOW_ID)),
         "GET /api/v1/agents": {"items": S.AGENTS},
         "GET /api/v1/providers": {"items": S.PROVIDERS},
