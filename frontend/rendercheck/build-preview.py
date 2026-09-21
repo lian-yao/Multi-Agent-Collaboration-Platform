@@ -166,6 +166,10 @@ def flatten() -> dict:
             "created_at": S.iso(-86300), "updated_at": S.iso(-86300), "completed_at": S.iso(-86200)},
         f"GET /api/v1/workflows/{WORKFLOW_ID}": workflow,
         f"GET /api/v1/workflows/{WORKFLOW_ID}/tool-calls": S.page(tool_calls),
+        # 阶段执行轨迹（§5.17）：执行台卡片弹窗的数据源。按「三步都已跑完」给种子，
+        # 弹窗打开时就能看到完整的输入 → 工具调用 → 产出。
+        f"GET /api/v1/workflows/{WORKFLOW_ID}/stages":
+            S.stage_traces(WORKFLOW_ID, done=S.STEPS),
         "GET /api/v1/metrics": S.page(S.metrics_for(WORKFLOW_ID)),
         "GET /api/v1/agents": {"items": S.AGENTS},
         "GET /api/v1/providers": {"items": S.PROVIDERS},

@@ -37,6 +37,7 @@ import type {
   Tool,
   ToolCall,
   Workflow,
+  WorkflowStageTrace,
 } from "../types/api";
 
 /** 带 HTTP 状态与错误码的接口错误，便于区分 404（未登记）/ 409（重复）/ 422（取值）。 */
@@ -145,6 +146,14 @@ export const api = {
     ),
   getToolCalls: (id: string, page = 1) =>
     json<DataPage<ToolCall>>(`/api/v1/workflows/${encodeURIComponent(id)}/tool-calls?page=${page}&page_size=20`),
+  /**
+   * 逐阶段执行轨迹（`doc/api.md` §5.17）：执行台卡片弹窗的数据源。
+   *
+   * 与工具调用链路的区别：那条是「整个任务调了哪些工具」，这条是「**哪个 Agent**
+   * 收到什么、调了什么、产出了什么」。两者不互相替代。
+   */
+  getWorkflowStages: (id: string) =>
+    json<WorkflowStageTrace>(`/api/v1/workflows/${encodeURIComponent(id)}/stages`),
   getAgent: (id: string) => json<Agent>(`/api/v1/agents/${id}`),
   getMessages: async (id: string) =>
     (await json<{ items: Message[] }>(`/api/v1/sessions/${id}/messages?page=1&page_size=100`)).items,

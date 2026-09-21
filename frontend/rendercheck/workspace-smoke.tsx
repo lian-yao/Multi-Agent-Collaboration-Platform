@@ -29,7 +29,12 @@
 import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { CollaborationGraph, type CollaboratorNode } from "../src/workspace/CollaborationGraph";
-import { AgentStageModal, type AgentStageDetail } from "../src/workspace/AgentStageModal";
+import {
+  AgentStageModal,
+  AgentTraceView,
+  type AgentStageDetail,
+} from "../src/workspace/AgentStageModal";
+import { formatStamp } from "../src/config/shared";
 import { TaskUsagePanel, groupUsage } from "../src/workspace/TaskUsage";
 import { MessageAttachmentList, PendingFileChips } from "../src/workspace/AttachmentList";
 import {
@@ -43,7 +48,7 @@ import {
   shortenName,
   type PendingAttachment,
 } from "../src/workspace/attachments";
-import type { Agent, Attachment, Metric } from "../src/types/api";
+import type { Agent, Attachment, Metric, StageTraceItem } from "../src/types/api";
 
 const results: [boolean, string][] = [];
 const check = (label: string, condition: boolean, detail = "") =>
@@ -130,8 +135,36 @@ const detail: AgentStageDetail = {
   responsibility: "整理任务要求与输入资料，为后续分析准备信息。",
   status: "pending",
   agent,
-  checkpointSaved: false,
   updatedAt: "2026-09-15T08:00:00Z",
+};
+
+/** 一条同时含成功与失败调用的轨迹：失败那条最该被读到，所以两种都要有。 */
+const trace: StageTraceItem = {
+  stage: "collect",
+  role: "collector",
+  input: null,
+  input_from: null,
+  output: "已收齐三类原始数据。",
+  tool_calls: [
+    {
+      call_id: "call-1",
+      tool_name: "list_session_files",
+      status: "succeeded",
+      input: { session_id: "s-1" },
+      output: ["sales.csv", "returns.csv"],
+      error: null,
+    },
+    {
+      call_id: "call-2",
+      tool_name: "sql_query",
+      status: "failed",
+      input: { sql: "select * from returns" },
+      output: null,
+      error: "SandboxViolation: 只读沙箱拒绝该语句",
+    },
+  ],
+  truncated: false,
+  reason: null,
 };
 
 let modal = "";
@@ -146,17 +179,97 @@ try {
 
 check("弹窗是 dialog 且可关闭", modal.includes('role="dialog"') && modal.includes('aria-modal="true"'));
 check("弹窗标题为 Agent 名并带阶段副标题", modal.includes("信息收集 Agent") && modal.includes("信息收集阶段 · collect"));
-check("渲染生效模型与 Provider", modal.includes("qwen2.5-coder:7b") && modal.includes("Ollama（本地）"));
-check("渲染覆盖项", modal.includes("temperature"));
-check("输出上限写成 tokens", modal.includes("2048 tokens"));
 check(
-  "pending 说「等待前置阶段」而不是 workflow 词汇「排队中」",
-  modal.includes("等待前置阶段") && !modal.includes("排队中"),
+  "阶段状态走 Status 的词汇，pending 不说「排队中」",
+  modal.includes("等待") && !modal.includes("排队中"),
   modal.slice(0, 400),
 );
-check("未保存检查点时给明确文案", modal.includes("暂无已完成记录"));
-check("明示推理过程尚未对外暴露", modal.includes("尚未对外暴露"));
 check("给出任务记录入口", modal.includes("在任务记录中查看工具调用与指标"));
+check(
+  "没有轨迹时也要说清原因，而不是留白",
+  modal.includes("正在读取") || modal.includes("尚未开始") || modal.includes("执行轨迹"),
+  modal.slice(0, 400),
+);
+
+/* 弹窗是「执行轨迹」，不是「配置参数」：模型与参数在「Agent 团队」页。 */
+let traceModal = "";
+try {
+  traceModal = renderToStaticMarkup(
+    <AgentStageModal
+      detail={detail}
+      trace={trace}
+      onClose={() => undefined}
+      onOpenRecords={() => undefined}
+    />,
+  );
+} catch (cause) {
+  check("带轨迹的弹窗可渲染", false, cause instanceof Error ? cause.message : String(cause));
+}
+check(
+  "弹窗渲染分配到的任务、工具调用与阶段产出",
+  traceModal.includes("分配到的任务") &&
+    traceModal.includes("list_session_files") &&
+    traceModal.includes("已收齐三类原始数据"),
+  traceModal.slice(0, 500),
+);
+check(
+  "失败的调用连着原因一起显示",
+  traceModal.includes("SandboxViolation") && traceModal.includes("失败"),
+);
+check(
+  "工具调用计数写出来",
+  traceModal.includes("2 次工具调用"),
+);
+check(
+  "不再显示模型参数（那是「Agent 团队」页的事）",
+  !traceModal.includes("2048 tokens") &&
+    !traceModal.includes("Temperature") &&
+    !traceModal.includes("覆盖项"),
+  traceModal.slice(0, 500),
+);
+check(
+  "说清隐藏推理没有落盘，不假装有思维链",
+  traceModal.includes("隐藏推理") && traceModal.includes("Agent 团队"),
+);
+
+/* 轨迹主体单独挂载：三种「没有轨迹」与截断提示都要能读到。 */
+const gapView = renderToStaticMarkup(
+  <AgentTraceView trace={{ ...trace, output: null, tool_calls: [], reason: "该阶段正在执行：轨迹在阶段完成后写入状态存储。" }} />,
+);
+check(
+  "服务端给的原因原样显示，不改写成「暂无数据」",
+  gapView.includes("该阶段正在执行") && !gapView.includes("暂无"),
+  gapView.slice(0, 300),
+);
+
+const dynamicView = renderToStaticMarkup(
+  <AgentTraceView trace={null} overallReason="本次执行走的是动态编排链路，它当前不落盘逐步骤执行轨迹。" />,
+);
+check("动态链路说清为什么不落盘", dynamicView.includes("动态编排链路"));
+
+const clippedView = renderToStaticMarkup(
+  <AgentTraceView
+    trace={{
+      ...trace,
+      truncated: true,
+      tool_calls: [
+        {
+          call_id: "c3",
+          tool_name: "read_session_file",
+          status: "succeeded",
+          input: { name: "huge.csv" },
+          output: { truncated: true, bytes: 9000, preview: "x" },
+          error: null,
+        },
+      ],
+    }}
+  />,
+);
+check(
+  "截断要说出来：产出标「已截断」、出参也标",
+  clippedView.includes("已截断"),
+  clippedView.slice(0, 300),
+);
 
 let bare = "";
 try {
@@ -166,6 +279,24 @@ try {
   check("角色未就绪时弹窗仍可渲染", false, cause instanceof Error ? cause.message : String(cause));
 }
 check("没有任务记录入口时不渲染该按钮", !bare.includes("在任务记录中查看工具调用与指标"));
+
+/* -------------------------------------------------------------------------- */
+/* 时间戳：历史记录必须能看出是哪一天（原来只给 HH:mm）                          */
+/* -------------------------------------------------------------------------- */
+
+const NOW = new Date(2026, 8, 21, 16, 30); // 2026-09-21 16:30 本地时间
+check("今天的记录带时刻", formatStamp(new Date(2026, 8, 21, 14, 12).toISOString(), NOW) === "今天 14:12");
+check("昨天的记录说「昨天」", formatStamp(new Date(2026, 8, 20, 9, 5).toISOString(), NOW) === "昨天 09:05");
+check(
+  "更早的记录补上日期",
+  formatStamp(new Date(2026, 7, 3, 8, 0).toISOString(), NOW) === "8月3日 08:00",
+);
+check(
+  "跨年记录补上年份",
+  formatStamp(new Date(2025, 11, 31, 23, 59).toISOString(), NOW) === "2025年12月31日 23:59",
+);
+check("空值不显示成空白", formatStamp(null) === "—" && formatStamp(undefined) === "—");
+check("无法解析的值原样回显，不显示 Invalid Date", formatStamp("not-a-date") === "not-a-date");
 
 /* -------------------------------------------------------------------------- */
 /* 用量统计：原值并排，绝不累加                                                */

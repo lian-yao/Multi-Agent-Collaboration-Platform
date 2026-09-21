@@ -52,6 +52,7 @@ import {
 import { api } from "./api/client";
 import { Status, statusText } from "./components/Status";
 import { InlineConfirm } from "./components/InlineConfirm";
+import { formatStamp } from "./config/shared";
 import { ConfigPage } from "./config/ConfigPage";
 import { AgentPanel } from "./config/AgentPanel";
 import { RecordsPage, type RecordTabId } from "./records/RecordsPage";
@@ -75,6 +76,7 @@ import type {
   Session,
   SessionSummary,
   Workflow,
+  WorkflowStageTrace,
 } from "./types/api";
 
 const stages = [
@@ -100,13 +102,14 @@ const stages = [
     tone: "green",
   },
 ] as const;
-const time = (v?: string) =>
-  v
-    ? new Date(v).toLocaleTimeString("zh-CN", {
-        hour: "2-digit",
-        minute: "2-digit",
-      })
-    : "—";
+/**
+ * 时间戳：今天只给时刻，往日补上日期。
+ *
+ * 实现在 `config/shared.tsx::formatStamp`——原来这里是「只给 HH:mm」，于是历史会话
+ * 列表与消息气泡上的时间在跨天之后完全无法区分是哪一天。时间戳的写法一旦分叉，
+ * 就会出现「这边带日期、那边不带」的两套观感，所以只留一个实现、一个短名字。
+ */
+const time = formatStamp;
 type View = "workspace" | "records" | "team" | "tools";
 
 function MorphStateIcon({ state, size = 16 }: { state: "menu" | "close" | "play" | "pause" | "up" | "down" | "panel" | "panel-open"; size?: number }) {
@@ -964,7 +967,6 @@ function stageDetail(
     responsibility: responsibilities[stage],
     status: stageStatus(stage, workflow, completed),
     agent: agents.find((agent) => agent.id === meta?.agent) ?? null,
-    checkpointSaved: completed.has(stage),
     updatedAt: workflow?.updated_at,
   };
 }
@@ -1018,6 +1020,55 @@ function Workspace({
   const detail =
     detailNode ?? (detailStage ? stageDetail(detailStage, workflow, agents, completed) : null);
   const uploading = attachments.some((item) => item.state === "uploading");
+
+  /* ---------------------------------------------------------------------- */
+  /* 阶段执行轨迹（§5.17）：卡片弹窗打开时才拉，随 Workflow 轮询刷新          */
+  /* ---------------------------------------------------------------------- */
+
+  const [traces, setTraces] = useState<WorkflowStageTrace | null>(null);
+  const [traceError, setTraceError] = useState("");
+  const [traceLoading, setTraceLoading] = useState(false);
+  const detailStageId = detail?.stageId ?? null;
+  const workflowId = workflow?.id ?? null;
+  // 依赖用**实测变化的原始值**：Workflow 轮询在终态停止，所以这里只在阶段推进时重拉。
+  const workflowRevision = workflow?.updated_at ?? "";
+
+  useEffect(() => {
+    if (!detailStageId || !workflowId) {
+      setTraces(null);
+      setTraceError("");
+      setTraceLoading(false);
+      return;
+    }
+    let live = true;
+    setTraceLoading(true);
+    api
+      .getWorkflowStages(workflowId)
+      .then((data) => {
+        if (!live) return;
+        setTraces(data);
+        setTraceError("");
+      })
+      .catch((cause) => {
+        if (!live) return;
+        setTraces(null);
+        setTraceError(
+          cause instanceof Error ? cause.message : "无法读取该 Agent 的执行轨迹",
+        );
+      })
+      .finally(() => {
+        if (live) setTraceLoading(false);
+      });
+    return () => {
+      live = false;
+    };
+  }, [detailStageId, workflowId, workflowRevision]);
+
+  const activeTrace =
+    traces?.items.find((item) => item.stage === detailStageId) ?? null;
+  // 整条链路都没有分阶段轨迹（目前只有动态编排）时，原因说在弹窗主体里，
+  // 而不是让每个阶段各自显示一句「暂无记录」。
+  const traceGap = traces && !traces.items.length ? (traces.reason ?? "") : "";
 
   useEffect(() => {
     if (followLatest.current && stream.current)
@@ -1271,6 +1322,10 @@ function Workspace({
       {detail && (
         <AgentStageModal
           detail={detail}
+          trace={activeTrace}
+          traceLoading={traceLoading}
+          traceError={traceError}
+          overallReason={traceGap}
           onClose={() => {
             setDetailStage(null);
             setDetailNode(null);
@@ -1344,7 +1399,6 @@ function Workspace({
                       responsibility: node.responsibility,
                       status: node.state,
                       agent: agent ?? null,
-                      checkpointSaved: node.state === "completed",
                       updatedAt: workflow.updated_at,
                     });
                   }}

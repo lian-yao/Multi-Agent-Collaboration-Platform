@@ -335,6 +335,170 @@ button.collab-node:hover {
 }
 
 /* -------------------------------------------------------------------------- */
+/* 执行轨迹（§5.17）：输入 → 工具调用 → 产出                                    */
+/* -------------------------------------------------------------------------- */
+
+.ws-trace-note {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px dashed var(--cfg-line);
+  border-radius: var(--cfg-radius-sm);
+  background: #f8fbfc;
+  color: var(--cfg-ink-3);
+  font-size: 10.5px;
+  line-height: 1.7;
+}
+
+/* 正文块：等宽 + 保留换行。上限高度交给滚动，页内不出现被压扁的段落。 */
+.ws-trace-block {
+  margin: 0;
+  max-height: 220px;
+  padding: 10px 12px;
+  overflow: auto;
+  border: 1px solid var(--cfg-line-faint);
+  border-radius: var(--cfg-radius-sm);
+  background: #fbfdfe;
+  color: #3f5b67;
+  font-family: Cascadia Mono, Consolas, monospace;
+  font-size: 10.5px;
+  line-height: 1.65;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ws-trace-output {
+  border-color: #d9ebe6;
+  background: #f6fbf9;
+}
+
+.ws-trace-count {
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: #eef4f5;
+  color: var(--cfg-ink-4);
+  font-size: 9px;
+  font-weight: 400;
+}
+
+.ws-trace-list {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.ws-trace-step {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--cfg-line-faint);
+  border-radius: var(--cfg-radius-sm);
+  background: #fff;
+}
+
+/* 失败的调用要一眼看出来：它是这条链路里最该被读到的一条。 */
+.ws-trace-step.failed {
+  border-color: #f0d5d5;
+  background: #fdf7f7;
+}
+
+.ws-trace-step-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.ws-trace-step-head b {
+  color: #4d6975;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.ws-trace-chip {
+  margin-left: auto;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: #eef4f5;
+  color: var(--cfg-ink-4);
+  font-size: 9px;
+}
+
+.ws-trace-mark {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  background: #eef4f5;
+  color: var(--cfg-ink-3);
+}
+
+.ws-trace-mark.green {
+  background: #e8f6f0;
+  color: #2f8f6b;
+}
+
+.ws-trace-mark.rose {
+  background: #fbecec;
+  color: #c0564f;
+}
+
+.ws-trace-mark.amber {
+  background: #fdf3e3;
+  color: #b8842a;
+}
+
+.ws-trace-error {
+  margin: 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: #fbecec;
+  color: #b15550;
+  font-size: 10px;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.ws-trace-io summary {
+  color: var(--cfg-ink-4);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.ws-trace-io dl {
+  display: grid;
+  gap: 6px;
+  margin: 6px 0 0;
+}
+
+.ws-trace-io dt {
+  color: var(--cfg-ink-4);
+  font-size: 9.5px;
+}
+
+.ws-trace-io dd {
+  margin: 2px 0 0;
+}
+
+.ws-trace-io pre {
+  margin: 0;
+  max-height: 140px;
+  padding: 7px 9px;
+  overflow: auto;
+  border-radius: 6px;
+  background: #f6f9fa;
+  color: #43606d;
+  font-family: Cascadia Mono, Consolas, monospace;
+  font-size: 10px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* -------------------------------------------------------------------------- */
 /* 侧栏任务统计                                                                */
 /* -------------------------------------------------------------------------- */
 

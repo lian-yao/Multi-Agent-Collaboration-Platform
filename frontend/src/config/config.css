@@ -390,10 +390,13 @@
 
 
 
+/* 表单的确认行与弹窗底部同侧：主操作在右下角，与全站「确认在右、取消在左」一致。
+   原来两处都是左对齐，用户在弹窗里要往左下角找「保存」——手势与视线都要绕一圈。 */
 .cfg-actions {
   display:flex;
   flex-wrap:wrap;
   align-items:center;
+  justify-content:flex-end;
   gap:8px;
   margin-top:16px
 }
@@ -1817,6 +1820,7 @@
   display:flex;
   flex-wrap:wrap;
   align-items:center;
+  justify-content:flex-end;
   gap:9px;
   padding:13px 18px;
   border-top:1px solid #eaf0f2

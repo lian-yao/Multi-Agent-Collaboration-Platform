@@ -269,6 +269,91 @@ def new_workflow(session_id: str, completed: int = 2, status: str = "running") -
     return workflow
 
 
+ROLE_OF = {"collect": "collector", "analyze": "analyst", "report": "reporter"}
+
+# 逐阶段轨迹的种子（§5.17）：内容按「一个真的跑过的任务」写，包含一次失败调用——
+# 预览页要能看到失败态的样子，而不是三条全是绿灯的假数据。
+STAGE_TRACE_SEED = {
+    "collect": {
+        "input": None,
+        "input_from": None,
+        "output": "已收集 12 篇来源与 2 份内部资料，去重后保留 9 篇，覆盖 2024–2026 年的基准测试。",
+        "tool_calls": [
+            {"call_id": "seed-collect-1", "tool_name": "web_search",
+             "input": {"query": "向量数据库 检索性能 基准"}, "output": {"hits": 12},
+             "status": "succeeded", "error": None},
+            {"call_id": "seed-collect-2", "tool_name": "list_session_files",
+             "input": {"session_id": "s-demo"}, "output": ["bench-2025.md", "notes.md"],
+             "status": "succeeded", "error": None},
+        ],
+    },
+    "analyze": {
+        "input": "已收集 12 篇来源与 2 份内部资料，去重后保留 9 篇，覆盖 2024–2026 年的基准测试。",
+        "input_from": "collect",
+        "output": "三家在 100 万向量规模下的 QPS 分别是 1480 / 960 / 720；召回率差异小于 1%。"
+                  "写入吞吐上 B 方案明显落后，若以只读检索为主则差异可以忽略。",
+        "tool_calls": [
+            {"call_id": "seed-analyze-1", "tool_name": "sql_query",
+             "input": {"sql": "select engine, qps from bench where scale = 1e6"},
+             "output": {"rows": 3}, "status": "succeeded", "error": None},
+            {"call_id": "seed-analyze-2", "tool_name": "code_execution",
+             "input": {"language": "python", "code": "import matplotlib"},
+             "output": None, "status": "failed",
+             "error": "SandboxViolation: 只读沙箱拒绝写文件（charts/ 不在允许的写入范围）"},
+        ],
+    },
+    "report": {
+        "input": "三家在 100 万向量规模下的 QPS 分别是 1480 / 960 / 720；召回率差异小于 1%。"
+                 "写入吞吐上 B 方案明显落后，若以只读检索为主则差异可以忽略。",
+        "input_from": "analyze",
+        "output": "结论：只读检索场景选 A；需要频繁写入且对延迟不敏感时选 C；"
+                  "B 仅在前两者都不可用时作为候选。建议先按 100 万规模做一次线上压测再定。",
+        "tool_calls": [],
+    },
+}
+
+
+def stage_traces(
+    workflow_id: str,
+    *,
+    done: tuple = (),
+    current: str | None = None,
+) -> dict:
+    """`GET /api/v1/workflows/{id}/stages` 的种子（§5.17）。
+
+    默认从 `STATE["workflows"]` 取进度：已完成的阶段给轨迹、当前阶段说明「正在执行」、
+    其余说明「尚未开始」——三种状态都要能在预览页里看到。构建静态预览时可直接传
+    `done` / `current`，不必先造一个 Workflow 进 STATE。
+    """
+    if not done and current is None:
+        workflow = STATE["workflows"].get(workflow_id) or {}
+        checkpoint = workflow.get("checkpoint") or {}
+        done = tuple(checkpoint.get("completed_steps") or ())
+        current = checkpoint.get("current_step")
+
+    items = []
+    for stage in STEPS:
+        seed = STAGE_TRACE_SEED[stage]
+        if stage in done:
+            item = {"stage": stage, "role": ROLE_OF[stage], **seed,
+                    "truncated": False, "reason": None}
+        else:
+            reason = ("该阶段正在执行：轨迹在阶段完成后写入状态存储，阶段结束再打开这里即可看到；"
+                      "当下想跟进工具调用可以走「任务记录」页。"
+                      if current == stage else "该阶段尚未开始。")
+            item = {"stage": stage, "role": ROLE_OF[stage], "input": None, "input_from": None,
+                    "output": None, "tool_calls": [], "truncated": False, "reason": reason}
+        items.append(item)
+    return {
+        "workflow_id": workflow_id,
+        "mode": "static",
+        "task": "对比三种向量数据库的检索性能",
+        "availability": "available",
+        "reason": None,
+        "items": items,
+    }
+
+
 def metrics_for(workflow_id: str) -> list:
     return [
         {"id": 1, "metric_name": "tokens.input", "value": 12840.0,
@@ -321,6 +406,8 @@ ROUTES = [
     ("GET", r"^/api/v1/workflows/(?P<wid>[^/]+)$", lambda m, b: STATE["workflows"].get(m.group("wid"))),
     ("GET", r"^/api/v1/workflows/(?P<wid>[^/]+)/tool-calls$",
      lambda m, b: page(STATE["tool_calls"].get(m.group("wid"), []))),
+    ("GET", r"^/api/v1/workflows/(?P<wid>[^/]+)/stages$",
+     lambda m, b: stage_traces(m.group("wid"))),
     ("GET", r"^/api/v1/metrics$", lambda m, b: page(metrics_for("demo"))),
     ("GET", r"^/api/v1/providers$", lambda m, b: {"items": PROVIDERS}),
     ("GET", r"^/api/v1/tools$", lambda m, b: page(MCP_TOOLS)),

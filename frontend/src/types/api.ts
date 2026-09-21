@@ -221,6 +221,55 @@ export interface DataPage<T> {
 }
 
 /* -------------------------------------------------------------------------- */
+/* §5.17 阶段执行轨迹（执行台卡片弹窗的数据源）                                   */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 阶段轨迹里的一次工具调用。
+ *
+ * `input` / `output` 超长时服务端换成 `{truncated: true, bytes, preview}`——
+ * 界面据此显示「已截断」，而不是把一段被剪掉的内容当成全部。
+ */
+export interface StageToolCall {
+  call_id: string;
+  tool_name: string;
+  status: "running" | "succeeded" | "failed";
+  input: unknown;
+  output: unknown;
+  error: string | null;
+}
+
+/** 单个 Agent 阶段的执行轨迹；`reason` 与「有轨迹」互斥。 */
+export interface StageTraceItem {
+  stage: string;
+  role: string;
+  /** 本阶段收到的上游正文；根阶段为 `null`（它收到的就是原始任务）。 */
+  input: string | null;
+  /** 上游阶段 id，用于说明「输入来自哪一步」。 */
+  input_from: string | null;
+  /** 本阶段产出正文。 */
+  output: string | null;
+  tool_calls: StageToolCall[];
+  truncated: boolean;
+  /**
+   * 没有轨迹时的**具体**原因（还没轮到 / 正在跑 / 状态已被清理 / 载荷损坏）。
+   * 四种原因指向四种不同的下一步动作，界面必须原样显示，不要换成一句「暂无数据」。
+   */
+  reason: string | null;
+}
+
+export interface WorkflowStageTrace {
+  workflow_id: string;
+  mode: "static" | "dynamic";
+  task: string | null;
+  availability: "available" | "not_integrated";
+  /** 整条链路都没有轨迹时的原因（目前只有动态编排会走到这里）。 */
+  reason: string | null;
+  items: StageTraceItem[];
+}
+
+
+/* -------------------------------------------------------------------------- */
 /* §5.7 Agent 角色绑定与调参                                                    */
 /* -------------------------------------------------------------------------- */
 
