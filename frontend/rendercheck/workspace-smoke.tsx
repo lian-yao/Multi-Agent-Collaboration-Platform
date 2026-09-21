@@ -28,14 +28,20 @@
 
 import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
-import { CollaborationGraph, type CollaboratorNode } from "../src/workspace/CollaborationGraph";
+import { CollaborationGraph } from "../src/workspace/CollaborationGraph";
+import { CollabCanvas, type CollabConversation } from "../src/workspace/CollabCanvas";
+import {
+  buildCollaboration,
+  type CollabGraph,
+  type StageMeta,
+} from "../src/workspace/collaboration";
 import {
   AgentStageModal,
   AgentTraceView,
   type AgentStageDetail,
 } from "../src/workspace/AgentStageModal";
 import { formatStamp } from "../src/config/shared";
-import { TaskUsagePanel, groupUsage } from "../src/workspace/TaskUsage";
+import { TaskUsagePanel, groupUsage, usageFor } from "../src/workspace/TaskUsage";
 import { MessageAttachmentList, PendingFileChips } from "../src/workspace/AttachmentList";
 import {
   ATTACHMENT_EXTENSIONS,
@@ -48,62 +54,266 @@ import {
   shortenName,
   type PendingAttachment,
 } from "../src/workspace/attachments";
-import type { Agent, Attachment, Metric, StageTraceItem } from "../src/types/api";
+import type {
+  Agent,
+  Attachment,
+  Metric,
+  StageTraceItem,
+  Workflow,
+  WorkflowStageTrace,
+} from "../src/types/api";
 
 const results: [boolean, string][] = [];
 const check = (label: string, condition: boolean, detail = "") =>
   results.push([condition, condition ? label : `${label}  →  ${detail}`]);
 
 /* -------------------------------------------------------------------------- */
-/* 协作链路                                                                    */
+/* 协作工作流模型                                                              */
 /* -------------------------------------------------------------------------- */
 
-const node = (id: string, status: string): CollaboratorNode => ({
+const collabStages: StageMeta[] = [
+  { id: "collect", label: "信息收集", agent: "collector", responsibility: "整理任务要求与输入资料。" },
+  { id: "analyze", label: "数据分析", agent: "analyst", responsibility: "基于收集结果梳理关键结论。" },
+  { id: "report", label: "报告生成", agent: "reporter", responsibility: "整合分析结果，组织结构化报告。" },
+];
+
+const collabAgent = (id: string, name: string, override: string[]): Agent => ({
   id,
-  stageLabel: { collect: "信息收集", analyze: "数据分析", report: "报告生成" }[id] ?? id,
-  agentName: { collect: "信息收集 Agent", analyze: "数据分析 Agent", report: "报告生成 Agent" }[id] ?? id,
-  status,
+  name,
+  role: id,
+  model: "gpt-5.5",
+  provider: "openai",
+  provider_name: "OpenAI",
+  llm_model_id: null,
+  temperature: 0.2,
+  top_p: null,
+  max_output_tokens: 1024,
+  reasoning_type: "none",
+  status: "ready",
+  override_keys: override,
+  builtin: true,
+  description: null,
+  enabled: true,
 });
+
+const collabAgents: Agent[] = [
+  collabAgent("collector", "信息收集 Agent", ["temperature"]),
+  collabAgent("analyst", "数据分析 Agent", []),
+  collabAgent("reporter", "报告生成 Agent", ["max_output_tokens"]),
+];
+
+const collabWorkflow: Workflow = {
+  id: "w-collab",
+  session_id: "s-1",
+  agent_run_id: "r-1",
+  status: "completed",
+  current_step: null,
+  checkpoint: {
+    status: "completed",
+    current_step: null,
+    completed_steps: ["collect", "analyze", "report"],
+  },
+  created_at: "2026-09-21T10:00:00Z",
+  updated_at: "2026-09-21T10:00:30Z",
+  completed_at: "2026-09-21T10:00:30Z",
+};
+
+const collabTraces: WorkflowStageTrace = {
+  workflow_id: "w-collab",
+  mode: "static",
+  task: "统计 128/2680 的占比并说明含义",
+  availability: "available",
+  reason: null,
+  items: [
+    {
+      stage: "collect",
+      role: "collector",
+      input: null,
+      input_from: null,
+      output: "已算出占比 4.78%。",
+      tool_calls: [
+        {
+          call_id: "c-1",
+          tool_name: "calculator",
+          status: "succeeded",
+          input: { expression: "128/2680" },
+          output: { value: 0.0477612 },
+          error: null,
+        },
+      ],
+      truncated: false,
+      reason: null,
+    },
+    {
+      stage: "analyze",
+      role: "analyst",
+      input: "已算出占比 4.78%。",
+      input_from: "collect",
+      output: "该比例说明退货在总量中占比偏低。",
+      tool_calls: [],
+      truncated: false,
+      reason: null,
+    },
+    {
+      stage: "report",
+      role: "reporter",
+      input: "该比例说明退货在总量中占比偏低。",
+      input_from: "analyze",
+      output: "# 占比分析报告",
+      tool_calls: [],
+      truncated: true,
+      reason: null,
+    },
+  ],
+};
+
+/**
+ * 采样里**没有 `agent_id`，只有 `role`**——这正是「Token 有没有落到 Agent 头上」的考题。
+ * 用 `agent_id` 的旧实现会把三条采样全退到 `model` 那一层、并成一个分组。
+ */
+const collabMetrics: Metric[] = [
+  { metric_name: "input_tokens", value: 817, labels: { role: "collector", stage: "collect" }, recorded_at: "" },
+  { metric_name: "output_tokens", value: 66, labels: { role: "collector", stage: "collect" }, recorded_at: "" },
+  { metric_name: "total_tokens", value: 883, labels: { role: "collector", stage: "collect" }, recorded_at: "" },
+  { metric_name: "total_tokens", value: 1556, labels: { role: "reporter", stage: "report" }, recorded_at: "" },
+];
+
+const collabGraph: CollabGraph = buildCollaboration({
+  stages: collabStages,
+  agents: collabAgents,
+  workflow: collabWorkflow,
+  completed: new Set(["collect", "analyze", "report"]),
+  traces: collabTraces,
+  metrics: collabMetrics,
+});
+
+check("模型：三个静态阶段各成一个节点", collabGraph.nodes.length === 3, `实际 ${collabGraph.nodes.length}`);
+check("模型：串行链路每步依赖上一步", collabGraph.edges.length === 2, `实际 ${collabGraph.edges.length}`);
+check("模型：每波一个节点即串行流水线", collabGraph.waves.length === 3 && !collabGraph.nodes.some((n) => n.parallel));
+check("模型：连线的工具链路挂在上游", collabGraph.edges[0].toolSummary === "calculator ×1", collabGraph.edges[0].toolSummary);
+check(
+  "模型：采样按 role 归到各 Agent",
+  collabGraph.nodes[0].usage.some((row) => row.label === "总 Token" && row.values[0] === "883"),
+  JSON.stringify(collabGraph.nodes[0].usage),
+);
+check("模型：没采样的 Agent 是空数组而不是 0", collabGraph.nodes[1].usage.length === 0, JSON.stringify(collabGraph.nodes[1].usage));
+check("模型：参数带显式覆盖标记", collabGraph.nodes[0].params.some((p) => p.key === "temperature" && p.overridden));
+check("模型：未覆盖的参数不算显式覆盖", collabGraph.nodes[1].params.every((p) => !p.overridden));
+check("模型：根节点回落成整条任务原文", collabGraph.nodes[0].prompt === "统计 128/2680 的占比并说明含义");
+check("模型：下游节点标注输入来自哪一步", collabGraph.nodes[1].promptFrom === "collect");
+check("模型：截断标记带出来", collabGraph.nodes[2].truncated);
+check("模型：usageFor 按角色取到该 Agent 的采样", usageFor(collabMetrics, "reporter").length === 1);
 
 let serial = "";
 try {
   serial = renderToStaticMarkup(
-    <CollaborationGraph
-      waves={[[node("collect", "completed")], [node("analyze", "running")], [node("report", "pending")]]}
-      activeId="analyze"
-      onSelect={() => undefined}
-    />,
+    <CollaborationGraph graph={collabGraph} onExpand={() => undefined} />,
   );
-  check("串行链路可渲染", serial.length > 200, `长度 ${serial.length}`);
+  check("侧栏协作卡片可渲染", serial.length > 400, `长度 ${serial.length}`);
 } catch (cause) {
-  check("串行链路可渲染", false, cause instanceof Error ? cause.message : String(cause));
+  check("侧栏协作卡片可渲染", false, cause instanceof Error ? cause.message : String(cause));
 }
 
-check("渲染出三个 Agent 节点", ["信息收集 Agent", "数据分析 Agent", "报告生成 Agent"].every((n) => serial.includes(n)));
-check("波次之间标注串行", serial.includes(">串行<"), serial.slice(0, 300));
-check("执行中的节点带 active 高亮", serial.includes("collab-node running active"));
-check("等待中的节点标注前置依赖", serial.includes("等待前置阶段"));
+check("卡片渲染出三个 Agent", ["信息收集 Agent", "数据分析 Agent", "报告生成 Agent"].every((n) => serial.includes(n)));
+check("卡片记录模型与 Provider", serial.includes("gpt-5.5") && serial.includes("OpenAI"));
+check("卡片记录 Token 消耗", serial.includes("总 Token") && serial.includes("883"));
+check("卡片在没采样时说明是没采到而不是 0", serial.includes("暂无用量采样"));
+check("卡片标出第几步", serial.includes("第 1 步"));
+check("卡片把显式覆盖标出来", serial.includes("collab-chip override"));
+check("连线记录上游工具链路", serial.includes("calculator ×1"));
+check("波次之间标注串行", serial.includes(">串行<"));
 check("串行链路口径为串行流水线", serial.includes("串行流水线"));
 check("图例三态齐全", serial.includes("已完成") && serial.includes("执行中") && serial.includes("等待前置"));
-check("节点可点击时渲染为 button", serial.includes("<button") && serial.includes('aria-label="查看信息收集 Agent的'));
+check("提供展开全屏入口", serial.includes("展开全屏画布"));
+check("侧栏卡片不再是执行轨迹的入口", !serial.includes("查看信息收集 Agent的"), serial.slice(0, 200));
 
-let parallel = "";
-try {
-  parallel = renderToStaticMarkup(
-    <CollaborationGraph
-      waves={[[node("collect", "completed")], [node("analyze", "running"), node("report", "running")]]}
-    />,
-  );
-  check("并行波次可渲染", parallel.includes("collab-row parallel"), parallel.slice(0, 300));
-} catch (cause) {
-  check("并行波次可渲染", false, cause instanceof Error ? cause.message : String(cause));
-}
+/* 并行：同层步骤算同一波，上游一波多个节点时连线口径变成「并行汇入」 */
+const parallelGraph = buildCollaboration({
+  stages: collabStages,
+  agents: collabAgents,
+  workflow: {
+    ...collabWorkflow,
+    status: "running",
+    current_step: "s3",
+    checkpoint: {
+      status: "running",
+      current_step: "s3",
+      completed_steps: ["s1", "s2"],
+      plan: [
+        { id: "s1", role: "collector", depends_on: [], status: "completed" },
+        { id: "s2", role: "analyst", depends_on: [], status: "completed" },
+        { id: "s3", role: "reporter", depends_on: ["s1", "s2"], status: "pending" },
+      ],
+    },
+  },
+  completed: new Set(["s1", "s2"]),
+  traces: collabTraces,
+});
+
+check("模型：同层步骤算作同一波并行", parallelGraph.waves[0].length === 2, `实际 ${parallelGraph.waves[0]?.length}`);
+check("模型：并行波次的节点带 parallel 标记", parallelGraph.nodes[0].parallel && !parallelGraph.nodes[2].parallel);
+check("模型：上游一波多节点时连线口径为并行汇入", parallelGraph.edges.every((edge) => edge.kind === "parallel"));
+
+const parallel = renderToStaticMarkup(<CollaborationGraph graph={parallelGraph} />);
+check("并行波次可渲染", parallel.includes("collab-row parallel"), parallel.slice(0, 300));
+check("并行汇入口径写进连线", parallel.includes("并行汇入"));
 check("并行波次口径为含并行波次", parallel.includes("含并行波次"));
-check("未传 onSelect 时渲染为 div 而非 button", !parallel.includes("<button"));
 
 check(
-  "空波次给空态而不是空白",
-  renderToStaticMarkup(<CollaborationGraph waves={[]} />).includes("协作关系"),
+  "空链路给空态而不是空白",
+  renderToStaticMarkup(
+    <CollaborationGraph
+      graph={buildCollaboration({
+        stages: collabStages,
+        agents: collabAgents,
+        workflow: null,
+        completed: new Set(),
+      })}
+    />,
+  ).includes("协作关系"),
+);
+
+/* -------------------------------------------------------------------------- */
+/* 全屏协作画布                                                                */
+/* -------------------------------------------------------------------------- */
+
+const conversations: CollabConversation[] = [
+  { id: "w-collab", index: 1, label: "统计 128/2680 的占比", status: "completed" },
+  { id: "w-2", index: 2, label: "再算一次 2680/128", status: "running" },
+];
+
+let canvas = "";
+try {
+  canvas = renderToStaticMarkup(
+    <CollabCanvas
+      open
+      graph={collabGraph}
+      conversations={conversations}
+      selectedId="w-collab"
+      onSelect={() => undefined}
+      onClose={() => undefined}
+    />,
+  );
+  check("全屏画布可渲染", canvas.length > 800, `长度 ${canvas.length}`);
+} catch (cause) {
+  check("全屏画布可渲染", false, cause instanceof Error ? cause.message : String(cause));
+}
+
+check("画布列出对话编号", canvas.includes("对话 1") && canvas.includes("对话 2"));
+check("画布标出当前对话", canvas.includes("collab-conversation current"));
+check("画布显示本次任务原文", canvas.includes("统计 128/2680 的占比并说明含义"));
+check("画布悬停详情常驻：生效参数", canvas.includes("生效参数") && canvas.includes("显式覆盖"));
+check("画布悬停详情常驻：Token 消耗", canvas.includes("Token 消耗"));
+check("画布悬停详情常驻：分配到的任务", canvas.includes("分配到的任务"));
+check("画布悬停详情常驻：阶段产出与截断", canvas.includes("阶段产出") && canvas.includes("已截断"));
+check("画布悬停详情常驻：本阶段工具调用", canvas.includes("本阶段工具调用"));
+check(
+  "画布连线带工具链路与入参出参",
+  canvas.includes("工具链路：calculator ×1") && canvas.includes("入参") && canvas.includes("出参"),
+);
+check(
+  "画布未打开时不渲染",
+  renderToStaticMarkup(<CollabCanvas open={false} graph={collabGraph} onClose={() => undefined} />) === "",
 );
 
 /* -------------------------------------------------------------------------- */

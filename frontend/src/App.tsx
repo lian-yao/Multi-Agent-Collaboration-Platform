@@ -57,8 +57,16 @@ import { ConfigPage } from "./config/ConfigPage";
 import { AgentPanel } from "./config/AgentPanel";
 import { RecordsPage, type RecordTabId } from "./records/RecordsPage";
 import { AgentStageModal, type AgentStageDetail } from "./workspace/AgentStageModal";
-import { CollaborationGraph, type CollaboratorNode } from "./workspace/CollaborationGraph";
-import { TaskUsage } from "./workspace/TaskUsage";
+import { CollaborationGraph } from "./workspace/CollaborationGraph";
+import { CollabCanvas, type CollabConversation } from "./workspace/CollabCanvas";
+import { groupUsage, TaskUsagePanel, useWorkflowMetrics } from "./workspace/TaskUsage";
+import {
+  buildCollaboration,
+  planStepStatus,
+  planSteps,
+  stageStatus,
+  type StageMeta,
+} from "./workspace/collaboration";
 import { MessageAttachmentList, PendingFileChips } from "./workspace/AttachmentList";
 import {
   ATTACHMENT_ACCEPT,
@@ -72,7 +80,6 @@ import type {
   Agent,
   Message,
   OrchestrationMode,
-  PlanStepSummary,
   Session,
   SessionSummary,
   Workflow,
@@ -791,21 +798,16 @@ const responsibilities: Record<StageId, string> = {
   analyze: "基于收集结果进行分析，梳理关键结论。",
   report: "整合分析结果，组织结构化报告。",
 };
-function stageStatus(
-  stage: StageId,
-  workflow: Workflow | null,
-  completed: Set<string>,
-) {
-  if (completed.has(stage)) return "completed";
-  const current = workflow?.checkpoint?.current_step ?? workflow?.current_step;
-  if (
-    current === stage &&
-    workflow &&
-    ["running", "paused", "failed"].includes(workflow.status)
-  )
-    return workflow.status;
-  return "pending";
-}
+
+/** 协作模型的阶段元信息：图标与配色属于视图，进模型的只有 id / 名称 / 角色 / 职责。 */
+const STAGE_META: StageMeta[] = stages.map((stage) => ({
+  id: stage.id,
+  label: stage.label,
+  agent: stage.agent,
+  responsibility: responsibilities[stage.id],
+}));
+/** 状态词汇（阶段 / 计划步骤）在 `workspace/collaboration.ts`——执行台、协作画布
+ *  与阶段弹窗共用同一套判断，`skipped` 与 `pending` 的区分只能有一处实现。 */
 
 /** Agent 目录里不存在的角色不进执行台，也不进协作链路（doc/api.md §7）。 */
 function participatingStages(agents: Agent[]): (typeof stages)[number][] {
@@ -815,45 +817,12 @@ function participatingStages(agents: Agent[]): (typeof stages)[number][] {
 }
 
 /**
- * 协作链路的波次。
+ * 协作链路的节点与连线由 `workspace/collaboration.ts::buildCollaboration` 组装。
  *
- * 静态链路是固定串行流水线，所以每波只有一个节点；动态链路（ADR-019）按计划步骤
- * 顺序展开——当前档位同样是串行，波内并行的 `depends_on` 同层步骤要等档 3。
+ * 原先这里有一份 `collaborationWaves`，只把每个 Agent 摊成一波、不带参数与用量；
+ * 侧栏现在要画的是「模型 / 参数 / Token + 工具链路」，同一件事不能再有两个来源，
+ * 所以那份实现整体搬进了模型模块（侧栏与全屏画布共用）。
  */
-function collaborationWaves(
-  list: (typeof stages)[number][],
-  workflow: Workflow | null,
-  agents: Agent[],
-  completed: Set<string>,
-): CollaboratorNode[][] {
-  if (!workflow) return [];
-  const plan = planSteps(workflow);
-  if (plan.length) {
-    return plan.map((step) => {
-      const meta = stageForRole(step.role);
-      return [
-        {
-          id: step.id,
-          stageLabel: `${meta.label} · ${step.id}`,
-          agentName:
-            agents.find((agent) => agent.id === meta.agent)?.name ??
-            `${meta.agent} Agent`,
-          status: planStepStatus(step),
-        },
-      ];
-    });
-  }
-  return list.map((stage) => [
-    {
-      id: stage.id,
-      stageLabel: stage.label,
-      agentName:
-        agents.find((agent) => agent.id === stage.agent)?.name ??
-        `${stage.agent} Agent`,
-      status: stageStatus(stage.id, workflow, completed),
-    },
-  ]);
-}
 
 /**
  * 执行台节点：把「静态阶段」与「动态计划步骤」收敛成同一种形状，
@@ -872,12 +841,6 @@ type DockNode = {
   stage: StageId | null;
 };
 
-/** 动态链路才产出计划；静态链路下 `checkpoint.plan` 不存在。 */
-function planSteps(workflow: Workflow | null): PlanStepSummary[] {
-  const plan = workflow?.checkpoint?.plan;
-  return Array.isArray(plan) ? plan : [];
-}
-
 /** 角色 id 反查静态阶段元信息；未知角色给一份兜底，不让执行台缺节点。 */
 function stageForRole(role: string) {
   return (
@@ -889,19 +852,6 @@ function stageForRole(role: string) {
       tone: "blue",
     }
   );
-}
-
-/**
- * 计划步骤的显示状态。
- *
- * `skipped` 必须原样透出：它和 `pending` 在界面上长得像，但语义完全相反——
- * 一个是「还在等」，一个是「因为上游失败已经放弃」。
- */
-function planStepStatus(step: PlanStepSummary): string {
-  if (step.status === "completed") return "completed";
-  if (step.status === "failed") return "failed";
-  if (step.status === "skipped") return "skipped";
-  return "pending";
 }
 
 function dockNodes(
@@ -1011,8 +961,6 @@ function Workspace({
   const [atBottom, setAtBottom] = useState(true);
   const busy =
     sending || workflow?.status === "running" || workflow?.status === "pending";
-  const participating = participatingStages(agents);
-  const waves = collaborationWaves(participating, workflow, agents, completed);
   // 执行台把当前阶段置顶，便于执行中一眼看到谁在跑；协作链路视图仍按真实顺序渲染。
   const runtimeNodes = dockNodes(workflow, agents, completed).sort((left, right) =>
     left.id === activeStage ? -1 : right.id === activeStage ? 1 : 0,
@@ -1022,7 +970,10 @@ function Workspace({
   const uploading = attachments.some((item) => item.state === "uploading");
 
   /* ---------------------------------------------------------------------- */
-  /* 阶段执行轨迹（§5.17）：卡片弹窗打开时才拉，随 Workflow 轮询刷新          */
+  /* 阶段执行轨迹（§5.17）：随 Workflow 轮询刷新                              */
+  /*                                                                        */
+  /* 不再「弹窗打开才拉」：侧栏的协作卡片也要用这份轨迹画工具链路，两处各拉一次    */
+  /* 会变成同一接口双倍请求，还可能落在不同批次上、卡片与弹窗对不上。             */
   /* ---------------------------------------------------------------------- */
 
   const [traces, setTraces] = useState<WorkflowStageTrace | null>(null);
@@ -1034,7 +985,7 @@ function Workspace({
   const workflowRevision = workflow?.updated_at ?? "";
 
   useEffect(() => {
-    if (!detailStageId || !workflowId) {
+    if (!workflowId) {
       setTraces(null);
       setTraceError("");
       setTraceLoading(false);
@@ -1062,7 +1013,7 @@ function Workspace({
     return () => {
       live = false;
     };
-  }, [detailStageId, workflowId, workflowRevision]);
+  }, [workflowId, workflowRevision]);
 
   const activeTrace =
     traces?.items.find((item) => item.stage === detailStageId) ?? null;
@@ -1312,10 +1263,11 @@ function Workspace({
         open={inspectorOpen}
         onClose={() => setInspectorOpen(false)}
         workflow={workflow}
+        agents={agents}
         completed={completed}
-        activeStage={activeStage}
-        waves={waves}
-        onSelectStage={setDetailStage}
+        traces={traces}
+        messages={messages}
+        sessionId={session?.id ?? null}
         onOpenRecords={onOpenRecords}
       />
       </section>
@@ -1550,40 +1502,49 @@ function MessageBubble({ message }: { message: Message }) {
     </article>
   );
 }
-/** 协作链路节点回传的是字符串 id，回到阶段类型前先收窄。 */
-function isStageId(value: string): value is StageId {
-  return stages.some((stage) => stage.id === value);
-}
-
 /**
  * 「任务协作」侧栏。
  *
- * 职责边界（ADR-018）：
- * - 只放**任务级**信息：整体状态、运行时长、协作链路、用量采样。
- * - 单个 Agent 的阶段详情在 `AgentStageModal`，由执行台卡片点开；侧栏不再跟随卡片
- *   点击而改变内容，避免把「谁在干」和「整体怎么样」两件事混成一个状态。
- * - 逐条工具调用与采样明细留在「任务记录」页，侧栏只给入口，不重复渲染同一份数据。
+ * 三块视图职责互斥（ADR-018，`doc/api.md` §7）：
+ *
+ * - **本侧栏**：任务级的整体状态与运行时长，加上每个 Agent「用什么跑、花了多少」——
+ *   生效模型、参数与 Token 消耗。侧栏卡片**不是**执行轨迹的入口：它点了不跳弹窗，
+ *   否则「谁在干」和「用什么干的」又会被混成同一个东西。
+ * - **Agent 执行台卡片弹窗**：单个 Agent 收到了什么、调了什么工具、产出了什么（§5.17）。
+ * - **任务记录页**：逐条采样与工具调用明细的唯一入口，侧栏只给入口。
+ *
+ * 「协作链路」升级为协作画布：节点是 Agent 卡片，连线记录**上游**那一步动过的工具，
+ * 并可展开全屏——全屏里按「对话编号」回看本会话每一次提问各自跑出的工作流。
  */
 function Inspector({
   open,
   onClose,
   workflow,
+  agents,
   completed,
-  activeStage,
-  waves,
-  onSelectStage,
+  traces,
+  messages,
+  sessionId,
   onOpenRecords,
 }: {
   open: boolean;
   onClose: () => void;
   workflow: Workflow | null;
+  /** Agent 目录：协作卡片上的模型、参数都取自它。 */
+  agents: Agent[];
   completed: Set<string>;
-  activeStage: string | null;
-  waves: CollaboratorNode[][];
-  onSelectStage: (stage: StageId) => void;
+  /** 当前 Workflow 的阶段执行轨迹，与执行台弹窗**共用同一份**。 */
+  traces: WorkflowStageTrace | null;
+  /** 会话消息，用来给每次对话贴「任务 N」的标签。 */
+  messages: Message[];
+  sessionId: string | null;
   onOpenRecords: () => void;
 }) {
   const [now, setNow] = useState(() => Date.now());
+  const [canvasOpen, setCanvasOpen] = useState(false);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [conversations, setConversations] = useState<Workflow[]>([]);
+  const [otherTraces, setOtherTraces] = useState<WorkflowStageTrace | null>(null);
   const running = workflow?.status === "running";
   // 执行中的「运行时长」需要自己走秒：轮询只在 workflow 有变化时回来。
   useEffect(() => {
@@ -1592,7 +1553,100 @@ function Inspector({
     return () => window.clearInterval(timer);
   }, [running]);
 
-  const total = waves.length;
+  /** 当前对话的用量采样：协作卡片与下方用量面板共用，避免同一接口拉两次。 */
+  const live = useWorkflowMetrics(workflow);
+  const graph = buildCollaboration({
+    stages: STAGE_META,
+    agents,
+    workflow,
+    completed,
+    traces,
+    metrics: live.metrics,
+  });
+
+  /* ---------------------------------------------------------------------- */
+  /* 全屏画布：默认看当前对话，选中别的对话时另拉那一份轨迹与用量              */
+  /* ---------------------------------------------------------------------- */
+
+  const selected = conversations.find((item) => item.id === selectedId) ?? null;
+  const canvasWorkflow = selected ?? workflow;
+  const isLive = !selected || selected.id === workflow?.id;
+  // hook 不能条件调用，所以「选了别的对话」时才把 workflow 递给它（否则传 null 即空转）。
+  const other = useWorkflowMetrics(isLive ? null : canvasWorkflow);
+  const canvasMetrics = isLive ? live.metrics : other.metrics;
+  const canvasTraces = isLive ? traces : otherTraces;
+  const canvasCompleted = new Set(
+    canvasWorkflow?.checkpoint?.completed_steps ?? [],
+  );
+  const canvasGraph = buildCollaboration({
+    stages: STAGE_META,
+    agents,
+    workflow: canvasWorkflow,
+    completed: canvasCompleted,
+    traces: canvasTraces,
+    metrics: canvasMetrics,
+  });
+
+  // 打开画布时锚到当前对话；`updated_at` 一并作依赖，让新任务跑完能出现在列表里。
+  useEffect(() => {
+    if (canvasOpen) setSelectedId(workflow?.id ?? null);
+  }, [canvasOpen, workflow?.id]);
+
+  useEffect(() => {
+    if (!canvasOpen || !sessionId) {
+      setConversations([]);
+      return;
+    }
+    let live2 = true;
+    api
+      .getSessionWorkflows(sessionId)
+      .then((page) => {
+        if (live2) setConversations(page.items);
+      })
+      .catch(() => {
+        // 列表拉不到不影响看当前对话：画布退化成「只有当前这一次」而不是报错空白。
+        if (live2) setConversations([]);
+      });
+    return () => {
+      live2 = false;
+    };
+  }, [canvasOpen, sessionId, workflow?.updated_at]);
+
+  useEffect(() => {
+    if (!canvasWorkflow || isLive) {
+      setOtherTraces(null);
+      return;
+    }
+    let live2 = true;
+    api
+      .getWorkflowStages(canvasWorkflow.id)
+      .then((data) => {
+        if (live2) setOtherTraces(data);
+      })
+      .catch(() => {
+        if (live2) setOtherTraces(null);
+      });
+    return () => {
+      live2 = false;
+    };
+  }, [canvasWorkflow?.id, isLive]);
+
+  /** 对话编号沿用历史列表的「任务 N」口径：同一轮提问的 workflow 才配得到编号。 */
+  const turns = messages.filter((message) => message.role === "user");
+  const conversationItems: CollabConversation[] = conversations.map((item, index) => {
+    const turn = turns.find(
+      (message) => message.agent_run_id && message.agent_run_id === item.agent_run_id,
+    );
+    const label = (turn?.content ?? `第 ${index + 1} 轮任务`).replace(/\s+/g, " ").trim();
+    return {
+      id: item.id,
+      index: index + 1,
+      label: label.length > 40 ? `${label.slice(0, 40)}…` : label,
+      status: item.status,
+    };
+  });
+
+  const total = graph.nodes.length;
   const elapsed = workflow
     ? (workflow.completed_at ? new Date(workflow.completed_at).getTime() : now) -
       new Date(workflow.created_at).getTime()
@@ -1649,14 +1703,11 @@ function Inspector({
             协作链路
           </span>
         </div>
-        <p className="inspector-copy">波次之间串行、波次内部并行。点节点看该 Agent 的阶段详情。</p>
-        <CollaborationGraph
-          waves={waves}
-          activeId={activeStage}
-          onSelect={(id) => {
-            if (isStageId(id)) onSelectStage(id);
-          }}
-        />
+        <p className="inspector-copy">
+          节点是 Agent 卡片：各自的模型、参数与 Token 消耗。连线记录上游那一步用过的工具。
+          想看某个 Agent 具体干了什么，在执行台卡片上点开。
+        </p>
+        <CollaborationGraph graph={graph} onExpand={() => setCanvasOpen(true)} />
       </section>
       {workflow && (
         <section className="inspector-panel">
@@ -1666,9 +1717,24 @@ function Inspector({
               任务用量
             </span>
           </div>
-          <TaskUsage workflow={workflow} onOpenRecords={onOpenRecords} />
+          <TaskUsagePanel
+            groups={groupUsage(live.metrics)}
+            loading={live.loading}
+            error={live.error}
+            onOpenRecords={onOpenRecords}
+          />
         </section>
       )}
+      <CollabCanvas
+        open={canvasOpen}
+        graph={canvasGraph}
+        conversations={conversationItems}
+        selectedId={canvasWorkflow?.id ?? null}
+        onSelect={setSelectedId}
+        loading={isLive ? false : other.loading}
+        error={isLive ? "" : other.error}
+        onClose={() => setCanvasOpen(false)}
+      />
     </aside>
   );
 }

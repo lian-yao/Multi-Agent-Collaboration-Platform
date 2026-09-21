@@ -17,6 +17,7 @@
 import { Bot, ChevronRight, ExternalLink, Wrench } from "lucide-react";
 import { Modal, formatTime } from "../config/shared";
 import { Status, toolCallStatusText } from "../components/Status";
+import { isTruncated, payloadText } from "./collaboration";
 import type { Agent } from "../types/api";
 import type { StageToolCall, StageTraceItem } from "../types/api";
 import "../config/config.css";
@@ -36,20 +37,8 @@ export type AgentStageDetail = {
   updatedAt?: string;
 };
 
-/** 工具入参 / 出参的可读文案：字符串直出，其余走 JSON。 */
-const payloadText = (value: unknown): string => {
-  if (typeof value === "string") return value;
-  if (value === null || value === undefined) return "（无）";
-  try {
-    return JSON.stringify(value, null, 2) ?? String(value);
-  } catch {
-    return String(value);
-  }
-};
-
-/** 服务端的截断标记：截断要**说出来**，不能把预览当成全部。 */
-const isTruncated = (value: unknown): boolean =>
-  typeof value === "object" && value !== null && (value as { truncated?: unknown }).truncated === true;
+/** 工具入参 / 出参的可读文案与截断判断在 `collaboration.ts`——协作画布也要用同一套，
+ *  两处各写一份会出现「弹窗说已截断、画布当成全部」的错位。 */
 
 function ToolCallStep({ call }: { call: StageToolCall }) {
   const tone =

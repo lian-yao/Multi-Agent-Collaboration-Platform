@@ -154,6 +154,16 @@ export const api = {
    */
   getWorkflowStages: (id: string) =>
     json<WorkflowStageTrace>(`/api/v1/workflows/${encodeURIComponent(id)}/stages`),
+  /**
+   * 会话里每一次对话各自跑出的协作工作流（`doc/api.md` §5.18）。
+   *
+   * **升序**返回，编号即下标 + 1，与历史列表里的「任务 N」同口径。全屏协作画布靠它
+   * 列出「对话 1 / 2 / 3」并回看某一次具体是怎么协作的。
+   */
+  getSessionWorkflows: (id: string) =>
+    json<{ items: Workflow[]; total: number }>(
+      `/api/v1/sessions/${encodeURIComponent(id)}/workflows`,
+    ),
   getAgent: (id: string) => json<Agent>(`/api/v1/agents/${id}`),
   getMessages: async (id: string) =>
     (await json<{ items: Message[] }>(`/api/v1/sessions/${id}/messages?page=1&page_size=100`)).items,

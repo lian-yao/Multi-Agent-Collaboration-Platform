@@ -355,16 +355,77 @@ def stage_traces(
 
 
 def metrics_for(workflow_id: str) -> list:
-    return [
-        {"id": 1, "metric_name": "tokens.input", "value": 12840.0,
-         "labels": {"workflow_id": workflow_id, "agent": "collector"}, "recorded_at": iso(-260)},
-        {"id": 2, "metric_name": "tokens.output", "value": 3210.0,
-         "labels": {"workflow_id": workflow_id, "agent": "analyst"}, "recorded_at": iso(-200)},
-        {"id": 3, "metric_name": "latency.first_token_ms", "value": 412.0,
-         "labels": {"workflow_id": workflow_id, "agent": "analyst"}, "recorded_at": iso(-198)},
-        {"id": 4, "metric_name": "tool.call.count", "value": 4.0,
-         "labels": {"workflow_id": workflow_id}, "recorded_at": iso(-30)},
-    ]
+    """用量采样（§5.5）。
+
+    种子照**真实标签口径**给：后端 `_labels` 走上下文，标签集是 `role` / `stage` / `model`，
+    **没有 `agent_id`**。种子要是打了 `agent_id`，预览页就会显示得比真实环境还好看，
+    「Token 有没有分到 Agent 头上」这个真问题在预览里反而看不出来。
+    """
+
+    rows = (
+        ("collector", "collect", 817, 66, 883),
+        ("analyst", "analyze", 852, 279, 1131),
+        ("reporter", "report", 1045, 511, 1556),
+    )
+    items = []
+    for role, stage, prompt, completion, total in rows:
+        for name, value in (
+            ("input_tokens", prompt),
+            ("output_tokens", completion),
+            ("total_tokens", total),
+        ):
+            items.append({
+                "id": len(items) + 1,
+                "metric_name": name,
+                "value": float(value),
+                "labels": {"workflow_id": workflow_id, "role": role, "stage": stage},
+                "recorded_at": iso(-120),
+            })
+    items.append({
+        "id": len(items) + 1,
+        "metric_name": "stage_duration_ms",
+        "value": 7179.5,
+        "labels": {"workflow_id": workflow_id, "role": "collector", "stage": "collect"},
+        "recorded_at": iso(-110),
+    })
+    items.append({
+        "id": len(items) + 1,
+        "metric_name": "workflow_runs",
+        "value": 1.0,
+        "labels": {"workflow_id": workflow_id, "status": "completed"},
+        "recorded_at": iso(-100),
+    })
+    return items
+
+
+def session_workflows(session_id: str) -> dict:
+    """`GET /api/v1/sessions/{id}/workflows` 的种子（§5.18）。
+
+    这个列表存在的意义是「对话编号」，所以要能看出**不止一次对话**：真实 workflow
+    之外补一条更早的已完结对话，编号按下标 + 1，与真实接口同口径（升序）。
+    """
+
+    rows = sorted(
+        (w for w in STATE["workflows"].values() if w.get("session_id") == session_id),
+        key=lambda w: w.get("created_at") or "",
+    )
+    if rows:
+        earlier = dict(rows[0])
+        earlier.update({
+            "id": f"{rows[0]['id']}-earlier",
+            "status": "completed",
+            "current_step": None,
+            "created_at": iso(-1800),
+            "updated_at": iso(-1740),
+            "completed_at": iso(-1740),
+            "checkpoint": {
+                "status": "completed",
+                "current_step": None,
+                "completed_steps": ["collect", "analyze", "report"],
+            },
+        })
+        rows = [earlier, *rows]
+    return {"items": rows, "total": len(rows)}
 
 
 # ------------------------------------------------------------------ routing
@@ -398,6 +459,8 @@ ROUTES = [
      lambda m, b: STATE["sessions"].get(m.group("sid")) or new_session()),
     ("GET", r"^/api/v1/sessions/(?P<sid>[^/]+)/messages$",
      lambda m, b: {"items": STATE["messages"].get(m.group("sid"), [])}),
+    ("GET", r"^/api/v1/sessions/(?P<sid>[^/]+)/workflows$",
+     lambda m, b: session_workflows(m.group("sid"))),
     ("POST", r"^/api/v1/sessions/(?P<sid>[^/]+)/messages$", None),  # handled below
     ("POST", r"^/api/v1/sessions/(?P<sid>[^/]+)/(pause|resume)$",
      lambda m, b: {"session": STATE["sessions"].get(m.group("sid"), {}),

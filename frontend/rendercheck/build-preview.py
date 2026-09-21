@@ -117,8 +117,19 @@ def flatten() -> dict:
     for m in S.MODELS:
         models_by_provider.setdefault(m["provider_id"], []).append(m)
 
+    # 会话历史工作流（§5.18）：侧栏协作画布与全屏画布上「对话 N」的编号来源。
+    # 先把静态 workflow 放进 STATE，复用与实时 stub 同一个种子函数——它会再补一条
+    # 更早的已完结对话，预览里因此能看到两个对话编号，且切到「对话 1」也有数据。
+    S.STATE["workflows"][WORKFLOW_ID] = workflow
+    S.STATE["tool_calls"][WORKFLOW_ID] = tool_calls
+    history = S.session_workflows(SESSION_ID)["items"]
+    early_id = history[0]["id"]
+
     table: dict = {
         "POST /api/v1/sessions": session,
+        # 编号就是这个列表的下标 + 1，顺序必须与真实接口同口径（创建时间升序）。
+        f"GET /api/v1/sessions/{SESSION_ID}/workflows": {
+            "items": history, "total": len(history)},
         # 侧栏「当前任务」下拉 + 记录页「历史会话」分区共用：当前会话摘要 + 两条演示历史。
         "GET /api/v1/sessions": {
             "items": [
@@ -166,6 +177,11 @@ def flatten() -> dict:
             "created_at": S.iso(-86300), "updated_at": S.iso(-86300), "completed_at": S.iso(-86200)},
         f"GET /api/v1/workflows/{WORKFLOW_ID}": workflow,
         f"GET /api/v1/workflows/{WORKFLOW_ID}/tool-calls": S.page(tool_calls),
+        # 「对话 1」是种子里补出来的更早一次对话：切过去时这三条得答得上，
+        # 否则全屏画布会空掉——预览页于是看不出「历史对话也各有自己的工作流」。
+        f"GET /api/v1/workflows/{early_id}": history[0],
+        f"GET /api/v1/workflows/{early_id}/tool-calls": S.page([]),
+        f"GET /api/v1/workflows/{early_id}/stages": S.stage_traces(early_id, done=S.STEPS),
         # 阶段执行轨迹（§5.17）：执行台卡片弹窗的数据源。按「三步都已跑完」给种子，
         # 弹窗打开时就能看到完整的输入 → 工具调用 → 产出。
         f"GET /api/v1/workflows/{WORKFLOW_ID}/stages":
