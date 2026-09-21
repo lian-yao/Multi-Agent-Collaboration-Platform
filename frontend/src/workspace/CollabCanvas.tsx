@@ -128,7 +128,7 @@ export function CollabCanvas({
         )}
         {graph.nodes.length > 0 && (
           <div className="cv-frame" ref={frameRef}>
-            <CollaborationCanvas graph={graph} draggable minHeight={frame.height} />
+            <CollaborationCanvas graph={graph} minHeight={frame.height} />
           </div>
         )}
       </div>

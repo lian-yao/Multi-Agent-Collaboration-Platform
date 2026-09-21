@@ -1207,6 +1207,95 @@ node_modules/.bin/esbuild rendercheck/workspace-smoke.tsx --bundle --platform=no
   （图标与文字更好排，且能挂 CSS 驱动的悬停面板）。
 - **箭头不能吃 `strokeWidth` 单位**：默认 `markerUnits="strokeWidth"` 会让箭头随线宽放大，
   30px 节点上会盖住圆——改为 `markerUnits="userSpaceOnUse"` 并给死尺寸（7.5 窄档 / 9.5 宽档）。
+- **本节没有做「到底画出来了吗」的线上取证**：当时只核了服务端产物哈希与 DOM 计数。
+  计数说明不了可见性（`.inspector` 默认收起，画布在 DOM 里但尺寸为 0）。更正与取证方法见 §4.11。
+
+### 4.11 节点图交互动刀：浮层收进全屏、贴侧面、产出优先，拖动整个删掉（2026-09-21，成员 D）
+
+节点图画出来之后，用户又评审了一轮交互，四条意见：
+
+> 首先应该在全屏画布下才会悬停显示具体内容；当前似乎是在正下方会遮盖住图……应该在偏右或者偏左；
+> 浮窗太小了看不全内容，按照内容优先级，参数配置 token 消耗这些应该在最下面，首先应该显示
+> 分配到的任务和产出；然后这个画布似乎是可被拖动移动的？按理来说这显示的是交互过程可视化，
+> 排布固定即可，移动节点没什么实质性作用。
+
+四条**全部采纳**，决策补成 [ADR-028](decisions/028-sidebar-collaboration-canvas.md) 决策 8。
+
+**1. 改动**
+
+| 文件 | 变化 |
+| --- | --- |
+| `frontend/src/workspace/GraphCanvas.tsx` | 删掉 `draggable` 与整套拖动（`offsets` / `drag` ref / 两个 window 监听 / `onPointerDown` / 拖动后重算边）；`NodeDetail` 去掉 `compact`，小节重排；浮层槽位改 `cv-pop-slot is-{left,right}`，位置由 `popSide()` / `popTop()` 算 |
+| `frontend/src/workspace/CollabCanvas.tsx` | 不再传 `draggable` |
+| `frontend/src/workspace/workspace.css` | `.cv-pop-slot` 改为侧向锚定（`left:100%` / `right:100%` + 16px `padding` 作悬停过渡带）、`translateY(-50%)`；`.cv-pop` 去掉 `position`/`width`/`translateX(-50%)`，面高 280 → 520；`.cv-pop-node` 264 → **380px**；`.cv-pop-edge` 自带定位；删 `.cv-canvas.dense .cv-pop` 与 `cursor: grab`；悬停抬层 12 → 30 |
+| `frontend/rendercheck/workspace-smoke.tsx` | 侧栏断言改为「不挂浮层」；新增内容排序、侧向定位、不可拖断言；**并修掉一个恒真断言**（见下） |
+
+**2. 修掉的真问题：断言读错了文件（恒真）**
+
+新加的「画布节点不再可拖」写成 `!styles.includes("cursor: grab")`，其中 `styles` 是
+`src/styles.css` —— 而画布样式在 `src/workspace/workspace.css`，那条规则从来不在 `styles` 里，
+**断言恒真**。是「悬停面板的侧向定位规则已落盘」这条正断言先失败，才把它暴露出来。
+冒烟里现已单开一个 `canvasStyles` 显式读 `workspace/workspace.css`。
+
+**教训**：**否定式断言（`!x.includes(...)`）在「读的不是那个文件」时永远是绿的**，
+比没有断言更糟——它给你的是虚假的安全感。写否定断言时先确认目标字符串**曾经**在那个文件里。
+
+**3. 验证**
+
+```bash
+cd frontend && npm run build    # tsc --noEmit + vite build 通过（CSS 85.97 kB / JS 418.99 kB，比上轮少 1.1 kB）
+node_modules/.bin/esbuild rendercheck/workspace-smoke.tsx --bundle --platform=node \
+  --format=cjs --jsx=automatic --loader:.css=empty --outfile=rendercheck/.smoke.cjs \
+  && node rendercheck/.smoke.cjs   # 146/146 checks passed（141 → 146）
+```
+
+**线上实测**（重建 frontend 镜像后，用 CDP 驱动真浏览器 —— 见下节「取证手段」）：
+
+| 检查 | 实测 |
+| --- | --- |
+| 侧栏（紧凑档）浮层元素 | **0**（`cv-pop` / `cv-pop-slot` 都不渲染） |
+| 侧栏画布 298×368、5 个圆节点 | 是 |
+| 全屏覆盖层 / 宽档画布 | 1664×849 / 1624×638，5 个圆节点 |
+| 三个 Agent 浮层面宽 | **380**，`is-right`，与圆间隔 14px（节点右沿 854 → 浮层左沿 868） |
+| 浮层竖直位置（视口 849 高） | 192–665 / 218–710 / 270–790，**全部在视口内** |
+| 前两个浮层是否需要滚动 | **不需要**（473 / 492 vs 面高上限 520） |
+| 报告生成（产出最长） | 面高 520 触顶、内容 562 → 需滚 44px |
+| 小节顺序 | 分配到的任务 → 阶段产出 → 本阶段工具调用 → 生效参数 → Token 消耗 |
+| 节点 `cursor` / 交付端子 | `auto`（无 `grab`） / 不给浮层 |
+
+**4. 取证手段（本轮最有价值的沉淀）**
+
+`curl` 资产哈希只能证明**部署换了**，证明不了**界面画出来了**；`--dump-dom` 只能看首屏，
+而画布要先点会话、再展开侧栏。用 Chrome DevTools Protocol 驱动真浏览器才拿得到几何：
+
+```text
+chrome --headless=new --remote-debugging-port=9333 --user-data-dir=<temp> --window-size=1680,1000 about:blank
+→ GET http://127.0.0.1:9333/json/list 取 page 的 webSocketDebuggerUrl
+→ Python: websockets.sync.client.connect(...)  （很多项目 venv 里已有 websockets，不必另装）
+→ Page.enable / Runtime.enable / DOM.enable / CSS.enable
+→ Page.navigate → Runtime.evaluate 点击 → DOM.querySelectorAll 拿 nodeId
+→ CSS.forcePseudoState {forcedPseudoClasses:["hover"]}  ← 悬停必须用它，见下
+→ Page.captureScreenshot
+```
+
+两个非显然的点：
+
+- **`Input.dispatchMouseEvent` 在 headless 下改不出 CSS `:hover`**（面板始终 `display:none`）。
+  要 `Display`/量几何就用 `CSS.forcePseudoState`——这正是它存在的用途。
+- **`.inspector` 默认 `display:none`**（`position:absolute` + `.open` 才 `display:block`）。
+  不先点开侧栏，画布虽然在 DOM 里、`querySelector` 也找得到，但**所有 `getBoundingClientRect()`
+  都是 0**，截图里什么都没有。另外工具条上**有两个 `.toolbar-toggle`**（「隐藏 Agent 执行台」与
+  「显示协作详情」），必须按 `aria-label` 定位——按类名取到的永远是第一个，点了没反应。
+- 顺带更正：§4.10 那次「线上实测」只核了 DOM 计数，**没有核可见性**，当时给用户的截图里其实
+  没有画布。凡是「画出来了」的结论，都必须带 `getBoundingClientRect()` 或截图。
+
+**5. 边界（如实记录）**
+
+- **浮层会盖住画布右侧空白区**：面宽 380px，只覆盖图上本来没东西的地方；并行波次里靠右的节点
+  自动翻到左侧。
+- **面高上限 520px 与 JS 里的 `POP_H` 是同一个数**：两处必须一起改，否则竖直夹取算错。
+- **最长的那份产出仍要滚 44px**：再放大就会在矮屏上顶出可见区，滚动是更稳的选择。
+- 侧栏紧凑档因此**完全没有任何悬停信息**：这是刻意的——侧栏只回答「用什么跑的」。
 
 ## 5. 失败处理约定
 - 任一用例失败：先复现，再定位，修复后将失败模式固化为新的测试或本文档约束；

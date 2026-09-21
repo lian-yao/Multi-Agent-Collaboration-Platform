@@ -288,10 +288,14 @@ check(
   serial.slice(serial.indexOf("cv-meta"), serial.indexOf("cv-meta") + 60),
 );
 check("侧栏未采样的节点只写模型", serial.includes(">gpt-5.5<"));
-check("侧栏悬停面板给参数全表", serial.includes("生效参数") && serial.includes("显式覆盖"));
 check(
-  "侧栏悬停面板不重复执行轨迹",
-  !serial.includes("分配到的任务") && !serial.includes("阶段产出"),
+  "侧栏不挂悬停浮层",
+  !serial.includes("cv-pop") && !serial.includes("cv-pop-slot"),
+  "悬停浮层只在全屏画布给；侧栏的答案就是圆下方那行「模型 · Token」",
+);
+check(
+  "侧栏不重复执行轨迹",
+  !serial.includes("生效参数") && !serial.includes("分配到的任务") && !serial.includes("阶段产出"),
   "侧栏只回答「用什么跑的」，轨迹归执行台",
 );
 check(
@@ -416,11 +420,23 @@ check("画布用宽档画法", canvas.includes("cv-canvas wide"));
 check("画布列出对话编号", canvas.includes("对话 1") && canvas.includes("对话 2"));
 check("画布标出当前对话", canvas.includes("collab-conversation current"));
 check("画布显示本次任务原文", canvas.includes("统计 128/2680 的占比并说明含义"));
-check("画布悬停详情常驻：生效参数", canvas.includes("生效参数") && canvas.includes("显式覆盖"));
-check("画布悬停详情常驻：Token 消耗", canvas.includes("Token 消耗"));
 check("画布悬停详情常驻：分配到的任务", canvas.includes("分配到的任务"));
 check("画布悬停详情常驻：阶段产出与截断", canvas.includes("阶段产出") && canvas.includes("已截断"));
 check("画布悬停详情常驻：本阶段工具调用", canvas.includes("本阶段工具调用"));
+check("画布悬停详情常驻：生效参数", canvas.includes("生效参数") && canvas.includes("显式覆盖"));
+check("画布悬停详情常驻：Token 消耗", canvas.includes("Token 消耗"));
+check(
+  "画布悬停详情按「接到什么 → 交出什么 → 用什么跑」排",
+  canvas.indexOf("分配到的任务") < canvas.indexOf("阶段产出") &&
+    canvas.indexOf("阶段产出") < canvas.indexOf("生效参数") &&
+    canvas.indexOf("生效参数") < canvas.indexOf("Token 消耗"),
+  "产出被压到滚动区下面就等于没显示——读的人不会为了它往下滚",
+);
+check(
+  "悬停面板贴节点侧面而不是正下方",
+  canvas.includes("cv-pop-slot is-right") || canvas.includes("cv-pop-slot is-left"),
+  "挂正下方会压住下一段链路，而链路正是要给人看的东西",
+);
 check(
   "连线上的工具链胶囊带入参出参",
   canvas.includes("cv-edge-chip") && canvas.includes("calculator ×1") && canvas.includes("入参") && canvas.includes("出参"),
@@ -864,6 +880,9 @@ try {
   );
   check("样式表保留输入区提示容器", styles.includes(".composer-hint"));
 
+  // 画布样式在 workspace/workspace.css，不在 styles.css —— 读错文件会让断言恒真。
+  const canvasStyles = readFileSync("src/workspace/workspace.css", "utf8");
+
   const app = readFileSync("src/App.tsx", "utf8");
   check(
     "App 不再出现「主决策」「自动分配」",
@@ -941,6 +960,21 @@ try {
     "旧横排卡片规则已清理",
     !styles.includes(".suggestions button"),
     "残留的 .suggestions button 会把新卡的图标撑成整宽",
+  );
+  check(
+    "画布节点不再可拖",
+    !canvasStyles.includes("cursor: grab") && !canvasStyles.includes("cursor:grab"),
+    "过程可视化里位置在表达流程顺序，能拖只会让人以为拖动会改变什么",
+  );
+  check(
+    "悬停面板的侧向定位规则已落盘",
+    canvasStyles.includes(".cv-pop-slot.is-right") && canvasStyles.includes(".cv-pop-slot.is-left"),
+    "缺一条就只有一个方向能弹，靠边那侧的节点会把面板顶出画布",
+  );
+  check(
+    "侧栏档的面板规则已删除",
+    !canvasStyles.includes(".cv-canvas.dense .cv-pop"),
+    "侧栏不再有悬停浮层，留着这条规则会让「侧栏不给面板」变成口头约定",
   );
 
   // 构建期出过一次「CSS 规则被压缩器静默丢掉」的事故（只打 WARNING、退出码仍是 0），

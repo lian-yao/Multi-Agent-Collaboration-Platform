@@ -18,8 +18,11 @@
  *
  * 事件一律用 CSS `:hover` / `:focus-within` 驱动，不引入 JS hover 状态：键盘能拿到
  * 同样的信息，冒烟也能断言这些文本确实渲染了。
+ *
+ * **节点不可拖**：这是一张「过程可视化」，位置本身就在表达流程顺序，不是可编辑的画板。
+ * 能拖只会让人以为拖动能改变什么，而它什么都不会改变。
  */
-import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Bot, CircleAlert, LoaderCircle, Maximize2, Pause, Wrench } from "lucide-react";
 import { Status } from "../components/Status";
 import type { CollabGraph, CollabNode, CollabToolCall } from "./collaboration";
@@ -355,19 +358,44 @@ function NodeGlyph({ node, size }: { node: PlacedNode; size: number }) {
 }
 
 /**
- * 悬停详情：参数全表 / Token / 分配到的任务 / 产出 / 工具明细。
+ * 悬停详情：**接到什么、交出什么**在前，**用什么参数、花多少**在后。
  *
- * 侧栏（`compact`）只留前两块。理由不是「放不下」而是**不该放**：那一列要回答的是
- * 「这个 Agent 用什么跑的」，Prompt 与产出属于执行轨迹，去执行台看；两处都给，
- * 就又回到「侧栏和执行台说的是同一件事」。
+ * 排序按读图时的疑问顺序，不按数据现成的顺序：先问「它拿到了什么任务、产出了什么」，
+ * 再问「中途调了什么工具」，最后才是「用什么参数跑的、花了多少 Token」。
+ * 反过来排（参数 / Token 打头）会把最该看的产出压到滚动区下面——面板再大也会被读完就关。
+ *
+ * **只在全屏画布出现**。侧栏那一列要回答的是「这个 Agent 用什么跑的」，`模型 · Token`
+ * 已经写在圆下方；侧栏再挂一份浮层，等于把执行轨迹搬回侧栏，正好是 ADR-018 拆开的同一件事。
  */
-function NodeDetail({ node, compact = false }: { node: CollabNode; compact?: boolean }) {
+function NodeDetail({ node }: { node: CollabNode }) {
   return (
     <div className="cv-pop cv-pop-node" role="tooltip">
       <header className="cv-pop-head">
         <b>{node.name}</b>
         <Status status={node.status} />
       </header>
+      <div className="cv-pop-block">
+        <h5>{node.promptFrom ? `分配到的任务（来自 ${node.promptFrom}）` : "分配到的任务"}</h5>
+        <pre>{node.prompt ?? "（根节点：收到的是用户提出的原始任务）"}</pre>
+      </div>
+      <div className="cv-pop-block">
+        <h5>阶段产出{node.truncated && <i>已截断</i>}</h5>
+        <pre>{node.output || "（尚无产出）"}</pre>
+      </div>
+      {node.toolCalls.length > 0 && (
+        <div className="cv-pop-block">
+          <h5>本阶段工具调用</h5>
+          <ul>
+            {node.toolCalls.map((call) => (
+              <li key={call.id} className={call.status}>
+                <b>{call.name}</b>
+                <span>{call.status}</span>
+                {call.error && <em>{call.error}</em>}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       <div className="cv-pop-block">
         <h5>生效参数</h5>
         <dl>
@@ -397,32 +425,6 @@ function NodeDetail({ node, compact = false }: { node: CollabNode; compact?: boo
           <p className="cv-pop-note">没有采样记录。缺少 Token 是「没采到」，不是消耗为 0。</p>
         )}
       </div>
-      {!compact && (
-        <>
-          <div className="cv-pop-block">
-            <h5>{node.promptFrom ? `分配到的任务（来自 ${node.promptFrom}）` : "分配到的任务"}</h5>
-            <pre>{node.prompt ?? "（根节点：收到的是用户提出的原始任务）"}</pre>
-          </div>
-          <div className="cv-pop-block">
-            <h5>阶段产出{node.truncated && <i>已截断</i>}</h5>
-            <pre>{node.output || "（尚无产出）"}</pre>
-          </div>
-          {node.toolCalls.length > 0 && (
-            <div className="cv-pop-block">
-              <h5>本阶段工具调用</h5>
-              <ul>
-                {node.toolCalls.map((call) => (
-                  <li key={call.id} className={call.status}>
-                    <b>{call.name}</b>
-                    <span>{call.status}</span>
-                    {call.error && <em>{call.error}</em>}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-        </>
-      )}
     </div>
   );
 }
@@ -465,15 +467,17 @@ function EdgeChip({ edge }: { edge: PlacedEdge }) {
 export function CollaborationCanvas({
   graph,
   dense = false,
-  draggable = false,
   minHeight = 0,
   onExpand,
 }: {
   graph: CollabGraph;
-  /** 侧栏紧凑态：节点更小、行距更密、连线不带胶囊。 */
+  /**
+   * 侧栏紧凑态：节点更小、行距更密、不画连线胶囊、**不给悬停浮层**。
+   *
+   * 浮层只在全屏给：侧栏要回答的是「这个 Agent 用什么跑的」，圆下方的 `模型 · Token`
+   * 就是答案；再挂一份带任务与产出的浮层，等于把执行轨迹搬回侧栏（ADR-018）。
+   */
   dense?: boolean;
-  /** 全屏画布拿节点拖一拖，把挤在一起的边拉开。 */
-  draggable?: boolean;
   /**
    * 外层给的可用高度：行距据此撑开，让图在一屏里摊平。
    *
@@ -485,86 +489,38 @@ export function CollaborationCanvas({
   onExpand?: () => void;
 }) {
   const [ref, size] = useElementSize<HTMLDivElement>();
-  const [offsets, setOffsets] = useState<Record<string, { x: number; y: number }>>({});
-  const drag = useRef<{ id: string; startX: number; startY: number; baseX: number; baseY: number } | null>(null);
-
-  const layout = layoutCollaboration(graph, size.width, dense, minHeight);
-  const { nodes, edges, groups, width: w, height: h } = layout;
-
-  // 换了一条工作流就把拖动位移丢掉：否则新图的节点会顶着上一张图的偏移跑偏。
-  const nodeKey = graph.nodes.map((node) => node.id).join("|");
-  useEffect(() => {
-    setOffsets({});
-  }, [nodeKey]);
-
-  useEffect(() => {
-    if (!draggable) return;
-    const onMove = (event: PointerEvent) => {
-      const active = drag.current;
-      const element = ref.current;
-      if (!active || !element) return;
-      const rect = element.getBoundingClientRect();
-      setOffsets((prev) => ({
-        ...prev,
-        [active.id]: {
-          x: active.baseX + (event.clientX - rect.left - active.startX),
-          y: active.baseY + (event.clientY - rect.top - active.startY),
-        },
-      }));
-    };
-    const onUp = () => {
-      drag.current = null;
-    };
-    window.addEventListener("pointermove", onMove);
-    window.addEventListener("pointerup", onUp);
-    return () => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-    };
-  }, [draggable, ref]);
-
-  const placed = nodes.map((node) => {
-    const offset = offsets[node.id];
-    return offset ? { ...node, x: node.x + offset.x, y: node.y + offset.y } : node;
-  });
-  const byId = new Map(placed.map((node) => [node.id, node]));
-
-  // 拖动后连线要跟着走：两端只要有一个被挪过，就用新圆心重算这条边
-  const moved = edges.map((edge) => {
-    const [fromId, toId] = edge.key.split("->");
-    const from = byId.get(fromId);
-    const to = byId.get(toId);
-    if (!from || !to) return edge;
-    if (!offsets[fromId] && !offsets[toId]) return edge;
-    const curve = controlPoints(from, to);
-    return {
-      ...edge,
-      d: curvePath(curve),
-      mid: chipAnchor(curve, from, to, dense),
-    };
-  });
+  const { nodes, edges, groups, width: w, height: h } = layoutCollaboration(
+    graph,
+    size.width,
+    dense,
+    minHeight,
+  );
 
   const marker = dense ? "cvArrowDense" : "cvArrowWide";
   // 箭头尺寸按模式给死（`markerUnits="userSpaceOnUse"`）：默认的 `strokeWidth` 单位会
   // 让箭头跟着线宽一起放大，30px 的圆上顶着一枚 15px 的三角，节点会被箭头吃掉。
   const arrow = dense ? 7.5 : 9.5;
-  const popWidth = 264;
-  const half = popWidth / 2;
-  const clampX = (x: number) =>
-    Math.min(Math.max(x, half + 6), Math.max(half + 6, w - half - 6));
-  const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>, node: PlacedNode) => {
-    if (!draggable || node.kind !== "agent" || !ref.current) return;
-    event.preventDefault();
-    const rect = ref.current.getBoundingClientRect();
-    const offset = offsets[node.id] ?? { x: 0, y: 0 };
-    drag.current = {
-      id: node.id,
-      startX: event.clientX - rect.left,
-      startY: event.clientY - rect.top,
-      baseX: offset.x,
-      baseY: offset.y,
-    };
+
+  /**
+   * 悬停面板贴节点的**侧面**，不挂正下方。
+   *
+   * 挂下方会直接压住下一段链路——而链路正是这张图要给人看的东西。左右两侧在竖直方向上
+   * 是空的，所以面板挪到侧面；靠右的节点翻到左侧，免得顶出画布。
+   */
+  const popSide = (node: PlacedNode) => (node.x > w * 0.58 ? "left" : "right");
+  /** 面板高度上限，用来把竖直位置夹进画布内（CSS 的 `max-height` 是同一个数）。 */
+  const POP_H = 520;
+  const popTop = (node: PlacedNode) => {
+    const pad = POP_H / 2 + 8;
+    const center = Math.min(Math.max(node.y, pad), Math.max(pad, h - POP_H / 2 - 8));
+    // 槽位相对节点盒定位，节点中心在 `size / 2`；外侧再用 `translateY(-50%)` 把面板居中。
+    return center - node.y + node.size / 2;
   };
+
+  /** 工具胶囊按最宽一档（`calculator ×3、web_search ×2`）留半宽，贴边时把它拉回画布内。 */
+  const chipHalf = 84;
+  const clampChip = (x: number) =>
+    Math.min(Math.max(x, chipHalf + 4), Math.max(chipHalf + 4, w - chipHalf - 4));
 
   return (
     <div className={`cv-canvas ${dense ? "dense" : "wide"}`} ref={ref} style={{ height: h }}>
@@ -595,10 +551,10 @@ export function CollaborationCanvas({
             <path d="M 0 0 L 10 5 L 0 10 z" fill="#3b82f6" />
           </marker>
         </defs>
-        {moved.map((edge) => (
+        {edges.map((edge) => (
           <path key={`base-${edge.key}`} d={edge.d} className="cv-edge" markerEnd={`url(#${marker})`} />
         ))}
-        {moved
+        {edges
           .filter((edge) => edge.active)
           .map((edge) => (
             <path
@@ -632,7 +588,7 @@ export function CollaborationCanvas({
 
       {!dense && (
         <div className="cv-edge-layer">
-          {moved
+          {edges
             .filter((edge) => edge.toolSummary)
             .map((edge) => (
               <span
@@ -641,7 +597,7 @@ export function CollaborationCanvas({
                 style={{
                   left: edge.mid.x,
                   top: edge.mid.y,
-                  marginLeft: clampX(edge.mid.x) - edge.mid.x,
+                  marginLeft: clampChip(edge.mid.x) - edge.mid.x,
                 }}
               >
                 <EdgeChip edge={edge} />
@@ -650,7 +606,7 @@ export function CollaborationCanvas({
         </div>
       )}
 
-      {placed.map((node) => (
+      {nodes.map((node) => (
         <div
           key={node.id}
           className={`cv-node kind-${node.kind} ${node.status}${node.visited ? " visited" : ""}`}
@@ -668,7 +624,6 @@ export function CollaborationCanvas({
               ? `${node.label}：${node.status}${node.token ? `，${node.token}` : ""}`
               : node.label
           }
-          onPointerDown={(event) => onPointerDown(event, node)}
         >
           <NodeGlyph node={node} size={dense ? 12 : 16} />
           {node.status === "running" && <span className="cv-ring" />}
@@ -679,17 +634,10 @@ export function CollaborationCanvas({
               {[node.node.model, node.token].filter(Boolean).join(" · ")}
             </span>
           )}
-          {node.node && (
-            <div
-              className="cv-pop-slot"
-              style={{
-                left: clampX(node.x) - node.x + node.size / 2,
-                ...(node.y > h * 0.62
-                  ? { bottom: node.size + 8 }
-                  : { top: node.size + 8 }),
-              }}
-            >
-              <NodeDetail node={node.node} compact={dense} />
+          {/* 侧栏不挂浮层：它只回答「用什么跑的」，圆下方那行就是答案（见 `dense` 的注释）。 */}
+          {!dense && node.node && (
+            <div className={`cv-pop-slot is-${popSide(node)}`} style={{ top: popTop(node) }}>
+              <NodeDetail node={node.node} />
             </div>
           )}
         </div>
