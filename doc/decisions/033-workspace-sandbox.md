@@ -78,6 +78,20 @@
 > Linux、工作区内容却来自 Windows 宿主，按最严的一侧统一拒绝才能保证行为可预期；
 > 另外整串首尾空白先 `strip()`，段内以空格或点结尾按 Windows 语义拒绝。
 
+## 阶段 2 实现口径（2026-09-23）
+
+写档位上线时按"能不能在没有人参与的情况下造成损失"把动作切了一刀：
+
+**阶段 2 放开**（非破坏性）：`write_work_file`（**只能新建**）、`make_work_dir`、
+`move_work_entry`（目标已存在时拒绝）。**阶段 3 才放开**：删除（软删除到 `.trash/`）、
+覆盖已有文件、覆盖式移动。
+
+理由是本 ADR §6 自己定的规则——删除与覆盖需要人工审批。先放开、之后再补审批，等于在
+中间那段时间里让"审批"这条规则失效；宁可让模型先换个文件名，也不打开一个"没有审批的
+覆盖"。相应地：只读档位下这三个工具**不出现在工具集里**（档位决定可用动作集合，而不是
+出现了再报错），`overwrite=true` 在目标已存在时返回 409 `WORKSPACE_APPROVAL_REQUIRED`
+并在文案里告诉模型改用新文件名。
+
 工具集（会话级，按 ADR-025 的 `session_scoped_registry` 就地拼进本次执行，不进
 `GET /api/v1/tools` 静态目录）：`list_work_files` / `read_work_file` /
 `write_work_file` / `make_work_dir` / `move_work_entry` / `delete_work_entry`。

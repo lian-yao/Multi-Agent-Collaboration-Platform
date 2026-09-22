@@ -297,9 +297,9 @@ bind mount），`WORKSPACE_ROOT` 是**容器内**的挂载点（应用读的是�
 | `WORKSPACE_READ_MAX_CHARS` | 阶段 1 | 单次读取返回的字符上限，默认 20000 |
 | `WORKSPACE_TREE_MAX_ENTRIES` / `WORKSPACE_TREE_MAX_DEPTH` | 阶段 1 | 目录树条目与深度上限（500 / 8） |
 | `WORKSPACE_SCAN_LIMIT` | 阶段 1 | 用量扫描的条目上限（10000），超出时 `usage.truncated=true` |
-| `WORKSPACE_MAX_TOTAL_BYTES` / `WORKSPACE_MAX_ENTRIES` | 阶段 2 | 目录总字节与条目配额，写档位上线后生效 |
-| `WORKSPACE_SANDBOX_MOUNT` | 阶段 2 | 沙箱挂载工作区的方式：`rw`（默认）/ `ro` / `none`（ADR-033 §7） |
-| `SANDBOX_UID` / `SANDBOX_GID` | 阶段 2 | 沙箱容器运行身份。Linux 宿主上决定工作区文件属主；Docker Desktop for Windows 由虚拟文件系统接管，影响有限 |
+| `WORKSPACE_MAX_TOTAL_BYTES` / `WORKSPACE_MAX_ENTRIES` | 阶段 2 | 目录总字节与条目配额；写入前校验，超限返回 409 `WORKSPACE_QUOTA_EXCEEDED` |
+| `WORKSPACE_SANDBOX_MOUNT` | 未实现 | 沙箱挂载工作区的方式：`rw`（默认）/ `ro` / `none`（ADR-033 §7） |
+| `SANDBOX_UID` / `SANDBOX_GID` | 未实现 | 沙箱容器运行身份。Linux 宿主上决定工作区文件属主；Docker Desktop for Windows 由虚拟文件系统接管，影响有限 |
 | `EGRESS_MODE` | 阶段 4 | `public_only`（默认，只放公网）或 `allowlist`（再要求域名命中白名单） |
 | `EGRESS_ALLOW_HOSTS` / `EGRESS_DENY_HOSTS` | 阶段 4 | 域名白/黑名单，**黑名单优先**；只支持精确主机名与 `*.` 前缀通配，按 label 边界匹配 |
 | `EGRESS_INTERNAL_HOSTS` | 阶段 4 | 平台内部依赖的**精确主机名**白名单（Dapr、Redis、PostgreSQL、Jaeger、`search-gateway`），豁免私网判定 |

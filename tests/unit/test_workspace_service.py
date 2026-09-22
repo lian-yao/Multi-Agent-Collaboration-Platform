@@ -16,12 +16,13 @@ from app.core import checkpoint
 from app.workspace import service
 from app.workspace.config import WorkspaceSettings
 from app.workspace.errors import (
+    WorkspaceApprovalRequired,
     WorkspaceDisabled,
     WorkspaceError,
     WorkspaceExistsError,
-    WorkspaceModeUnavailable,
     WorkspaceNotFoundError,
     WorkspacePathError,
+    WorkspaceQuotaExceeded,
     WorkspaceRootUnavailable,
 )
 
@@ -38,6 +39,7 @@ class FakeWorkspaceStore:
             "get_workspace",
             "find_workspace_by_path",
             "create_workspace",
+            "update_workspace",
             "delete_workspace",
         ):
             monkeypatch.setattr(checkpoint, name, getattr(self, name))
@@ -87,6 +89,20 @@ class FakeWorkspaceStore:
 
     def delete_workspace(self, workspace_id) -> bool:
         return self.rows.pop(str(workspace_id), None) is not None
+
+    def update_workspace(
+        self, workspace_id, *, mode=None, name=None, updated_by=None
+    ) -> dict | None:
+        row = self.rows.get(str(workspace_id))
+        if row is None:
+            return None
+        if mode is not None:
+            row["mode"] = mode
+        if name is not None:
+            row["name"] = name
+        row["updated_by"] = updated_by
+        row["updated_at"] = datetime.now(timezone.utc)
+        return dict(row)
 
 
 @pytest.fixture
@@ -144,18 +160,35 @@ def test_duplicate_path_is_rejected(store, settings):
         service.create_workspace(session_id="s-2", path="shared", settings=settings)
 
 
-def test_workspace_write_is_not_available_in_phase_one(store, settings):
-    """阶段 1 只读：写档位必须显式拒绝，而不是存下一个不生效的档位。"""
+def test_workspace_write_can_be_created_or_lifted(store, settings, tmp_path: Path):
+    """阶段 2 起写档位可用；提档是人的动作，记 `updated_by` 便于追责。"""
 
-    with pytest.raises(WorkspaceModeUnavailable):
-        service.create_workspace(session_id="s-1", mode="workspace_write", settings=settings)
+    view = service.create_workspace(session_id="s-1", path="project", settings=settings)
+    assert view["mode"] == "read_only"
+
+    lifted = service.update_workspace(view["id"], mode="workspace_write", actor="ui", settings=settings)
+    assert lifted["mode"] == "workspace_write"
+    assert lifted["updated_by"] == "ui"
+
+    lowered = service.update_workspace(view["id"], mode="read_only", settings=settings)
+    assert lowered["mode"] == "read_only"
+
+
+def test_update_missing_workspace_is_not_found(store, settings):
+    with pytest.raises(WorkspaceNotFoundError):
+        service.update_workspace("missing", mode="read_only", settings=settings)
 
 
 def test_unknown_mode_is_a_validation_error(store, settings):
-    with pytest.raises(WorkspaceError) as excinfo:
-        service.create_workspace(session_id="s-1", mode="admin", settings=settings)
+    view = service.create_workspace(session_id="s-1", path="project", settings=settings)
 
-    assert not isinstance(excinfo.value, WorkspaceModeUnavailable)
+    with pytest.raises(WorkspaceError, match="mode 取值无效"):
+        service.update_workspace(view["id"], mode="admin", settings=settings)
+
+
+def test_unknown_mode_is_rejected_at_registration(store, settings):
+    with pytest.raises(WorkspaceError, match="mode 取值无效"):
+        service.create_workspace(session_id="s-1", mode="admin", settings=settings)
 
 
 def test_escaping_path_is_rejected_at_registration(store, settings):
@@ -340,6 +373,149 @@ def test_read_file_rejects_paths_outside_the_workspace(store, settings, tmp_path
 
     with pytest.raises(WorkspacePathError):
         source.read_file("../secret.txt")
+
+
+# --------------------------------------------------------------------------- #
+# 阶段 2：写档位（非破坏性写操作）
+# --------------------------------------------------------------------------- #
+
+
+def _writable(store, settings, tmp_path: Path) -> service.LocalWorkspaceSource:
+    view = service.create_workspace(
+        session_id="s-1", path="project", mode="workspace_write", settings=settings
+    )
+    return service.LocalWorkspaceSource(view, settings=settings)
+
+
+def test_read_only_tier_refuses_writes(store, settings, tmp_path: Path):
+    view = service.create_workspace(session_id="s-1", path="project", settings=settings)
+    source = service.LocalWorkspaceSource(view, settings=settings)
+
+    for call in (
+        lambda: source.write_file("a.txt", "hi"),
+        lambda: source.make_dir("d"),
+        lambda: source.move_entry("a.txt", "b.txt"),
+    ):
+        with pytest.raises(WorkspaceError, match="只读档位"):
+            call()
+
+
+def test_write_file_creates_parents_and_reports_size(store, settings, tmp_path: Path):
+    source = _writable(store, settings, tmp_path)
+
+    result = source.write_file("reports/2026/summary.md", "hello")
+
+    assert result["path"] == "reports/2026/summary.md"
+    assert result["size_bytes"] == 5
+    assert result["created_dirs"] == ["reports/2026", "reports"]
+    assert (tmp_path / "project" / "reports" / "2026" / "summary.md").read_text(
+        encoding="utf-8"
+    ) == "hello"
+
+
+def test_write_file_refuses_to_overwrite_without_approval(store, settings, tmp_path: Path):
+    """覆盖是破坏性动作：ADR-033 §6 要人工审批，阶段 3 之前一律拒绝。"""
+
+    source = _writable(store, settings, tmp_path)
+    source.write_file("a.txt", "first")
+
+    with pytest.raises(WorkspaceExistsError, match="覆盖需要人工审批"):
+        source.write_file("a.txt", "second")
+    with pytest.raises(WorkspaceApprovalRequired):
+        source.write_file("a.txt", "second", overwrite=True)
+    assert (tmp_path / "project" / "a.txt").read_text(encoding="utf-8") == "first"
+
+
+def test_overwrite_flag_on_a_new_path_is_still_a_create(store, settings, tmp_path: Path):
+    source = _writable(store, settings, tmp_path)
+
+    source.write_file("fresh.txt", "new", overwrite=True)
+
+    assert (tmp_path / "project" / "fresh.txt").read_text(encoding="utf-8") == "new"
+
+
+def test_write_file_rejects_oversized_content(store, settings, tmp_path: Path):
+    source = _writable(store, settings, tmp_path)
+
+    with pytest.raises(WorkspaceQuotaExceeded, match="单文件上限"):
+        source.write_file("big.txt", "x" * 300)
+
+
+def test_write_file_rejects_paths_outside_the_workspace(store, settings, tmp_path: Path):
+    source = _writable(store, settings, tmp_path)
+
+    with pytest.raises(WorkspacePathError):
+        source.write_file("../escape.txt", "x")
+
+
+def test_total_bytes_quota_is_enforced_with_current_usage(store, tmp_path: Path):
+    tight = WorkspaceSettings(
+        _env_file=None, root=str(tmp_path), max_file_bytes=256, max_total_bytes=10
+    )
+    source = _writable(store, tight, tmp_path)
+
+    with pytest.raises(WorkspaceQuotaExceeded) as excinfo:
+        source.write_file("a.txt", "x" * 11)
+
+    message = str(excinfo.value)
+    assert "当前 0" in message and "上限 10" in message
+
+
+def test_entry_quota_counts_directories_too(store, tmp_path: Path):
+    tight = WorkspaceSettings(
+        _env_file=None, root=str(tmp_path), max_file_bytes=256, max_entries=2
+    )
+    source = _writable(store, tight, tmp_path)
+
+    source.make_dir("a")
+    with pytest.raises(WorkspaceQuotaExceeded, match="条目配额"):
+        source.make_dir("b/c")
+
+
+def test_make_dir_rejects_an_existing_path(store, settings, tmp_path: Path):
+    source = _writable(store, settings, tmp_path)
+    source.make_dir("reports")
+
+    with pytest.raises(WorkspaceExistsError, match="已经存在"):
+        source.make_dir("reports")
+
+
+def test_move_entry_renames_and_refuses_overwrite(store, settings, tmp_path: Path):
+    source = _writable(store, settings, tmp_path)
+    source.write_file("a.txt", "content")
+    source.write_file("b.txt", "other")
+
+    moved = source.move_entry("a.txt", "docs/a.txt")
+    assert moved["source"] == "a.txt"
+    assert moved["target"] == "docs/a.txt"
+    assert not (tmp_path / "project" / "a.txt").exists()
+    assert (tmp_path / "project" / "docs" / "a.txt").read_text(encoding="utf-8") == "content"
+
+    with pytest.raises(WorkspaceExistsError, match="目标已存在"):
+        source.move_entry("docs/a.txt", "b.txt")
+
+
+def test_move_entry_rejects_moving_a_directory_into_itself(store, settings, tmp_path: Path):
+    source = _writable(store, settings, tmp_path)
+    source.make_dir("reports")
+
+    with pytest.raises(WorkspacePathError):
+        source.move_entry("reports", "reports/2026")
+
+
+def test_move_entry_rejects_a_missing_source(store, settings, tmp_path: Path):
+    source = _writable(store, settings, tmp_path)
+
+    with pytest.raises(WorkspacePathError, match="源不存在"):
+        source.move_entry("nope.txt", "other.txt")
+
+
+def test_move_entry_rejects_escaping_targets(store, settings, tmp_path: Path):
+    source = _writable(store, settings, tmp_path)
+    source.write_file("a.txt", "content")
+
+    with pytest.raises(WorkspacePathError):
+        source.move_entry("a.txt", "../outside.txt")
 
 
 # --------------------------------------------------------------------------- #

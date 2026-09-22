@@ -1,8 +1,9 @@
-"""ADR-017 的补列迁移：`create_all` 不会给**已存在**的表补列。
+"""补列迁移：`create_all` 不会给**已存在**的表补列。
 
 升级一个跑过旧版本的环境时，`agent_configs` / `provider_configs` 还是老列定义，
 新增的 `llm_model_id` / `top_p` / `max_output_tokens` / `reasoning_type` /
 `default_llm_model_id` 必须显式补上，否则注册表配置一写就报 `UndefinedColumn`。
+ADR-033 阶段 2 同理给 `workspaces` 补了 `updated_by`（提档要记"谁提的"）。
 
 这里只验证语句生成与执行接线（不连真实数据库）：语句必须是幂等的
 `ADD COLUMN IF NOT EXISTS`，且只在 PostgreSQL 上生成。
@@ -61,6 +62,17 @@ def test_migration_covers_every_column_added_by_adr_017():
     )
 
 
+def test_migration_covers_the_workspace_actor_column():
+    """阶段 2 给 `workspaces` 补 `updated_by`：阶段 1 建过表的环境必须能升上来。"""
+
+    statements = checkpoint._registry_migration_statements("postgresql")
+
+    assert (
+        "ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS updated_by VARCHAR(100)"
+        in statements
+    )
+
+
 def test_migration_statements_are_idempotent():
     """必须带 `IF NOT EXISTS`：启动时每次都跑，重复执行不能报错。"""
 
@@ -81,7 +93,7 @@ def test_apply_migration_executes_statements_in_order():
     applied = checkpoint._apply_registry_migrations(RecordingEngine("postgresql", log))
 
     assert applied == log
-    assert len(log) == 5
+    assert len(log) == 6
 
 
 def test_apply_migration_is_a_noop_off_postgresql():

@@ -15,7 +15,7 @@ from app.orchestration.tools import ToolCall, ToolSpec, session_scoped_registry
 from app.tools.base import ToolExecutionError
 from app.tools.work_files import work_file_tools
 from app.workspace.config import WorkspaceSettings
-from app.workspace.errors import WorkspacePathError
+from app.workspace.errors import WorkspaceApprovalRequired, WorkspacePathError
 
 
 class FakeSource:
@@ -24,18 +24,25 @@ class FakeSource:
     def __init__(
         self,
         *,
+        mode: str = "read_only",
         entries: list[dict[str, Any]] | None = None,
         payload: dict[str, Any] | None = None,
         error: Exception | None = None,
     ) -> None:
+        self._mode = mode
         self._entries = entries or []
         self._payload = payload or {}
         self._error = error
         self.read_paths: list[str] = []
+        self.writes: list[tuple[str, str, bool]] = []
 
     @property
     def workspace(self) -> dict[str, Any]:
         return {"id": "w-1", "path": "project"}
+
+    @property
+    def mode(self) -> str:
+        return self._mode
 
     def list_entries(self, path: str = "", *, depth: int = 1) -> dict[str, Any]:
         if self._error is not None:
@@ -53,6 +60,24 @@ class FakeSource:
             raise self._error
         self.read_paths.append(path)
         return {"path": path, **self._payload}
+
+    def write_file(
+        self, path: str, text: str, *, overwrite: bool = False
+    ) -> dict[str, Any]:
+        if self._error is not None:
+            raise self._error
+        self.writes.append((path, text, overwrite))
+        return {"path": path, "size_bytes": len(text.encode()), "created_dirs": []}
+
+    def make_dir(self, path: str) -> dict[str, Any]:
+        if self._error is not None:
+            raise self._error
+        return {"path": path, "created_dirs": [path]}
+
+    def move_entry(self, source: str, target: str) -> dict[str, Any]:
+        if self._error is not None:
+            raise self._error
+        return {"source": source, "target": target}
 
 
 class StubRegistry:
@@ -92,16 +117,30 @@ def test_tools_are_absent_without_a_session_binding(settings):
     assert work_file_tools("s-1", settings=settings) == ()
 
 
-def test_tools_are_read_only(settings):
-    """阶段 1 不该有任何写入口——目录里出现一个写工具就是安全回归。"""
+def test_read_only_tier_has_no_write_tools(settings):
+    """档位决定可用动作集合：只读会话里**不该出现**任何写工具（ADR-033 §2）。"""
 
     tools = work_file_tools("s-1", settings=settings, source=FakeSource())
 
     assert [tool.name for tool in tools] == ["list_work_files", "read_work_file"]
-    for tool in tools:
-        assert not any(
-            marker in tool.name for marker in ("write", "delete", "move", "create")
-        )
+
+
+def test_write_tier_adds_the_non_destructive_tools(settings):
+    """阶段 2 的写档位只放开三种非破坏性动作；删除在阶段 3（要审批）之前不存在。"""
+
+    tools = work_file_tools(
+        "s-1", settings=settings, source=FakeSource(mode="workspace_write")
+    )
+
+    names = [tool.name for tool in tools]
+    assert names == [
+        "list_work_files",
+        "read_work_file",
+        "write_work_file",
+        "make_work_dir",
+        "move_work_entry",
+    ]
+    assert not any("delete" in name for name in names), "删除必须等审批链路（ADR-033 §6）"
 
 
 def test_list_tool_returns_entries_and_hint(settings):
@@ -182,6 +221,97 @@ def test_read_tool_rejects_an_empty_path(settings):
         tool.invoke({"path": ""})
 
     assert excinfo.value.retryable is False
+
+
+# --------------------------------------------------------------------------- #
+# 阶段 2：写工具
+# --------------------------------------------------------------------------- #
+
+
+def test_write_tool_creates_a_file_and_reports_the_result(settings):
+    source = FakeSource(mode="workspace_write")
+    tools = {tool.name: tool for tool in work_file_tools("s-1", settings=settings, source=source)}
+
+    result = tools["write_work_file"].invoke({"path": "a.txt", "content": "hello"})
+
+    assert result["path"] == "a.txt"
+    assert result["size_bytes"] == 5
+    assert source.writes == [("a.txt", "hello", False)]
+
+
+def test_write_tool_maps_approval_required_to_non_retryable(settings):
+    """覆盖要审批：模型必须能看懂「换个文件名」，而不是反复重试同一次调用。"""
+
+    tool = {
+        t.name: t
+        for t in work_file_tools(
+            "s-1",
+            settings=settings,
+            source=FakeSource(
+                mode="workspace_write",
+                error=WorkspaceApprovalRequired("覆盖已有文件需要人工审批：a.txt"),
+            ),
+        )
+    }["write_work_file"]
+
+    with pytest.raises(ToolExecutionError) as excinfo:
+        tool.invoke({"path": "a.txt", "content": "x", "overwrite": True})
+
+    assert excinfo.value.retryable is False
+    assert "人工审批" in str(excinfo.value)
+
+
+def test_write_tool_rejects_an_empty_path(settings):
+    tool = {
+        t.name: t
+        for t in work_file_tools(
+            "s-1", settings=settings, source=FakeSource(mode="workspace_write")
+        )
+    }["write_work_file"]
+
+    with pytest.raises(ToolExecutionError) as excinfo:
+        tool.invoke({"path": "", "content": "x"})
+
+    assert excinfo.value.retryable is False
+
+
+def test_mkdir_tool_maps_errors_and_returns_created_dirs(settings):
+    tools = {
+        t.name: t
+        for t in work_file_tools(
+            "s-1", settings=settings, source=FakeSource(mode="workspace_write")
+        )
+    }
+
+    assert tools["make_work_dir"].invoke({"path": "reports/2026"})["created_dirs"] == [
+        "reports/2026"
+    ]
+
+    failing = {
+        t.name: t
+        for t in work_file_tools(
+            "s-1",
+            settings=settings,
+            source=FakeSource(mode="workspace_write", error=WorkspacePathError("越界")),
+        )
+    }["make_work_dir"]
+    with pytest.raises(ToolExecutionError) as excinfo:
+        failing.invoke({"path": "../x"})
+    assert excinfo.value.retryable is False
+
+
+def test_move_tool_returns_source_and_target(settings):
+    tool = {
+        t.name: t
+        for t in work_file_tools(
+            "s-1", settings=settings, source=FakeSource(mode="workspace_write")
+        )
+    }["move_work_entry"]
+
+    result = tool.invoke({"source": "a.txt", "target": "docs/a.txt"})
+
+    assert result["source"] == "a.txt"
+    assert result["target"] == "docs/a.txt"
 
 
 # --------------------------------------------------------------------------- #

@@ -21,6 +21,8 @@ from app.workspace.service import LocalWorkspaceSource, workspace_source
 
 MAX_PATH_CHARS = 500
 MAX_DEPTH = 8
+MAX_CONTENT_CHARS = 200_000
+"""单次写入的字符上限（schema 层护栏）；真正的字节配额由 `WORKSPACE_*` 决定。"""
 
 
 class WorkFileSource(Protocol):
@@ -29,9 +31,20 @@ class WorkFileSource(Protocol):
     @property
     def workspace(self) -> dict[str, Any]: ...
 
+    @property
+    def mode(self) -> str: ...
+
     def list_entries(self, path: str = "", *, depth: int = 1) -> dict[str, Any]: ...
 
     def read_file(self, path: str, *, max_chars: int | None = None) -> dict[str, Any]: ...
+
+    def write_file(
+        self, path: str, text: str, *, overwrite: bool = False
+    ) -> dict[str, Any]: ...
+
+    def make_dir(self, path: str) -> dict[str, Any]: ...
+
+    def move_entry(self, source: str, target: str) -> dict[str, Any]: ...
 
 
 class ListWorkFilesArgs(BaseModel):
@@ -53,6 +66,41 @@ class ReadWorkFileArgs(BaseModel):
         min_length=1,
         max_length=MAX_PATH_CHARS,
         description="工作目录内的相对文件路径，例如 reports/summary.md",
+    )
+
+
+class WriteWorkFileArgs(BaseModel):
+    path: str = Field(
+        min_length=1,
+        max_length=MAX_PATH_CHARS,
+        description="工作目录内的相对文件路径，例如 reports/2026-09.md",
+    )
+    content: str = Field(
+        max_length=MAX_CONTENT_CHARS,
+        description="要写入的 UTF-8 文本；父目录不存在时会自动创建",
+    )
+    overwrite: bool = Field(
+        default=False,
+        description="是否覆盖已有文件；覆盖需要人工审批，当前会被拒绝，请改用新文件名",
+    )
+
+
+class MakeWorkDirArgs(BaseModel):
+    path: str = Field(
+        min_length=1,
+        max_length=MAX_PATH_CHARS,
+        description="要创建的工作目录内相对路径，例如 reports/2026",
+    )
+
+
+class MoveWorkEntryArgs(BaseModel):
+    source: str = Field(
+        min_length=1, max_length=MAX_PATH_CHARS, description="工作目录内的源路径"
+    )
+    target: str = Field(
+        min_length=1,
+        max_length=MAX_PATH_CHARS,
+        description="工作目录内的目标路径，目标已存在时会被拒绝（覆盖需要人工审批）",
     )
 
 
@@ -125,6 +173,78 @@ class WorkFileReadTool(BuiltinTool):
         return result
 
 
+class WorkFileWriteTool(BuiltinTool):
+    name = "write_work_file"
+    description = (
+        "在本次会话的工作目录里写一个 UTF-8 文本文件（父目录会自动创建）。"
+        "只能新建：目标已存在会失败，覆盖已有文件需要人工审批（尚未开放），"
+        "请改用新的文件名。受目录配额限制，超限时错误里会给出当前用量与上限。"
+    )
+    args_model = WriteWorkFileArgs
+
+    def __init__(self, source: WorkFileSource) -> None:
+        self._source = source
+
+    def run(self, args: WriteWorkFileArgs) -> dict[str, Any]:
+        try:
+            payload = self._source.write_file(
+                args.path, args.content, overwrite=args.overwrite
+            )
+        except WorkspaceError as exc:
+            raise ToolExecutionError(str(exc), retryable=False) from exc
+        return {
+            "path": payload.get("path"),
+            "size_bytes": int(payload.get("size_bytes") or 0),
+            "created_dirs": payload.get("created_dirs") or [],
+            "note": "已写入。需要读回时用 read_work_file。",
+        }
+
+
+class WorkFileMkdirTool(BuiltinTool):
+    name = "make_work_dir"
+    description = (
+        "在本次会话的工作目录里创建目录（可一次创建多层）。已存在时失败，"
+        "这是为了让你知道目标已经在那儿，而不是静默复用。"
+    )
+    args_model = MakeWorkDirArgs
+
+    def __init__(self, source: WorkFileSource) -> None:
+        self._source = source
+
+    def run(self, args: MakeWorkDirArgs) -> dict[str, Any]:
+        try:
+            payload = self._source.make_dir(args.path)
+        except WorkspaceError as exc:
+            raise ToolExecutionError(str(exc), retryable=False) from exc
+        return {
+            "path": payload.get("path"),
+            "created_dirs": payload.get("created_dirs") or [],
+        }
+
+
+class WorkFileMoveTool(BuiltinTool):
+    name = "move_work_entry"
+    description = (
+        "在本次会话的工作目录内移动或重命名文件/目录。目标已存在时拒绝执行"
+        "（覆盖需要人工审批，尚未开放）；目录不能移动到它自己的子路径下。"
+    )
+    args_model = MoveWorkEntryArgs
+
+    def __init__(self, source: WorkFileSource) -> None:
+        self._source = source
+
+    def run(self, args: MoveWorkEntryArgs) -> dict[str, Any]:
+        try:
+            payload = self._source.move_entry(args.source, args.target)
+        except WorkspaceError as exc:
+            raise ToolExecutionError(str(exc), retryable=False) from exc
+        return {
+            "source": payload.get("source"),
+            "target": payload.get("target"),
+            "note": "已移动；内容本身没有被改写。",
+        }
+
+
 def work_file_tools(
     session_id: str | None,
     *,
@@ -141,17 +261,34 @@ def work_file_tools(
     )
     if resolved_source is None:
         return ()
-    return (
+    tools: list[BuiltinTool] = [
         WorkFileListTool(resolved_source),
         WorkFileReadTool(resolved_source, settings=resolved),
-    )
+    ]
+    if resolved_source.mode == "workspace_write":
+        # 只读档位下**不出现**写工具：档位决定可用动作集合，而不是"出现了再报错"
+        # （ADR-033 §2，与 ADR-012 的沙箱策略同一取向）。
+        tools.extend(
+            (
+                WorkFileWriteTool(resolved_source),
+                WorkFileMkdirTool(resolved_source),
+                WorkFileMoveTool(resolved_source),
+            )
+        )
+    return tuple(tools)
 
 
 __all__ = [
     "ListWorkFilesArgs",
     "LocalWorkspaceSource",
+    "MakeWorkDirArgs",
+    "MoveWorkEntryArgs",
     "ReadWorkFileArgs",
     "WorkFileListTool",
+    "WorkFileMkdirTool",
+    "WorkFileMoveTool",
     "WorkFileReadTool",
+    "WorkFileWriteTool",
+    "WriteWorkFileArgs",
     "work_file_tools",
 ]

@@ -17,12 +17,6 @@ class WorkspacePathError(WorkspaceError):
     code = "WORKSPACE_PATH_REJECTED"
 
 
-class WorkspaceModeUnavailable(WorkspaceError):
-    """档位暂未开放。阶段 1 只提供 `read_only`（ADR-033 §2）。"""
-
-    code = "WORKSPACE_MODE_UNAVAILABLE"
-
-
 class WorkspaceNotFoundError(WorkspaceError):
     """工作区不存在。"""
 
@@ -49,3 +43,19 @@ class WorkspaceDisabled(WorkspaceRootUnavailable):
     """`WORKSPACE_ENABLED=false` 时的显式失败，避免"静默不生效"。"""
 
     code = "WORKSPACE_DISABLED"
+
+
+class WorkspaceQuotaExceeded(WorkspaceError):
+    """超过配额（单文件 / 总字节 / 条目数）。错误信息里必须带当前用量与上限。"""
+
+    code = "WORKSPACE_QUOTA_EXCEEDED"
+
+
+class WorkspaceApprovalRequired(WorkspaceError):
+    """破坏性动作需要人工审批。
+
+    阶段 2 只放开非破坏性写操作；**删除与覆盖**按 ADR-033 §6 必须走审批，
+    而审批链路在阶段 3——在那之前这两种动作直接拒绝，而不是先放开、以后再补规则。
+    """
+
+    code = "WORKSPACE_APPROVAL_REQUIRED"

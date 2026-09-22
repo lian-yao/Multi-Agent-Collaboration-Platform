@@ -390,6 +390,7 @@ Prompt 时需同步 roles.py 与 `BUILTIN_AGENT_SEED`，避免目录与 Prompt �
 | name | VARCHAR(100) | NULL | 展示名 |
 | quota | JSONB | NOT NULL | `{max_file_bytes, max_total_bytes, max_entries}` |
 | created_by | VARCHAR(100) | NULL | 操作者标识（沿用注册表的 `updated_by` 口径） |
+| updated_by | VARCHAR(100) | NULL | **谁提的档**（阶段 2 起写入；提权是审计事件） |
 | created_at / updated_at | TIMESTAMPTZ | NOT NULL | |
 
 索引：`idx_workspaces_session (session_id)`、`ux_workspaces_path (path)`。

@@ -18,12 +18,13 @@ from fastapi.testclient import TestClient
 import app.api.main as api_main
 from app.workspace import service as workspace_service
 from app.workspace.errors import (
+    WorkspaceApprovalRequired,
     WorkspaceDisabled,
     WorkspaceError,
     WorkspaceExistsError,
-    WorkspaceModeUnavailable,
     WorkspaceNotFoundError,
     WorkspacePathError,
+    WorkspaceQuotaExceeded,
     WorkspaceRootUnavailable,
 )
 
@@ -100,6 +101,7 @@ class WorkspaceApi:
     FUNCTIONS = (
         "list_workspaces",
         "create_workspace",
+        "update_workspace",
         "get_workspace",
         "workspace_tree",
         "delete_workspace",
@@ -124,6 +126,8 @@ class WorkspaceApi:
             return {"items": [WORKSPACE_VIEW], "total": 1}
         if name == "create_workspace":
             return WORKSPACE_VIEW
+        if name == "update_workspace":
+            return {**WORKSPACE_VIEW, "mode": "workspace_write", "updated_by": "ui"}
         if name == "get_workspace":
             return WORKSPACE_VIEW
         if name == "workspace_tree":
@@ -265,17 +269,56 @@ def test_escaping_path_is_422(api):
     assert response.json()["code"] == "WORKSPACE_PATH_REJECTED"
 
 
-def test_workspace_write_mode_is_422_until_phase_two(api):
+def test_create_workspace_with_write_mode_is_201(api):
+    """阶段 2 起写档位可用；创建时直接提档是合法的。"""
+
     stub, client = api
-    stub.stub(
-        "create_workspace",
-        WorkspaceModeUnavailable("写档位（workspace_write）还未开放"),
-    )
+    stub.stub("create_workspace", {**WORKSPACE_VIEW, "mode": "workspace_write"})
 
     response = client.post("/api/v1/workspaces", json={"mode": "workspace_write"})
 
+    assert response.status_code == 201
+    assert response.json()["mode"] == "workspace_write"
+    assert stub["create_workspace"].last_call[1]["mode"] == "workspace_write"
+
+
+def test_patch_workspace_lifts_the_tier_and_records_the_actor(api):
+    stub, client = api
+
+    response = client.patch(
+        "/api/v1/workspaces/w-1",
+        json={"mode": "workspace_write"},
+        headers={"X-Request-ID": "req-7"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["mode"] == "workspace_write"
+    assert body["updated_by"] == "ui"
+    kwargs = stub["update_workspace"].last_call[1]
+    assert kwargs["mode"] == "workspace_write"
+    assert kwargs["actor"] == "req-7"
+
+
+def test_patch_workspace_with_an_unknown_mode_is_framework_422(api):
+    """档位由 Pydantic 的 Literal 收口：非法值连服务层都到不了。"""
+
+    stub, client = api
+
+    response = client.patch("/api/v1/workspaces/w-1", json={"mode": "admin"})
+
     assert response.status_code == 422
-    assert response.json()["code"] == "WORKSPACE_MODE_UNAVAILABLE"
+    assert not stub["update_workspace"].calls
+
+
+def test_patch_missing_workspace_is_404(api):
+    stub, client = api
+    stub.stub("update_workspace", WorkspaceNotFoundError("w-x"))
+
+    response = client.patch("/api/v1/workspaces/w-x", json={"mode": "read_only"})
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "WORKSPACE_NOT_FOUND"
 
 
 def test_duplicate_path_is_409(api):
@@ -306,6 +349,32 @@ def test_disabled_workspace_is_503(api):
 
     assert response.status_code == 503
     assert response.json()["code"] == "WORKSPACE_DISABLED"
+
+
+def test_quota_exceeded_is_409(api):
+    stub, client = api
+    stub.stub(
+        "create_workspace",
+        WorkspaceQuotaExceeded("超过目录总字节配额：当前 0 + 本次 11 > 上限 10 字节"),
+    )
+
+    response = client.post("/api/v1/workspaces", json={"path": "project"})
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "WORKSPACE_QUOTA_EXCEEDED"
+
+
+def test_approval_required_is_409(api):
+    stub, client = api
+    stub.stub(
+        "create_workspace",
+        WorkspaceApprovalRequired("覆盖已有文件需要人工审批（阶段 3 提供）：a.txt"),
+    )
+
+    response = client.post("/api/v1/workspaces", json={"path": "project"})
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "WORKSPACE_APPROVAL_REQUIRED"
 
 
 def test_unknown_workspace_error_is_422(api):

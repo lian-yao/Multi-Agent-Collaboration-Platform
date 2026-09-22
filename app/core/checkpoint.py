@@ -448,6 +448,7 @@ class WorkspaceRecord(Base):
     name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     quota: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
     created_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    updated_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, nullable=False
     )
@@ -1139,6 +1140,7 @@ def _workspace_to_dict(row: WorkspaceRecord) -> dict[str, Any]:
         "name": row.name,
         "quota": row.quota or {},
         "created_by": row.created_by,
+        "updated_by": row.updated_by,
         "created_at": row.created_at,
         "updated_at": row.updated_at,
     }
@@ -1207,6 +1209,29 @@ def delete_workspace(workspace_id: str | uuid.UUID) -> bool:
         session.delete(row)
         session.commit()
         return True
+
+
+def update_workspace(
+    workspace_id: str | uuid.UUID,
+    *,
+    mode: str | Any = None,
+    name: str | None = None,
+    updated_by: str | None = None,
+) -> dict[str, Any] | None:
+    """部分更新工作区；字段为 `None` 表示不改（提档走这里）。"""
+
+    with get_session_factory()() as session:
+        row = session.get(WorkspaceRecord, _as_uuid(workspace_id))
+        if row is None:
+            return None
+        if mode is not None:
+            row.mode = mode
+        if name is not None:
+            row.name = name
+        row.updated_by = updated_by
+        session.commit()
+        session.refresh(row)
+        return _workspace_to_dict(row)
 
 
 def _tool_call_to_dict(row: ToolCall) -> dict[str, Any]:
@@ -1917,6 +1942,9 @@ _REGISTRY_COLUMN_MIGRATIONS: dict[str, tuple[tuple[str, str], ...]] = {
         ("reasoning_type", "VARCHAR(20)"),
     ),
     "provider_configs": (("default_llm_model_id", "VARCHAR(80)"),),
+    # ADR-033 阶段 2：`workspaces` 增加「谁提的档」。阶段 1 已经建过这张表的环境
+    # 不会被 `create_all` 补列，所以这里显式补。
+    "workspaces": (("updated_by", "VARCHAR(100)"),),
 }
 """表 → (列名, 列类型) 的补列清单，列类型与 ORM 在 PostgreSQL 上的渲染保持一致。"""
 

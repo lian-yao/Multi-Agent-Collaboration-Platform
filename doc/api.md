@@ -1285,9 +1285,14 @@ latin-1 编码报错）。
 `GET /api/v1/workspaces/{workspace_id}/tree`、`DELETE /api/v1/workspaces/{workspace_id}`
 
 工作区的授权单位是**宿主固定根下的子目录**（`WORKSPACE_HOST_ROOT` 挂进容器的 `/workspace`，
-见 ADR-033）：接口不接收宿主绝对路径，`path` 一律相对工作区根。阶段 1 只提供
-`read_only` 档位；绑定之后该会话的 Agent 多出 `list_work_files` / `read_work_file`
-两个**会话级**工具（与 §5.3 的静态目录无关——那份目录列的是进程级注册表）。
+见 ADR-033）：接口不接收宿主绝对路径，`path` 一律相对工作区根。绑定之后该会话的 Agent
+多出 `list_work_files` / `read_work_file` 两个**会话级**工具（与 §5.3 的静态目录无关——
+那份目录列的是进程级注册表）。
+
+阶段 2 起 `workspace_write` 档位可用，提档后**再**多出三个**非破坏性**写工具：
+`write_work_file`（只能新建）、`make_work_dir`、`move_work_entry`（目标已存在时拒绝）。
+覆盖与删除按 ADR-033 §6 必须人工审批，随审批链路在阶段 3 上线——因此现在**没有**删除
+工具，`write_work_file(overwrite=true)` 也返回 409 `WORKSPACE_APPROVAL_REQUIRED`。
 
 `POST /api/v1/workspaces` 请求：
 
@@ -1296,8 +1301,8 @@ latin-1 编码报错）。
 ```
 
 - `path` 省略或为空时默认绑到 `sessions/<session_id>/`；目录不存在时由**平台**创建。
-- `mode` 只接受 `read_only`；`workspace_write` 返回 422 `WORKSPACE_MODE_UNAVAILABLE`
-  （阶段 2 与写/删/移动工具一起开放，不在界面上给假开关）。
+- `mode` 取 `read_only` / `workspace_write`；创建时即可选写档位，也可用下面的 `PATCH` 改。
+  **档位只能由人调整**（ADR-033 §3），Agent 没有提权通道：它不会成为工具。
 
 响应 `201`（`GET /workspaces/{id}` 同形；列表为 `{"items": [...], "total": n}`）：
 
@@ -1311,13 +1316,24 @@ latin-1 编码报错）。
   "quota": { "max_file_bytes": 5242880, "max_total_bytes": 268435456, "max_entries": 2000 },
   "usage": { "available": true, "total_bytes": 0, "entries": 0, "truncated": false, "scan_limit": 10000 },
   "created_by": null,
+  "updated_by": null,
   "created_at": "2026-09-23T02:00:00Z"
 }
 ```
 
 - `usage` 按需扫描工作区目录得到（不落库，避免多写者下的计数漂移）；目录被删或工作区根
   不可用时为 `{"available": false, "reason": "…"}`，而不是整体 500。
-- `quota` 里阶段 1 真正生效的是 `max_file_bytes`（单次读取上限）；另两项供阶段 2 使用。
+- `quota` 三项都已生效：`max_file_bytes` 限读取与单次写入，`max_total_bytes` /
+  `max_entries` 在写之前校验（超限返回 409 `WORKSPACE_QUOTA_EXCEEDED`，错误里带当前用量）。
+
+`PATCH /api/v1/workspaces/{workspace_id}`：
+
+```json
+{ "mode": "workspace_write", "name": "项目工作区" }
+```
+
+字段省略表示不改动；响应与 `GET` 同形。提档会让该会话的 Agent 多出三个写工具，属于一次
+**显式人工授权**，所以服务端记 `workspace.updated` 日志并在 `updated_by` 里回显操作者。
 
 `GET /api/v1/workspaces/{workspace_id}/tree?path=&depth=1`：
 
@@ -1352,8 +1368,9 @@ latin-1 编码报错）。
 | 404 | `SESSION_NOT_FOUND` | 会话不存在（`session_id` 非空时先校验） |
 | 404 | `WORKSPACE_NOT_FOUND` | 工作区不存在 |
 | 409 | `WORKSPACE_EXISTS` | 该相对路径已登记 |
+| 409 | `WORKSPACE_QUOTA_EXCEEDED` | 超过单文件 / 总字节 / 条目配额 |
+| 409 | `WORKSPACE_APPROVAL_REQUIRED` | 覆盖或删除需要人工审批（阶段 3 提供） |
 | 422 | `WORKSPACE_PATH_REJECTED` | 路径非法或越出工作区 |
-| 422 | `WORKSPACE_MODE_UNAVAILABLE` | 档位未开放（`workspace_write`） |
 | 422 | `VALIDATION_ERROR` | 其它取值问题（例如 `mode` 取值无效） |
 | 503 | `WORKSPACE_DISABLED` | `WORKSPACE_ENABLED=false` |
 | 503 | `WORKSPACE_ROOT_UNAVAILABLE` | 工作区根不存在或不是目录 |
@@ -1366,7 +1383,6 @@ latin-1 编码报错）。
 | 方法 | 路径 | 规划用途 |
 | --- | --- | --- |
 | POST | `/api/v1/agents/{agent_id}/run` | 单 Agent 调试执行 |
-| PATCH | `/api/v1/workspaces/{workspace_id}` | 改档位（`read_only` ⇄ `workspace_write`）与配额 |
 | GET | `/api/v1/sessions/{session_id}/approvals` | 列出本会话的审批记录（含待决策） |
 | POST | `/api/v1/approvals/{approval_id}/decision` | 批准或拒绝一次待决策动作 |
 | GET | `/api/v1/config/egress` | 出网策略只读状态（模式、豁免、拒绝计数） |
@@ -1384,19 +1400,18 @@ POST /api/v1/agents/{agent_id}/run
 
 `PATCH /api/v1/config/agents/{agent_id}` 已按上述要求实现，见 §5.7。
 
-### 6.2 工作区的剩余能力与审批（规划契约，ADR-033）
+### 6.2 工作区的删除/覆盖与审批（规划契约，ADR-033）
 
-工作区的**登记、列表、目录树、读取**已实现，见 §5.19。这一节记录尚未落地的部分：
+工作区的**登记、列表、目录树、读取、提档与三个非破坏性写工具**已实现，见 §5.19。
+这一节记录尚未落地的部分——**破坏性动作**：
 
-```json
-PATCH /api/v1/workspaces/{workspace_id}
-{ "mode": "workspace_write" }
-```
+- `delete_work_entry`（软删除到工作区内的 `.trash/`，保留期后清理）；
+- `write_work_file(overwrite=true)` 与 `move_work_entry` 的覆盖语义（目标已存在时改判为
+  "覆盖"而不是直接拒绝）。
 
-- `mode` 只有 `read_only` / `workspace_write` 两个取值；**没有工作区之外的档位**，
-  需要更大的范围只能由管理员改 `WORKSPACE_HOST_ROOT` 并重建 backend（ADR-033 §2）。
-- 档位调整只能由**人**在接口或 Web UI 上做；Agent 没有提权通道，越界访问一律拒绝并记审计。
-- `PATCH` 与写/删/移动工具（阶段 2）一起上线，在那之前 `workspace_write` 由 §5.19 拒绝。
+两者都必须先有人工审批（ADR-033 §6），所以和审批链路一起做。审批复用既有的
+会话/Workflow 暂停恢复：命中时写 `approvals` 记录、把该次执行置 `paused`、前端弹卡片，
+用户允许或拒绝后 `resume`。
 
 审批（删除与覆盖命中时产生，复用既有会话/Workflow 暂停恢复）：
 

@@ -6,12 +6,13 @@
 
 from app.workspace.config import WorkspaceSettings, get_workspace_settings
 from app.workspace.errors import (
+    WorkspaceApprovalRequired,
     WorkspaceDisabled,
     WorkspaceError,
     WorkspaceExistsError,
-    WorkspaceModeUnavailable,
     WorkspaceNotFoundError,
     WorkspacePathError,
+    WorkspaceQuotaExceeded,
     WorkspaceRootUnavailable,
 )
 from app.workspace.paths import normalize_relative, resolve_in_workspace, resolve_root
@@ -21,18 +22,20 @@ from app.workspace.service import (
     delete_workspace,
     get_workspace,
     list_workspaces,
+    update_workspace,
     workspace_source,
     workspace_tree,
 )
 
 __all__ = [
     "LocalWorkspaceSource",
+    "WorkspaceApprovalRequired",
     "WorkspaceDisabled",
     "WorkspaceError",
     "WorkspaceExistsError",
-    "WorkspaceModeUnavailable",
     "WorkspaceNotFoundError",
     "WorkspacePathError",
+    "WorkspaceQuotaExceeded",
     "WorkspaceRootUnavailable",
     "WorkspaceSettings",
     "create_workspace",
@@ -43,6 +46,7 @@ __all__ = [
     "normalize_relative",
     "resolve_in_workspace",
     "resolve_root",
+    "update_workspace",
     "workspace_source",
     "workspace_tree",
 ]

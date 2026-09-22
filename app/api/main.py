@@ -27,12 +27,13 @@ from app.config import get_settings
 from app.core import mcp_registry, model_registry
 from app.workspace import service as workspace_service
 from app.workspace import (
+    WorkspaceApprovalRequired,
     WorkspaceDisabled,
     WorkspaceError,
     WorkspaceExistsError,
-    WorkspaceModeUnavailable,
     WorkspaceNotFoundError,
     WorkspacePathError,
+    WorkspaceQuotaExceeded,
     WorkspaceRootUnavailable,
 )
 from app.core.agent_config import (
@@ -979,7 +980,8 @@ _WORKSPACE_ERRORS = (
     WorkspaceDisabled,
     WorkspaceRootUnavailable,
     WorkspacePathError,
-    WorkspaceModeUnavailable,
+    WorkspaceQuotaExceeded,
+    WorkspaceApprovalRequired,
     WorkspaceError,
 )
 
@@ -997,9 +999,13 @@ def _workspace_api_error(exc: Exception) -> ApiError:
         return ApiError("WORKSPACE_ROOT_UNAVAILABLE", str(exc), 503)
     if isinstance(exc, WorkspacePathError):
         return ApiError("WORKSPACE_PATH_REJECTED", str(exc), status.HTTP_422_UNPROCESSABLE_ENTITY)
-    if isinstance(exc, WorkspaceModeUnavailable):
+    if isinstance(exc, WorkspaceQuotaExceeded):
         return ApiError(
-            "WORKSPACE_MODE_UNAVAILABLE", str(exc), status.HTTP_422_UNPROCESSABLE_ENTITY
+            "WORKSPACE_QUOTA_EXCEEDED", str(exc), status.HTTP_409_CONFLICT
+        )
+    if isinstance(exc, WorkspaceApprovalRequired):
+        return ApiError(
+            "WORKSPACE_APPROVAL_REQUIRED", str(exc), status.HTTP_409_CONFLICT
         )
     if isinstance(exc, WorkspaceError):
         return ApiError(
@@ -2226,10 +2232,12 @@ def discover_mcp_server(server_id: str) -> McpDiscoveryResponse:
 
 
 # --------------------------------------------------------------------------- #
-# §5.19 工作区（只读档，ADR-033 阶段 1）
+# §5.19 工作区（ADR-033）
 #
-# 阶段 1 只提供 read_only：写/删/移动在阶段 2、审批在阶段 3。因此这里没有 PATCH，
-# 也没有"提档"接口——存下来却不生效的档位是假开关，宁可先不给。
+# 阶段 2：`workspace_write` 档位可用，放开**非破坏性**写操作（新建 / 写入 / 建目录 /
+# 移动）。覆盖与删除按 ADR-033 §6 要人工审批，与审批链路一起在阶段 3，因此现在既没有
+# `delete_work_entry`，`write_work_file(overwrite=true)` 也会被拒（409
+# `WORKSPACE_APPROVAL_REQUIRED`）。**Agent 没有提权通道**：档位只能由人走 PATCH 调整。
 # --------------------------------------------------------------------------- #
 
 
@@ -2259,6 +2267,7 @@ class WorkspaceResponse(BaseModel):
     quota: WorkspaceQuota
     usage: WorkspaceUsage | None = None
     created_by: str | None = None
+    updated_by: str | None = None
     created_at: datetime | None = None
 
 
@@ -2298,6 +2307,16 @@ class WorkspaceCreateRequest(BaseModel):
     session_id: str | None = None
     path: str | None = Field(default=None, max_length=500)
     mode: Literal["read_only", "workspace_write"] = "read_only"
+    name: str | None = Field(default=None, max_length=100)
+
+
+class WorkspacePatchRequest(BaseModel):
+    """`PATCH /api/v1/workspaces/{workspace_id}`（`doc/api.md` §5.19）。
+
+    这是**人的动作**（ADR-033 §3）：Agent 没有提权通道，提档只能从这里或 Web UI 发起。
+    """
+
+    mode: Literal["read_only", "workspace_write"] | None = None
     name: str | None = Field(default=None, max_length=100)
 
 
@@ -2365,6 +2384,29 @@ def read_workspace_tree(
         lambda: workspace_service.workspace_tree(workspace_id, path=path, depth=depth)
     )
     return WorkspaceTreeResponse.model_validate(data)
+
+
+@app.patch("/api/v1/workspaces/{workspace_id}", response_model=WorkspaceResponse)
+def patch_workspace_registry(
+    workspace_id: str,
+    payload: WorkspacePatchRequest,
+    request: Request,
+) -> WorkspaceResponse:
+    """调整档位或名称（`doc/api.md` §5.19）。
+
+    提档（`read_only` → `workspace_write`）会让该会话的 Agent 多出三个写工具，
+    因此这是一次**显式的人工授权**：记 `workspace.updated` 日志并带操作者。
+    """
+
+    data = _workspace_call(
+        lambda: workspace_service.update_workspace(
+            workspace_id,
+            mode=payload.mode,
+            name=payload.name,
+            actor=request.headers.get("X-Request-ID"),
+        )
+    )
+    return WorkspaceResponse.model_validate(data)
 
 
 @app.delete("/api/v1/workspaces/{workspace_id}", status_code=204)

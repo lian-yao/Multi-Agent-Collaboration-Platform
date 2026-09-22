@@ -22,12 +22,13 @@ from app.core import checkpoint
 from app.observability.logging import get_logger, log_event
 from app.workspace.config import WorkspaceSettings, get_workspace_settings
 from app.workspace.errors import (
+    WorkspaceApprovalRequired,
     WorkspaceDisabled,
     WorkspaceError,
     WorkspaceExistsError,
-    WorkspaceModeUnavailable,
     WorkspaceNotFoundError,
     WorkspacePathError,
+    WorkspaceQuotaExceeded,
     WorkspaceRootUnavailable,
 )
 from app.workspace.paths import (
@@ -45,8 +46,12 @@ DEFAULT_SESSION_DIR = "sessions"
 ALL_MODES = ("read_only", "workspace_write")
 """数据模型允许的档位（`doc/data-model.md` §3.3）。"""
 
-AVAILABLE_MODES = ("read_only",)
-"""阶段 1 真正生效的档位。`workspace_write` 在阶段 2 开放。"""
+AVAILABLE_MODES = ("read_only", "workspace_write")
+"""当前真正生效的档位。
+
+阶段 2 起 `workspace_write` 可用，但只放开**非破坏性**写操作（新建 / 写入 / 建目录 /
+移动）；覆盖与删除按 ADR-033 §6 要人工审批，与审批链路一起在阶段 3 落地。
+"""
 
 
 def _resolved_settings(settings: WorkspaceSettings | None) -> WorkspaceSettings:
@@ -70,11 +75,6 @@ def _validate_mode(mode: str | None) -> str:
     resolved = (mode or "read_only").strip() or "read_only"
     if resolved not in ALL_MODES:
         raise WorkspaceError(f"mode 取值无效：{resolved}（可选 {' / '.join(ALL_MODES)}）")
-    if resolved not in AVAILABLE_MODES:
-        raise WorkspaceModeUnavailable(
-            "写档位（workspace_write）还未开放，当前只提供 read_only；"
-            "阶段 2 会连同写/删/移动工具一起上线（ADR-033 §2）"
-        )
     return resolved
 
 
@@ -159,6 +159,47 @@ def list_workspaces(
     return {"items": items, "total": len(items)}
 
 
+def update_workspace(
+    workspace_id: str,
+    *,
+    mode: str | None = None,
+    name: str | None = None,
+    actor: str | None = None,
+    settings: WorkspaceSettings | None = None,
+) -> dict[str, Any]:
+    """调整档位或展示名（`doc/api.md` §5.19）。
+
+    这是**人的动作**：ADR-033 §3 明确规定 Agent 没有提权通道。所以提档只出现在 API /
+    Web UI 上，永远不是一个工具——否则提示注入就能通过"申请提权"的卡片说服人放权。
+    """
+
+    resolved_settings = _resolved_settings(settings)
+    _ensure_enabled(resolved_settings)
+    row = checkpoint.get_workspace(workspace_id)
+    if row is None:
+        raise WorkspaceNotFoundError(workspace_id)
+
+    fields: dict[str, Any] = {}
+    if mode is not None:
+        fields["mode"] = _validate_mode(mode)
+    if name is not None:
+        fields["name"] = name
+    if not fields:
+        return _view(row, settings=resolved_settings)
+
+    updated = checkpoint.update_workspace(workspace_id, updated_by=actor, **fields)
+    if updated is None:
+        raise WorkspaceNotFoundError(workspace_id)
+    log_event(
+        logger,
+        "workspace.updated",
+        workspace_id=workspace_id,
+        fields=",".join(sorted(fields)),
+        actor=actor,
+    )
+    return _view(updated, settings=resolved_settings)
+
+
 def get_workspace(
     workspace_id: str, *, settings: WorkspaceSettings | None = None
 ) -> dict[str, Any]:
@@ -192,6 +233,7 @@ def _view(
         "name": row.get("name"),
         "quota": {**default_quota(settings), **(row.get("quota") or {})},
         "created_by": row.get("created_by"),
+        "updated_by": row.get("updated_by"),
         "created_at": row.get("created_at"),
     }
     if with_usage:
@@ -392,6 +434,10 @@ class LocalWorkspaceSource:
     def workspace(self) -> dict[str, Any]:
         return dict(self._row)
 
+    @property
+    def mode(self) -> str:
+        return str(self._row.get("mode") or "read_only")
+
     def root(self) -> Path:
         return resolve_in_workspace(self._settings.root, self._row["path"], expect="dir")
 
@@ -446,6 +492,165 @@ class LocalWorkspaceSource:
             "text": text[:limit] if truncated else text,
             "truncated": truncated,
         }
+
+    # -- 写（阶段 2：只放开非破坏性动作） ---------------------------------- #
+
+    def _require_write_mode(self) -> None:
+        if self.mode != "workspace_write":
+            raise WorkspaceError(
+                "当前是只读档位（read_only），不能写入；"
+                "需要写权限请由使用者把工作区提档到 workspace_write（ADR-033 §3）"
+            )
+
+    def write_file(
+        self, path: str, text: str, *, overwrite: bool = False
+    ) -> dict[str, Any]:
+        """写入一个新文件；覆盖已有文件在阶段 3（审批）之前一律拒绝。"""
+
+        self._require_write_mode()
+        base = self.root()
+        target = resolve_in_workspace(base, path)
+        if target.is_dir():
+            raise WorkspacePathError(f"目标是目录，不能写文件：{path}")
+        if target.exists() and overwrite:
+            # 覆盖是破坏性动作：ADR-033 §6 要求人工审批，而审批在阶段 3。
+            # 在那之前宁可让模型换个文件名，也不打开一个"没有审批的覆盖"。
+            raise WorkspaceApprovalRequired(
+                f"覆盖已有文件需要人工审批（阶段 3 提供）：{path}；请改用新的文件名"
+            )
+        if target.exists():
+            raise WorkspaceExistsError(
+                f"文件已存在：{path}；覆盖需要人工审批（阶段 3），请改用新的文件名"
+            )
+
+        payload = text.encode("utf-8")
+        if len(payload) > self._settings.max_file_bytes:
+            raise WorkspaceQuotaExceeded(
+                f"内容超过单文件上限（{len(payload)} > {self._settings.max_file_bytes} 字节）：{path}"
+            )
+        created_dirs = _missing_parents(base, target.parent)
+        self._ensure_quota(
+            extra_bytes=len(payload), extra_entries=1 + len(created_dirs), path=path
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            # `x` 是独占创建：并发下第二个写者拿到 FileExistsError，而不是静默覆盖。
+            # `newline=""` 关掉平台换行转换，落盘字节与入参一致。
+            with open(target, "x", encoding="utf-8", newline="") as handle:
+                handle.write(text)
+        except FileExistsError as exc:
+            raise WorkspaceExistsError(
+                f"文件已存在：{path}（覆盖需要人工审批）"
+            ) from exc
+        except OSError as exc:
+            raise WorkspaceError(f"写入失败：{path}（{exc}）") from exc
+        log_event(
+            logger,
+            "workspace.write",
+            workspace_id=self._row["id"],
+            path=relative_to_root(base, target),
+            bytes=len(payload),
+        )
+        return {
+            "path": relative_to_root(base, target),
+            "size_bytes": len(payload),
+            "created_dirs": [relative_to_root(base, item) for item in created_dirs],
+        }
+
+    def make_dir(self, path: str) -> dict[str, Any]:
+        self._require_write_mode()
+        base = self.root()
+        target = resolve_in_workspace(base, path)
+        if target.exists():
+            raise WorkspaceExistsError(f"已经存在：{path}")
+        created_dirs = _missing_parents(base, target)
+        self._ensure_quota(
+            extra_bytes=0, extra_entries=len(created_dirs), path=path
+        )
+        try:
+            target.mkdir(parents=True, exist_ok=False)
+        except FileExistsError as exc:
+            raise WorkspaceExistsError(f"已经存在：{path}") from exc
+        except OSError as exc:
+            raise WorkspaceError(f"创建目录失败：{path}（{exc}）") from exc
+        log_event(
+            logger,
+            "workspace.mkdir",
+            workspace_id=self._row["id"],
+            path=relative_to_root(base, target),
+        )
+        return {
+            "path": relative_to_root(base, target),
+            "created_dirs": [relative_to_root(base, item) for item in created_dirs],
+        }
+
+    def move_entry(self, source: str, target: str) -> dict[str, Any]:
+        self._require_write_mode()
+        base = self.root()
+        src = resolve_in_workspace(base, source)
+        dst = resolve_in_workspace(base, target)
+        if not src.exists():
+            raise WorkspacePathError(f"源不存在：{source}")
+        if dst.exists():
+            raise WorkspaceExistsError(f"目标已存在：{target}（覆盖需要人工审批）")
+        if src.is_dir() and dst.is_relative_to(src):
+            raise WorkspacePathError(f"不能把目录移动到它自己的子路径下：{target}")
+        created_dirs = _missing_parents(base, dst.parent)
+        self._ensure_quota(
+            extra_bytes=0, extra_entries=len(created_dirs), path=target
+        )
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            src.rename(dst)
+        except FileExistsError as exc:
+            raise WorkspaceExistsError(f"目标已存在：{target}") from exc
+        except OSError as exc:
+            raise WorkspaceError(f"移动失败：{source} → {target}（{exc}）") from exc
+        log_event(
+            logger,
+            "workspace.move",
+            workspace_id=self._row["id"],
+            source=relative_to_root(base, src),
+            target=relative_to_root(base, dst),
+        )
+        return {
+            "source": relative_to_root(base, src),
+            "target": relative_to_root(base, dst),
+        }
+
+    def _ensure_quota(
+        self, *, extra_bytes: int, extra_entries: int, path: str
+    ) -> dict[str, Any]:
+        """写之前查配额；超限时把**当前用量与上限**一起说出来。
+
+        `scan_usage` 在条目数超过 `scan_limit` 时会截断，此时用量是**下界**——
+        仍然按它拦（宁可保守），因此错误信息里的数字可能偏小。
+        """
+
+        usage = scan_usage(self.root(), settings=self._settings)
+        limits = default_quota(self._settings)
+        if usage["total_bytes"] + extra_bytes > limits["max_total_bytes"]:
+            raise WorkspaceQuotaExceeded(
+                f"超过目录总字节配额：当前 {usage['total_bytes']} + 本次 {extra_bytes} "
+                f"> 上限 {limits['max_total_bytes']} 字节（{path}）"
+            )
+        if usage["entries"] + extra_entries > limits["max_entries"]:
+            raise WorkspaceQuotaExceeded(
+                f"超过目录条目配额：当前 {usage['entries']} + 本次 {extra_entries} "
+                f"> 上限 {limits['max_entries']}（{path}）"
+            )
+        return usage
+
+
+def _missing_parents(base: Path, directory: Path) -> list[Path]:
+    """从 `base` 到 `directory` 之间尚不存在的层级（用于条目配额与回执）。"""
+
+    missing: list[Path] = []
+    current = directory
+    while current != base and current.is_relative_to(base) and not current.exists():
+        missing.append(current)
+        current = current.parent
+    return missing
 
 
 def _open_readonly(path: Path) -> Any:
@@ -529,6 +734,7 @@ __all__ = [
     "iter_workspace_entries",
     "list_workspaces",
     "scan_usage",
+    "update_workspace",
     "workspace_source",
     "workspace_tree",
 ]
