@@ -83,6 +83,7 @@ class EgressTarget:
     addresses: tuple[str, ...]
     purpose: str
     private_exempt: bool
+    via_proxy: bool = False
 
     @property
     def host_header(self) -> str:
@@ -200,11 +201,15 @@ class EgressPolicy:
                 "not_allowlisted", f"域名不在白名单里（allowlist 模式）：{host}", host=host
             )
 
-        addresses = self._addresses(host)
+        via_proxy = bool(self.settings.proxy_url)
+        # 有代理时**不在本地解析**：代理才是硬边界，而且容器可能处在一个外网 DNS
+        # 不通的 internal 网络里（客户端只需解析代理本身）。域名与端口规则仍然在本地跑，
+        # 好处是拒绝能给出准确原因、不必等一次代理往返。
+        addresses = () if via_proxy else self._addresses(host)
         exempt = host in self._internal or raw_host in self._internal
         if not exempt and purpose == "model" and self.settings.model_exempt:
             exempt = True
-        if not exempt:
+        if not exempt and not via_proxy:
             for address in addresses:
                 if is_blocked_address(address):
                     self._deny_and_raise(
@@ -222,6 +227,7 @@ class EgressPolicy:
             addresses=addresses,
             purpose=purpose,
             private_exempt=exempt,
+            via_proxy=via_proxy,
         )
         query = f"?{parsed.query}" if parsed.query else ""
         log_event(
@@ -242,6 +248,7 @@ class EgressPolicy:
             addresses=target.addresses,
             purpose=target.purpose,
             private_exempt=target.private_exempt,
+            via_proxy=target.via_proxy,
         )
 
     def _addresses(self, host: str) -> tuple[str, ...]:
@@ -371,9 +378,14 @@ def http_get(
     current = url
     for _hop in range(settings.max_redirects + 1):
         target = resolved_policy.evaluate(current, purpose=purpose)
-        status, headers, body, truncated = _request_once(
-            target, timeout=deadline, max_bytes=limit
-        )
+        if target.via_proxy:
+            status, headers, body, truncated = _request_via_proxy(
+                target, proxy=settings.proxy_url, timeout=deadline, max_bytes=limit
+            )
+        else:
+            status, headers, body, truncated = _request_once(
+                target, timeout=deadline, max_bytes=limit
+            )
         location = headers.get("location")
         if status in {301, 302, 303, 307, 308} and location:
             current = urljoin(current, location)
@@ -416,6 +428,56 @@ def _request_once(
         headers = {key.lower(): value for key, value in response.getheaders()}
         truncated = len(raw) > max_bytes
         return response.status, headers, raw[:max_bytes], truncated
+    finally:
+        connection.close()
+
+
+def _request_via_proxy(
+    target: EgressTarget, *, proxy: str, timeout: float, max_bytes: int
+) -> tuple[int, dict[str, str], bytes, bool]:
+    """经代理取一次：HTTP 用绝对 URI，HTTPS 用 CONNECT 隧道。
+
+    这里**不做 DNS**：客户端只解析代理主机（compose 服务名），目标域名与地址判定都在
+    代理侧完成——这也是代理能解决「MCP / 模型 SDK 内部无法钉扎」的原因：那些 SDK
+    只认识 `HTTP_PROXY`/`HTTPS_PROXY`，而它们发出的请求会整段落到代理手里。
+    """
+
+    parsed = urlsplit(proxy)
+    proxy_host = parsed.hostname or ""
+    proxy_port = parsed.port or 8080
+    if not proxy_host:
+        raise EgressDenied("proxy", f"EGRESS_PROXY_URL 不是合法地址：{proxy}")
+
+    connection = http.client.HTTPConnection(proxy_host, proxy_port, timeout=timeout)
+    try:
+        if target.scheme == "https":
+            connection.set_tunnel(target.host, target.port)
+            connection.connect()
+            tunnel = connection.sock
+            if tunnel is None:  # pragma: no cover - connect 之后必有 socket
+                raise EgressDenied("proxy", f"代理隧道建立失败：{proxy}")
+            wrapped = ssl.create_default_context().wrap_socket(
+                tunnel, server_hostname=target.host
+            )
+            connection.sock = wrapped
+            request_target = target.path
+        else:
+            request_target = target.url
+        connection.request(
+            "GET",
+            request_target,
+            headers={
+                "Host": target.host_header,
+                "User-Agent": USER_AGENT,
+                "Accept-Encoding": "identity",
+            },
+        )
+        response = connection.getresponse()
+        raw = response.read(max_bytes + 1)
+        headers = {key.lower(): value for key, value in response.getheaders()}
+        return response.status, headers, raw[:max_bytes], len(raw) > max_bytes
+    except OSError as exc:
+        raise EgressDenied("proxy", f"代理不可达或不接受该目标：{proxy}（{exc}）") from exc
     finally:
         connection.close()
 

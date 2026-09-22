@@ -36,6 +36,7 @@ cd deploy
 | `jaeger` | 追踪可视化 |
 | `prometheus` | 指标采集 |
 | `search-gateway` | Agent 的网页搜索出口：把可达的 Bing RSS 转成 `web_search` 要的 JSON 契约（ADR-032）。**不发布宿主端口**，只服务同网络的 backend |
+| `egress-proxy` | 出网策略的硬边界（ADR-034 §4）：HTTP 绝对 URI 转发 + HTTPS `CONNECT` 隧道，两种形态都先经同一套「解析 → 私网判定 → 钉扎」再转发。**不发布宿主端口**；内部服务由客户端直连（`NO_PROXY`），不进它 |
 
 启动后访问：
 
@@ -308,6 +309,10 @@ bind mount），`WORKSPACE_ROOT` 是**容器内**的挂载点（应用读的是�
 | `EGRESS_ALLOWED_PORTS` | 已实现 | 默认 `443`；compose 里放宽到 `443,8800`（search-gateway 自己的端口）。**端口与私网豁免是两件事** |
 | `EGRESS_MODEL_EXEMPT` | 已实现 | 默认 `true`：模型流量豁免私网判定，Ollama（`host.docker.internal`）与内网自建网关继续可用；仍受 scheme/端口/域名黑名单约束 |
 | `EGRESS_MAX_REDIRECTS` / `EGRESS_TIMEOUT_SECONDS` / `EGRESS_MAX_RESPONSE_BYTES` | 已实现 | 重定向跳数（5）、超时（8s）与响应体上限（1 MB） |
+| `EGRESS_PROXY_URL` | 已实现 | 强制出网代理（compose 默认 `http://egress-proxy:8888`）。设置后应用侧不再本地解析/判私网（交给代理），但仍执行 scheme/端口/域名规则 |
+| `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` | 已实现 | 给 MCP 与模型这类**自建连接的 SDK** 用（httpx `trust_env`）。`NO_PROXY` 必须排除内部服务与内网模型端点（compose 默认已含 Dapr/Redis/PG/Jaeger/search-gateway/egress-proxy 与 `host.docker.internal`） |
+| `SANDBOX_EGRESS_PROXY_URL` | 已实现 | 沙箱联网时注入给沙箱的代理地址；配合 `SANDBOX_NETWORK_ENABLED=true` |
+| `SANDBOX_EGRESS_NETWORK` | 已实现 | 沙箱联网时接入的**内部**网络名（compose 里 `internal: true`）。为空时沙箱会用默认网络直连，日志会告警 |
 
 两条容易误读的点：`EGRESS_INTERNAL_HOSTS` 放行的是**列出的服务**，不是"整个内网"；
 模型豁免放行的是**模型这一类调用**，不是"任何指向内网地址的请求"（ADR-034 §3）。

@@ -82,6 +82,24 @@ class SandboxSettings(BaseSettings):
     否则 `nobody` 没有写权限；Docker Desktop 的 bind mount 由虚拟文件系统接管，影响有限。
     """
 
+    egress_network: str = ""
+    """允许沙箱联网时要接入的**内部**网络名（compose 网络的完整名字）。
+
+    `SANDBOX_NETWORK_ENABLED=true` 且这里非空时，沙箱只接这一张网；这张网在 compose 里是
+    `internal: true`（没有默认路由），所以它唯一的出口就是同一张网上的 egress 代理——
+    "沙箱能联网"于是等于"沙箱能经代理访问公网"，而不是"沙箱直接连出去"。
+    """
+
+    egress_proxy_url: str = ""
+    """注入给沙箱的 `HTTP_PROXY` / `HTTPS_PROXY`。
+
+    沙箱里的代码要联网就得走代理；`NO_PROXY` 固定排除回环，避免把沙箱自己的 localhost
+    也绕进代理。
+    """
+
+    egress_no_proxy: str = "localhost,127.0.0.1,::1"
+    """沙箱的 `NO_PROXY`（默认只排除回环）。"""
+
 
 @lru_cache
 def get_sandbox_settings() -> SandboxSettings:

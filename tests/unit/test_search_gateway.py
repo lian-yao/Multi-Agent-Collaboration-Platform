@@ -207,6 +207,25 @@ def test_health_probe_does_not_touch_the_upstream(monkeypatch):
     assert payload == {"status": "ok"}
 
 
+def test_upstream_goes_through_the_proxy_when_configured(monkeypatch):
+    """网关自己也要受出网策略约束（ADR-034 第 4 条）：靠代理环境变量接入。"""
+
+    monkeypatch.setenv("HTTPS_PROXY", "http://egress-proxy:8888")
+
+    handlers = [type(handler).__name__ for handler in search_gateway._build_opener().handlers]
+
+    assert "ProxyHandler" in handlers
+
+
+def test_upstream_uses_no_proxy_by_default(monkeypatch):
+    for name in search_gateway.PROXY_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+
+    handlers = [type(handler).__name__ for handler in search_gateway._build_opener().handlers]
+
+    assert "ProxyHandler" not in handlers
+
+
 def test_gateway_reports_upstream_failure_as_502(monkeypatch):
     """上游解析失败不能伪装成「搜到了但没内容」——工具要能按失败重试/降级。"""
 

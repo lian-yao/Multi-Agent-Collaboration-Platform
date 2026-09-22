@@ -215,3 +215,47 @@ def test_ipv4_mapped_helper_is_consistent():
     assert is_blocked_address("::ffff:10.0.0.1") is True
     assert is_blocked_address("::ffff:93.184.216.34") is False
     assert is_blocked_address("not-an-ip") is True
+
+
+# --------------------------------------------------------------------------- #
+# 强制代理模式（ADR-034 §4）
+# --------------------------------------------------------------------------- #
+
+
+def test_proxy_mode_skips_local_dns_but_keeps_host_rules():
+    """有代理时不本地解析（代理才是硬边界），但 scheme/端口/域名规则仍在本地跑。"""
+
+    def explode(_host):
+        pytest.fail("代理模式下不应该做本地 DNS 解析")
+
+    policy = _policy(
+        proxy_url="http://egress-proxy:8888",
+        resolver=explode,
+        deny_hosts="blocked.example.com",
+        allowed_ports="443",
+    )
+
+    target = policy.evaluate("https://example.com/")
+    assert target.via_proxy is True
+    assert target.addresses == ()
+    assert target.private_exempt is False, "代理模式下本地不做私网判定，但也不声称豁免"
+
+    with pytest.raises(EgressDenied) as denied_host:
+        policy.evaluate("https://blocked.example.com/")
+    assert denied_host.value.reason == "denied_host"
+
+    with pytest.raises(EgressDenied) as denied_port:
+        policy.evaluate("https://example.com:9999/")
+    assert denied_port.value.reason == "port"
+
+
+def test_proxy_mode_still_rejects_illegal_schemes_and_userinfo():
+    policy = _policy(proxy_url="http://egress-proxy:8888")
+
+    with pytest.raises(EgressDenied) as scheme:
+        policy.evaluate("ftp://example.com/")
+    assert scheme.value.reason == "scheme"
+
+    with pytest.raises(EgressDenied) as userinfo:
+        policy.evaluate("https://user:pass@example.com/")
+    assert userinfo.value.reason == "userinfo"

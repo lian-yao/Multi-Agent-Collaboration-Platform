@@ -213,6 +213,27 @@ class DockerSandbox:
             "user": self._user(),
             "labels": {"macp.role": "tool-sandbox"},
         }
+        if self._settings.network_enabled:
+            # 联网的沙箱只接**内部**网络（compose 里 `internal: true`，没有默认路由），
+            # 再配上代理环境变量：它唯一的出口就是 egress 代理。这样"允许沙箱联网"
+            # 就不会退化成"把沙箱直接接到公网"。
+            if self._settings.egress_network:
+                options["network"] = self._settings.egress_network
+            else:
+                logger.warning(
+                    "sandbox.network_without_internal_net "
+                    "network_enabled=true 但 SANDBOX_EGRESS_NETWORK 为空："
+                    "沙箱将使用默认网络，直连不受代理约束"
+                )
+            if self._settings.egress_proxy_url:
+                proxy = self._settings.egress_proxy_url
+                options["environment"] = {
+                    "HTTP_PROXY": proxy,
+                    "HTTPS_PROXY": proxy,
+                    "http_proxy": proxy,
+                    "https_proxy": proxy,
+                    "NO_PROXY": self._settings.egress_no_proxy,
+                }
         if workspace is not None and self._settings.workspace_mount != "none":
             options["volumes"] = {
                 self._workspace_bind_source(workspace): {
