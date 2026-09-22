@@ -24,7 +24,7 @@ import pytest
 
 from app.sandbox.config import SandboxSettings
 from app.sandbox.docker_runtime import TIMEOUT_EXIT_CODE, DockerSandbox
-from app.sandbox.runtime import SandboxUnavailable
+from app.sandbox.runtime import SandboxUnavailable, SandboxWorkspace
 
 CODE = "print(6 * 7)"
 
@@ -535,3 +535,119 @@ def test_shell_language_uses_sh_c() -> None:
     _sandbox(client).run("echo hi", language="shell")
 
     assert client.containers.commands[0] == ["sh", "-c", "echo hi"]
+
+
+# --- 工作区挂载（ADR-033 §7） ----------------------------------------------
+
+
+def test_workspace_is_mounted_for_the_write_tier(monkeypatch):
+    """写档位：工作区挂进来且可写，但禁网/只读根/非 root 一个都不能少。"""
+
+    client = _install_fake_docker(monkeypatch)
+    sandbox = DockerSandbox(_settings(workspace_host_root="/host/ws/phase"))
+
+    sandbox.run(
+        CODE,
+        workspace=SandboxWorkspace(container_path="/workspace/phase", mode="rw"),
+    )
+
+    _, kwargs = client.run_calls[0]
+    assert kwargs["volumes"] == {
+        "/host/ws/phase": {"bind": "/workspace/phase", "mode": "rw"}
+    }
+    assert kwargs["working_dir"] == "/workspace/phase"
+    assert kwargs["network_disabled"] is True
+    assert kwargs["read_only"] is True
+    assert kwargs["user"] == "nobody"
+    assert kwargs["cap_drop"] == ["ALL"]
+
+
+def test_read_only_tier_mounts_the_workspace_read_only(monkeypatch):
+    client = _install_fake_docker(monkeypatch)
+    sandbox = DockerSandbox(_settings(workspace_host_root="/host/ws/phase"))
+
+    sandbox.run(
+        CODE,
+        workspace=SandboxWorkspace(container_path="/workspace/phase", mode="ro"),
+    )
+
+    _, kwargs = client.run_calls[0]
+    assert kwargs["volumes"]["/host/ws/phase"]["mode"] == "ro"
+
+
+def test_configuration_can_force_read_only(monkeypatch):
+    """全局设成 `ro` 时，即使档位是写档位也只读挂载。"""
+
+    client = _install_fake_docker(monkeypatch)
+    sandbox = DockerSandbox(
+        _settings(workspace_host_root="/host/ws", workspace_mount="ro")
+    )
+
+    sandbox.run(CODE, workspace=SandboxWorkspace(container_path="/workspace", mode="rw"))
+
+    _, kwargs = client.run_calls[0]
+    assert kwargs["volumes"]["/host/ws"]["mode"] == "ro"
+
+
+def test_no_workspace_means_no_extra_mount(monkeypatch):
+    client = _install_fake_docker(monkeypatch)
+
+    DockerSandbox(_settings()).run(CODE)
+
+    _, kwargs = client.run_calls[0]
+    assert "volumes" not in kwargs
+    assert kwargs["working_dir"] == "/tmp"
+
+
+def test_mount_none_keeps_the_sandbox_blind_to_the_workspace(monkeypatch):
+    client = _install_fake_docker(monkeypatch)
+    sandbox = DockerSandbox(_settings(workspace_mount="none"))
+
+    sandbox.run(CODE, workspace=SandboxWorkspace(container_path="/workspace", mode="rw"))
+
+    _, kwargs = client.run_calls[0]
+    assert "volumes" not in kwargs
+    assert kwargs["working_dir"] == "/tmp", "没挂进去就不能把 cwd 指过去"
+
+
+def test_the_sandbox_never_mounts_the_docker_socket(monkeypatch):
+    """不变量：需要宿主套接字的是 backend，沙箱容器一律不带（ADR-023/033）。"""
+
+    client = _install_fake_docker(monkeypatch)
+    sandbox = DockerSandbox(_settings(workspace_host_root="/host/ws"))
+
+    sandbox.run(CODE, workspace=SandboxWorkspace(container_path="/workspace", mode="rw"))
+
+    _, kwargs = client.run_calls[0]
+    flattened = str(kwargs.get("volumes", {}))
+    assert "docker.sock" not in flattened
+    assert "podman.sock" not in flattened
+
+
+def test_unresolvable_workspace_host_path_is_actionable(monkeypatch):
+    """翻译不出宿主路径时必须显式失败：静默挂一个空目录比报错难查得多。"""
+
+    _install_fake_docker(monkeypatch)
+    monkeypatch.setattr(
+        "app.sandbox.docker_runtime.resolve_host_path", lambda *a, **k: None
+    )
+    sandbox = DockerSandbox(_settings())
+
+    with pytest.raises(SandboxUnavailable) as excinfo:
+        sandbox.run(
+            CODE, workspace=SandboxWorkspace(container_path="/workspace", mode="rw")
+        )
+
+    assert "SANDBOX_WORKSPACE_HOST_ROOT" in str(excinfo.value)
+
+
+def test_uid_and_gid_are_used_when_configured(monkeypatch):
+    """Linux 宿主上要写宿主目录，得让沙箱以宿主用户身份跑。"""
+
+    client = _install_fake_docker(monkeypatch)
+    sandbox = DockerSandbox(_settings(uid=1000, gid=1000))
+
+    sandbox.run(CODE)
+
+    _, kwargs = client.run_calls[0]
+    assert kwargs["user"] == "1000:1000"

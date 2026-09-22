@@ -60,6 +60,13 @@ services:
       # 这里指到本项目自建镜像：compose 一定会把它构建出来，离线/内网环境也能用。
       # 能拉到官方镜像的环境可以删掉这行，回落到代码默认的 python:3.12-slim（更小、无本项目代码）。
       SANDBOX_IMAGE: ${SANDBOX_IMAGE:-multi-agent-collaboration-platform-backend:latest}
+      # 沙箱进程身份（ADR-033 §7）。代码默认是 none→nobody，但 Docker Desktop 把 bind
+      # 挂载一律显示成 uid 0，因此以 nobody 运行的沙箱**写不进**工作区；Linux 宿主上则是
+      # 「要写用户目录就得用宿主 uid」。所以这里默认 0（沙箱本身仍禁网、只读根文件系统、
+      # cap_drop ALL、无 socket）；要更严就把它改成你的宿主 uid，或直接
+      # WORKSPACE_SANDBOX_MOUNT=ro 用文件工具写（那条路有审批）。
+      SANDBOX_UID: ${SANDBOX_UID:-0}
+      SANDBOX_GID: ${SANDBOX_GID:-0}
     extra_hosts:
       - host.docker.internal:host-gateway
     volumes:

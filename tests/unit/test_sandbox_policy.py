@@ -42,7 +42,8 @@ class SpySandbox:
     def available(self) -> bool:
         return True
 
-    def run(self, code, *, language="python"):
+    def run(self, code, *, language="python", workspace=None):
+        # 沙箱协议新增 `workspace`（ADR-033 §7）；替身跟着签名走，否则调用方一传就炸。
         self.calls.append((code, language))
         raise AssertionError("策略拒绝的代码不应该到达沙箱后端")
 
@@ -58,7 +59,6 @@ class SpySandbox:
         "import subprocess",
         "from subprocess import run",
         "import urllib.request",
-        "open('/etc/passwd').read()",
         "__import__('os').system('ls')",
         "eval('1+1')",
         "exec('pass')",
@@ -71,6 +71,17 @@ class SpySandbox:
 def test_python_policy_rejects_escape_attempts(code):
     with pytest.raises(SandboxViolation):
         check_python_source(code)
+
+
+def test_file_access_is_allowed_now_that_the_sandbox_mounts_the_workspace():
+    """`open` 从禁止改为允许（ADR-033 §7）：文件边界由容器（只挂工作区）承担。
+
+    这一条是**行为变更的显式记录**：以前 `open(...)` 会被策略拒绝，现在它能通过语言层
+    检查——真正拦住"读到工作区之外"的是容器挂载与只读根文件系统。
+    """
+
+    check_python_source("open('report.md').read()")
+    check_python_source("import pathlib\npathlib.Path('a.txt').write_text('x')")
 
 
 @pytest.mark.parametrize(

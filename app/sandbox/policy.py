@@ -2,7 +2,12 @@
 
 职责边界：本模块只做**语言层的越权检查**——把明显越界的代码挡在沙箱启动之前，
 给出可读的拒绝原因。真正的隔离边界仍由 `app.sandbox.docker_runtime` 的容器提供
-（禁用网络、只读根文件系统、资源与进程数上限、执行超时）。
+（禁用网络、只读根文件系统、资源与进程数上限、执行超时、只挂工作区）。
+
+**文件访问从「禁止」改为「允许」**（ADR-033 §7）：处理工作区里的文件正是沙箱要干的活，
+而"只能碰工作区"这件事表达不了在语法层——只挂一个工作区目录、根文件系统只读、非 root、
+无能力、无网络，才是真正的约束。所以这里继续拦的是**能力类逃逸**（网络、进程执行、
+导入机制、双下划线属性），不再拦 `open` 本身。
 
 对齐事实源：
 
@@ -33,7 +38,10 @@ ALLOWED_MODULES: frozenset[str] = frozenset(
         "functools",
         "itertools",
         "json",
+        "io",
         "math",
+        "pathlib",
+        "glob",
         "random",
         "re",
         "statistics",
@@ -55,7 +63,6 @@ FORBIDDEN_CALLS: frozenset[str] = frozenset(
         "globals",
         "input",
         "locals",
-        "open",
         "quit",
         "vars",
     }

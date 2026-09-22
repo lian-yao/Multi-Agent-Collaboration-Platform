@@ -108,6 +108,34 @@
 文件）；同一个待决策目标反复请求复用同一条记录；超过 TTL 的 `pending` 置 `expired`
 （不放行、不删记录）。会话/Workflow 级的 `paused` 仍可用于人为暂停，只是不再由审批触发。
 
+## 阶段 4 实现口径（2026-09-23）：沙箱挂载工作区
+
+本 ADR §7 的落地形态：
+
+- **只挂本次会话的工作区**，挂到与 backend 内**相同的路径**（例如 `/workspace/<path>`），
+  这样代码里写的路径和工具输出里的路径一致；沙箱仍然没有网络、根文件系统只读、
+  `cap_drop=ALL`、无宿主套接字。
+- **档位决定挂载方式**：只读档位一律 `ro`（能读能算、写不了），写档位才 `rw`。
+  这样"能不能写"始终由人设定的档位决定，而不是代码自己决定。
+- **宿主路径要翻译**：沙箱是 backend 的**兄弟容器**（建在宿主守护进程上，ADR-023），
+  `-v` 的来源必须是宿主路径，而 backend 看到的是挂载点。默认从 `/proc/self/mountinfo`
+  反查（Linux bind 用 source；Docker Desktop 的 9p/drvfs 用盘符 + root 字段拼出
+  `/run/desktop/mnt/host/<盘符>/…`），翻不出来就**显式失败**并用
+  `SANDBOX_WORKSPACE_HOST_ROOT` 指出怎么配——静默挂一个空目录是最难查的失败形态。
+- **`open` 从禁止改为允许**：文件系统边界不是语法层能表达的（只挂一个目录、根只读、
+  非 root 才是），所以策略层继续拦的是能力类逃逸（网络 / 进程执行 / 导入机制 /
+  双下划线属性），`pathlib`、`io`、`glob` 一并放行。`import os` 仍然禁止。
+
+### 两个必须知道的取舍
+
+1. **`rw` 下审批可以被绕过**：沙箱代码能直接写/删工作区里的文件，不经过 §6 的审批。
+   这是"沙箱能直接读写"的固有代价。要严格执行审批就把 `WORKSPACE_SANDBOX_MOUNT` 设为
+   `ro`——那时沙箱只能读，所有写都走被审批的工作区文件工具。
+2. **沙箱进程身份**：代码默认非 root（`nobody`）。但 Docker Desktop 把 bind 挂载统一
+   显示为 uid 0，以 `nobody` 运行的沙箱写不进去；Linux 宿主上要写用户目录也得用宿主 uid。
+   因此 `deploy/compose.yaml` 默认 `SANDBOX_UID/GID=0`，并在这里写明：想更严就改成宿主
+   uid，或改用 `ro`。容器本身的其它边界（禁网、只读根、无能力、无 socket）与身份无关。
+
 工具集（会话级，按 ADR-025 的 `session_scoped_registry` 就地拼进本次执行，不进
 `GET /api/v1/tools` 静态目录）：`list_work_files` / `read_work_file` /
 `write_work_file` / `make_work_dir` / `move_work_entry` / `delete_work_entry`。

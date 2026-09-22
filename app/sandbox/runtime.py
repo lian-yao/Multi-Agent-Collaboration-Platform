@@ -28,6 +28,18 @@ class SandboxUnavailable(RuntimeError):
 
 
 @dataclass(frozen=True)
+class SandboxWorkspace:
+    """挂在沙箱里的工作区（ADR-033 §7）。
+
+    `container_path` 是 backend 侧的路径（如 `/workspace`）；真正的 bind 来源由
+    `app/sandbox/workspace_bind.py` 翻译成宿主路径。`mode` 取 `rw` / `ro`。
+    """
+
+    container_path: str
+    mode: str = "rw"
+
+
+@dataclass(frozen=True)
 class SandboxResult:
     """一次沙箱执行的结果；输出已按 `output_limit_chars` 截断。"""
 
@@ -63,7 +75,13 @@ class Sandbox(Protocol):
 
         ...
 
-    def run(self, code: str, *, language: str = "python") -> SandboxResult: ...
+    def run(
+        self,
+        code: str,
+        *,
+        language: str = "python",
+        workspace: SandboxWorkspace | None = None,
+    ) -> SandboxResult: ...
 
 
 class DeniedSandbox:
@@ -80,7 +98,13 @@ class DeniedSandbox:
     def unavailable_reason(self) -> str | None:
         return self._reason
 
-    def run(self, code: str, *, language: str = "python") -> SandboxResult:
+    def run(
+        self,
+        code: str,
+        *,
+        language: str = "python",
+        workspace: SandboxWorkspace | None = None,
+    ) -> SandboxResult:
         raise SandboxUnavailable(self._reason)
 
 
@@ -102,6 +126,7 @@ def run_in_sandbox(
     language: str = "python",
     sandbox: Sandbox | None = None,
     settings: SandboxSettings | None = None,
+    workspace: SandboxWorkspace | None = None,
 ) -> SandboxResult:
     """策略校验 + 沙箱执行的统一入口。
 
@@ -122,4 +147,4 @@ def run_in_sandbox(
         check_shell_command(code)
 
     backend = sandbox if sandbox is not None else build_sandbox(resolved_settings)
-    return backend.run(code, language=resolved_language)
+    return backend.run(code, language=resolved_language, workspace=workspace)

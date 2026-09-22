@@ -10,6 +10,11 @@
 | 禁止提权 | `security_opt=['no-new-privileges']`、非 root 用户、`cap_drop=['ALL']` |
 | 执行超时 | `container.wait(timeout=...)` 超时即 kill |
 | 不携带平台自身源码 | 镜像可能复用本项目镜像，用 tmpfs 遮住 `/app` |
+| 工作区可见范围 | 只挂会话工作区那一个目录（`rw`/`ro`/不挂），见 ADR-033 §7 |
+
+**不变量**：沙箱容器**绝不**挂宿主 Docker socket。需要 socket 的只有 backend（它用 socket
+创建这些一次性容器）。`tests/unit/test_sandbox_docker_runtime.py` 有专门用例钉住这一点——
+一旦有人在挂载列表里加回套接字，那就是安全回归。
 
 **容器建在宿主机的守护进程上**：backend 容器挂载宿主机套接字（`deploy/compose.yaml`），
 沙箱容器因此是 backend 的**兄弟容器**而不是子容器（ADR-023）。这带来一个必须检查的
@@ -27,7 +32,8 @@ import time
 
 from app.observability.logging import get_logger, log_event
 from app.sandbox.config import SandboxSettings, get_sandbox_settings
-from app.sandbox.runtime import SandboxResult, SandboxUnavailable
+from app.sandbox.runtime import SandboxResult, SandboxUnavailable, SandboxWorkspace
+from app.sandbox.workspace_bind import resolve_host_path
 
 logger = get_logger("sandbox.docker")
 
@@ -120,11 +126,17 @@ class DockerSandbox:
             return f"查询沙箱镜像失败: {type(exc).__name__}: {exc}"
         return None
 
-    def run(self, code: str, *, language: str = "python") -> SandboxResult:
+    def run(
+        self,
+        code: str,
+        *,
+        language: str = "python",
+        workspace: SandboxWorkspace | None = None,
+    ) -> SandboxResult:
         client = self._docker()
         command = _command(language, code)
         started = time.perf_counter()
-        container = self._create(client, command)
+        container = self._create(client, command, workspace)
 
         timed_out = False
         exit_code = TIMEOUT_EXIT_CODE
@@ -168,7 +180,12 @@ class DockerSandbox:
             truncated=truncated,
         )
 
-    def _create(self, client, command: list[str]):
+    def _create(
+        self,
+        client,
+        command: list[str],
+        workspace: SandboxWorkspace | None = None,
+    ):
         """创建一次性沙箱容器。镜像缺失时给出**可行动**的错误而不是 404 原文。"""
 
         options: dict[str, object] = {
@@ -186,10 +203,23 @@ class DockerSandbox:
             # 默认能力集里有 CHOWN / SETUID / NET_RAW 等，而沙箱里一样都用不上：
             # 它是一个 `nobody` 无权、只读、无网的一次性容器，全部丢掉。
             "cap_drop": ["ALL"],
-            "working_dir": "/tmp",
-            "user": "nobody",
+            # `workspace_mount=none` 时工作区没挂进来，工作目录必须退回 /tmp，
+            # 否则容器会以一个不存在的目录为 cwd 启动失败。
+            "working_dir": (
+                workspace.container_path
+                if workspace is not None and self._settings.workspace_mount != "none"
+                else "/tmp"
+            ),
+            "user": self._user(),
             "labels": {"macp.role": "tool-sandbox"},
         }
+        if workspace is not None and self._settings.workspace_mount != "none":
+            options["volumes"] = {
+                self._workspace_bind_source(workspace): {
+                    "bind": workspace.container_path,
+                    "mode": self._workspace_bind_mode(workspace),
+                }
+            }
 
         import docker
 
@@ -219,6 +249,36 @@ class DockerSandbox:
             raise
         except Exception as exc:
             raise SandboxUnavailable(f"启动沙箱容器失败: {exc}") from exc
+
+    def _user(self) -> str:
+        """沙箱进程身份：默认 `nobody`；配了 uid/gid 时用它（Linux 宿主上写宿主目录需要）。"""
+
+        if self._settings.uid is None:
+            return "nobody"
+        gid = self._settings.gid if self._settings.gid is not None else self._settings.uid
+        return f"{self._settings.uid}:{gid}"
+
+    def _workspace_bind_mode(self, workspace: SandboxWorkspace) -> str:
+        """只读档位一律 `ro`：档位是人的授权，不能被代码执行绕过（ADR-033 §2/§7）。"""
+
+        if workspace.mode == "ro" or self._settings.workspace_mount == "ro":
+            return "ro"
+        return "rw"
+
+    def _workspace_bind_source(self, workspace: SandboxWorkspace) -> str:
+        """bind 的来源必须是**宿主**路径（沙箱是兄弟容器，见 workspace_bind 的模块说明）。"""
+
+        source = resolve_host_path(
+            workspace.container_path,
+            override=self._settings.workspace_host_root or None,
+        )
+        if source is None:
+            raise SandboxUnavailable(
+                f"无法确定工作区 {workspace.container_path} 的宿主路径，不能把它挂进沙箱。"
+                "请设置 SANDBOX_WORKSPACE_HOST_ROOT 指向宿主上的同一目录，"
+                "或把 SANDBOX_WORKSPACE_MOUNT 设为 none 让沙箱看不到工作区。"
+            )
+        return source
 
     def _collect(self, container) -> tuple[str, str, bool]:
         """读取容器输出并按配置截断，避免超长输出撑爆工具观测与审计载荷。"""

@@ -18,6 +18,7 @@ from typing import Literal
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 SandboxBackend = Literal["docker", "denied"]
+WorkspaceMountMode = Literal["rw", "ro", "none"]
 
 
 class SandboxSettings(BaseSettings):
@@ -54,6 +55,32 @@ class SandboxSettings(BaseSettings):
     network_enabled: bool = False
     output_limit_chars: int = 4000
     max_code_chars: int = 20_000
+
+    workspace_mount: WorkspaceMountMode = "rw"
+    """沙箱怎么看到本次会话的工作区（ADR-033 §7）。
+
+    `rw`（默认）：沙箱代码能直接读写工作区；`ro`：只读挂载，写只能走工作区文件工具
+    （**审批才能拦得住**）；`none`：完全不挂，沙箱里看不到用户文件。
+
+    另外：只读档位（`read_only`）的工作区**一律按 `ro` 挂**，与这里的取值无关——
+    档位是人的授权，不该被代码执行绕过。
+    """
+
+    workspace_host_root: str = ""
+    """宿主侧工作区根路径的显式覆盖。
+
+    沙箱容器建在**宿主**守护进程上（ADR-023），bind 的来源必须是宿主路径，而 backend
+    看到的是挂载点（如 `/workspace`）。留空时从 `/proc/self/mountinfo` 反查；
+    反查不到（非 bind mount、特殊环境）时用这个变量显式指定。
+    """
+
+    uid: int | None = None
+    gid: int | None = None
+    """沙箱进程的 uid/gid。默认跑 `nobody`。
+
+    Linux 宿主上要让沙箱写进宿主用户的目录，通常得把这里设成宿主用户（例如 1000:1000），
+    否则 `nobody` 没有写权限；Docker Desktop 的 bind mount 由虚拟文件系统接管，影响有限。
+    """
 
 
 @lru_cache

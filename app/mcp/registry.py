@@ -51,6 +51,7 @@ from app.observability.metrics import get_metrics_collector, record_tool_call
 from app.observability.tracing import record_exception, span
 from app.orchestration.tools import ToolCall, ToolSpec
 from app.tools.base import BuiltinTool, ToolExecutionError
+from app.tools.code_exec import code_execution_tool
 from app.tools.registry import BuiltinToolRegistry, build_builtin_registry
 from app.tools.session_files import session_file_tools
 from app.tools.work_files import work_file_tools
@@ -107,14 +108,18 @@ class InstrumentedToolRegistry:
 
 
 class SessionFileRegistry:
-    """在基础注册表上追加「读本次会话附件」的工具（`app/tools/session_files.py`）。
+    """在基础注册表上叠加**会话级**工具（会话附件、工作区文件、绑定了工作区的沙箱）。
 
-    为什么是装饰器而不是往 `build_tool_registry()` 里塞：这两个工具需要 `session_id`，
+    为什么是装饰器而不是往 `build_tool_registry()` 里塞：这些工具需要 `session_id`，
     而那个注册表是**进程级缓存**的（ADR-009 要求它廉价可复用）。会话级的东西必须按
     执行临时拼，不能进进程缓存。
 
     基础工具在 `MCP_TRANSPORT=stdio/http` 时来自远端 MCP Server，这两个工具仍在平台
     进程内执行——它们读的是平台自己的附件表，本来就没有"远端"可言。
+
+    **同名时覆盖基础工具**：`code_execution` 需要知道自己该把哪个工作区挂进沙箱
+    （ADR-033 §7），会话级实例因此替换掉进程级那个。没有覆盖语义的话，目录里会出现
+    两个同名工具，模型看到的是一个它没法区分的列表。
     """
 
     def __init__(self, registry: Any, tools: Sequence[BuiltinTool]) -> None:
@@ -122,7 +127,9 @@ class SessionFileRegistry:
         self._tools = {tool.name: tool for tool in tools}
 
     def list_tools(self) -> tuple[ToolSpec, ...]:
-        base = tuple(self._registry.list_tools())
+        base = tuple(
+            spec for spec in self._registry.list_tools() if spec.name not in self._tools
+        )
         extra = tuple(
             tool.spec() for name, tool in sorted(self._tools.items())
         )
@@ -150,13 +157,17 @@ def with_session_files(registry: Any, session_id: str | None) -> Any:
 
 
 def with_workspace_files(registry: Any, session_id: str | None) -> Any:
-    """给注册表挂上工作目录读取工具（ADR-033 阶段 1）；没有绑定工作区时原样返回。
+    """给注册表挂上工作区工具（ADR-033）：文件读/写工具 + 绑定了工作区的沙箱。
 
     与 `with_session_files` 复用同一个装饰器：它做的事就是「按名字分派到附加工具，
     其余透传」，与会话附件无关。
     """
 
-    tools = work_file_tools(session_id)
+    tools = list(work_file_tools(session_id))
+    sandbox_tool = code_execution_tool(session_id)
+    if sandbox_tool is not None:
+        # 同名覆盖内置的 code_execution：让它只看到本次会话的工作区（ADR-033 §7）。
+        tools.append(sandbox_tool)
     if not tools:
         return registry
     return SessionFileRegistry(registry, tools)
