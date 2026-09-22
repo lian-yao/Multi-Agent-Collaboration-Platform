@@ -48,6 +48,10 @@ services:
       # 工具集与 GET /api/v1/tools。代码默认关闭（免让工具目录依赖配置库），部署侧
       # 显式打开；要退回「只暴露平台内置工具」设 MCP_INCLUDE_REGISTERED_SERVERS=false。
       MCP_INCLUDE_REGISTERED_SERVERS: ${MCP_INCLUDE_REGISTERED_SERVERS:-true}
+      # Agent 的网页搜索出口（ADR-032）：默认走同网络的 search-gateway——平台默认的
+      # DuckDuckGo Instant Answer 在部分网络连不通，Agent 会一直搜不到资料。要换回
+      # 官方端点或自建网关，用 TOOL_SEARCH_ENDPOINT 覆盖。
+      TOOL_SEARCH_ENDPOINT: ${TOOL_SEARCH_ENDPOINT:-http://search-gateway:8800/search}
       # 沙箱容器建在**宿主机**守护进程上（见下面 volumes），所以沙箱镜像必须先存在于宿主机。
       # 这里指到本项目自建镜像：compose 一定会把它构建出来，离线/内网环境也能用。
       # 能拉到官方镜像的环境可以删掉这行，回落到代码默认的 python:3.12-slim（更小、无本项目代码）。
@@ -79,6 +83,32 @@ services:
         condition: service_healthy
       jaeger:
         condition: service_started
+
+  search-gateway:
+    # web_search 的本地出口：把可达的 Bing RSS 转成工具要的 JSON 契约（ADR-032）。
+    # 不发布宿主端口——它只服务同一 compose 网络里的 backend。
+    build:
+      context: ..
+      dockerfile: deploy/docker/backend.Dockerfile
+    image: multi-agent-collaboration-platform-backend:latest
+    command:
+      - python
+      - scripts/search_gateway.py
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8800"
+    healthcheck:
+      # `/health` 不打上游：Bing 抖动只该影响搜索，不该把容器标成 unhealthy。
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8800/health', timeout=5).status==200 else 1)"
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
 
   dapr-sidecar:
     image: ghcr.io/dapr/daprd:1.18.2

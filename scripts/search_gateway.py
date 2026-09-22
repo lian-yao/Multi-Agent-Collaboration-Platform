@@ -44,7 +44,10 @@
     TOOL_SEARCH_ENDPOINT=http://127.0.0.1:8800/search
 
 容器内访问宿主机时改用 `http://host.docker.internal:8800/search`
-（`deploy/compose.yaml` 已配 `extra_hosts`）。
+（`deploy/compose.yaml` 已配 `extra_hosts`）。一键部署下它由 `search-gateway` 服务常驻，
+backend 的 `TOOL_SEARCH_ENDPOINT` 默认指向 `http://search-gateway:8800/search`（ADR-032）。
+
+端点：`GET /search?q=...`（搜索）、`GET /health`（存活探测，不打上游）。
 
 参数：`--host`、`--port`、`--upstream`、`--timeout`。
 """
@@ -68,6 +71,10 @@ DEFAULT_UPSTREAM = "https://cn.bing.com/search"
 
 SEARCH_PATH = "/search"
 """与 `TOOL_SEARCH_ENDPOINT` 拼查询串的方式一致：`{endpoint}?q=...&format=json`。"""
+
+HEALTH_PATH = "/health"
+"""存活探测。**不碰上游**：网关进程活着就算健康，上游可用性由工具自己的重试与日志暴露，
+否则 Bing 一抖动就会把容器标成 unhealthy、进而拖住 `docker compose --wait`（ADR-032）。"""
 
 DISPLAY_SEPARATOR = " – "
 """替换标题内部的 `" - "`；见模块 docstring 的「标题里的 `" - "`」。"""
@@ -163,6 +170,9 @@ class SearchGatewayHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler 的命名约定
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path.rstrip("/") or "/"
+        if path == HEALTH_PATH:
+            self._send_json(200, {"status": "ok"})
+            return
         if path not in {"/", SEARCH_PATH}:
             self._send_json(
                 404, {"error": f"未知路径：{parsed.path}；搜索走 {SEARCH_PATH}"}

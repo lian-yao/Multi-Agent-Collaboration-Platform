@@ -35,6 +35,7 @@ cd deploy
 | `postgres` | 会话持久化 |
 | `jaeger` | 追踪可视化 |
 | `prometheus` | 指标采集 |
+| `search-gateway` | Agent 的网页搜索出口：把可达的 Bing RSS 转成 `web_search` 要的 JSON 契约（ADR-032）。**不发布宿主端口**，只服务同网络的 backend |
 
 启动后访问：
 
@@ -270,7 +271,7 @@ npm run dev
 | `MCP_SERVER_COMMAND` | `stdio` 传输时启动 MCP Server 的命令，默认当前解释器 |
 | `MCP_SERVER_URL` | `http` 传输时的 MCP Server 地址 |
 | `MCP_INCLUDE_REGISTERED_SERVERS` | 是否把登记并「发现」过的 MCP Server 工具并入 Agent 工具集与 `GET /api/v1/tools`；部署默认 `true`，代码默认 `false`（见 ADR-026） |
-| `TOOL_SEARCH_ENDPOINT` | 网页搜索端点，默认 DuckDuckGo Instant Answer |
+| `TOOL_SEARCH_ENDPOINT` | 网页搜索端点。代码默认 DuckDuckGo Instant Answer，**一键部署默认指向同网络的 `search-gateway`**（`http://search-gateway:8800/search`，ADR-032）；要换回官方端点或自建网关用这个变量覆盖 |
 | `TOOL_SQL_DSN` | 只读 SQL 工具的 DSN，留空则用 `DATABASE_URL` |
 | `SANDBOX_BACKEND` | 代码执行沙箱后端：`docker`（默认）/ `denied` |
 | `SANDBOX_TIMEOUT_SECONDS` | 单次沙箱执行超时，默认 15 |

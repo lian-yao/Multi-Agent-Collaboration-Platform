@@ -60,13 +60,18 @@ def _get(url: str) -> tuple[int, dict]:
 
 
 @contextlib.contextmanager
-def running_gateway(monkeypatch, body: str) -> Iterator[str]:
-    """起一个上游被替换成固定 RSS 的真网关，产出它的基础地址。"""
+def running_gateway(
+    monkeypatch, body: str | None = RSS_BODY, *, fetch=None
+) -> Iterator[str]:
+    """起一个上游被替换成假取数的真网关，产出它的基础地址。
+
+    默认取数返回固定 RSS；`fetch` 用来换成别的假取数（例如断言「健康检查不打上游」）。
+    """
 
     monkeypatch.setattr(
         search_gateway,
         "fetch_rss",
-        lambda upstream, query, timeout: body,
+        fetch or (lambda upstream, query, timeout: body),
     )
     server = search_gateway.build_server("127.0.0.1", 0)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -167,6 +172,19 @@ def test_gateway_rejects_an_unknown_path(monkeypatch):
 
     assert status == 404
     assert "未知路径" in payload["error"]
+
+
+def test_health_probe_does_not_touch_the_upstream(monkeypatch):
+    """存活探测不许打上游：上游抖动只该影响搜索，不该把容器标成 unhealthy（ADR-032）。"""
+
+    def explode(*_args, **_kwargs):
+        raise AssertionError("健康检查不应访问上游")
+
+    with running_gateway(monkeypatch, fetch=explode) as base:
+        status, payload = _get(f"{base}/health")
+
+    assert status == 200
+    assert payload == {"status": "ok"}
 
 
 def test_gateway_reports_upstream_failure_as_502(monkeypatch):
