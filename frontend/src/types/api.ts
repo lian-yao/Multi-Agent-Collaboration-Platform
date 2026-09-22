@@ -645,3 +645,131 @@ export interface SandboxStatus {
   reason: string | null;
   limits: SandboxLimits;
 }
+
+/* -------------------------------------------------------------------------- */
+/* §5.19 工作区（work_dir）                                                    */
+/* -------------------------------------------------------------------------- */
+
+export type WorkspaceMode = "read_only" | "workspace_write";
+
+export interface WorkspaceQuota {
+  max_file_bytes: number;
+  max_total_bytes: number;
+  max_entries: number;
+}
+
+/**
+ * 用量视图。工作区根被挪走或目录被删时 `available=false` 并给出 `reason`——
+ * 界面要如实展示「用量读不到」，不要显示成 0。
+ */
+export interface WorkspaceUsage {
+  available: boolean;
+  total_bytes?: number;
+  entries?: number;
+  truncated?: boolean;
+  scan_limit?: number | null;
+  reason?: string | null;
+}
+
+export interface Workspace {
+  id: string;
+  session_id: string | null;
+  /** **相对**工作区根的路径；空串表示根本身。界面上不要拼成宿主绝对路径。 */
+  path: string;
+  mode: WorkspaceMode;
+  name: string | null;
+  quota: WorkspaceQuota;
+  usage: WorkspaceUsage | null;
+  created_by: string | null;
+  updated_by: string | null;
+  created_at: string | null;
+}
+
+export interface WorkspaceList {
+  items: Workspace[];
+  total: number;
+}
+
+export interface WorkspaceEntry {
+  name: string;
+  path: string;
+  kind: "file" | "dir" | "symlink" | "other";
+  /** 指向工作区之外的符号链接：要标出来，且不可展开（`doc/api.md` §7.1）。 */
+  outside: boolean;
+  size_bytes: number | null;
+  modified_at: string | null;
+  children?: WorkspaceEntry[] | null;
+}
+
+export interface WorkspaceTree {
+  workspace_id: string;
+  path: string;
+  depth: number;
+  entries: WorkspaceEntry[];
+  truncated: boolean;
+  limit: number;
+}
+
+export interface WorkspaceCreate {
+  session_id?: string | null;
+  path?: string | null;
+  mode?: WorkspaceMode;
+  name?: string | null;
+}
+
+export interface WorkspacePatch {
+  mode?: WorkspaceMode;
+  name?: string | null;
+}
+
+/* -------------------------------------------------------------------------- */
+/* §5.20 工作区审批（覆盖 / 删除）                                             */
+/* -------------------------------------------------------------------------- */
+
+export type ApprovalKind = "overwrite" | "delete";
+export type ApprovalStatus = "pending" | "approved" | "denied" | "expired" | "consumed";
+
+export interface Approval {
+  id: string;
+  workspace_id: string | null;
+  session_id: string | null;
+  run_id: string | null;
+  kind: ApprovalKind;
+  /** 工作区相对路径。 */
+  target: string;
+  /** 平台生成的说明——不照抄模型输出（提示注入会经由审批卡片影响人）。 */
+  reason: string | null;
+  status: ApprovalStatus;
+  payload: Record<string, unknown>;
+  decided_by: string | null;
+  requested_at: string | null;
+  decided_at: string | null;
+}
+
+export interface ApprovalList {
+  items: Approval[];
+  total: number;
+  /** 待决策条数，供角标使用。 */
+  pending: number;
+}
+
+export type ApprovalDecision = "approved" | "denied";
+
+/* -------------------------------------------------------------------------- */
+/* §5.21 出网策略（只读）                                                      */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 出网策略的只读投影。`blocked` 是**进程内**计数：工具调用发生在 worker 进程，
+ * API 进程里通常是空的——界面不能把 0 说成「没有被拦过」（`doc/api.md` §5.21）。
+ */
+export interface EgressStatus {
+  mode: "public_only" | "allowlist";
+  allow_hosts: string[];
+  deny_hosts: string[];
+  internal_hosts: string[];
+  allowed_ports: number[];
+  model_exempt: boolean;
+  max_redirects: number;
+  blocked: Record<string, number>;
+}

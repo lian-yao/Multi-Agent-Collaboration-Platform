@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Settings2, Sliders, Route, Plug, ShieldCheck } from "lucide-react";
+import { Settings2, Sliders, Route, Plug, ShieldCheck, HardDrive } from "lucide-react";
 import { api } from "../api/client";
 import { PageTabs, type PageTab } from "../components/PageTabs";
 import type { ProviderPresetCatalog } from "../types/api";
@@ -8,9 +8,11 @@ import { ProviderPanel } from "./ProviderPanel";
 import { DefaultRoutePanel } from "./DefaultRoutePanel";
 import { McpPanel } from "./McpPanel";
 import { SandboxPanel } from "./SandboxPanel";
+import { EgressPanel } from "./EgressPanel";
+import { WorkspacePanel } from "./WorkspacePanel";
 import "./config.css";
 
-export type ConfigTabId = "providers" | "defaults" | "mcp" | "sandbox";
+export type ConfigTabId = "providers" | "defaults" | "mcp" | "workspaces" | "sandbox";
 
 /**
  * 四个分区的职责边界（ADR-017 / ADR-018 / doc/api.md §7）：
@@ -18,7 +20,9 @@ export type ConfigTabId = "providers" | "defaults" | "mcp" | "sandbox";
  * - providers：多端点登记、批量引入模型、逐条特化调参
  * - defaults：兜底模型与 legacy 五列
  * - mcp：多 Server 与紧凑工具卡片
- * - sandbox：执行边界，**只读**（限额属部署期安全边界，后端无写接口）
+ * - workspaces：工作区登记与档位（§5.19）——**提档是人的动作**，本页唯一会改变
+ *   Agent 能力边界的分区，所以归在「写配置」这一组
+ * - sandbox：执行边界 + 出网策略（§5.15 / §5.21），**只读**（都是部署期安全边界）
  */
 export const CONFIG_TABS: readonly PageTab<ConfigTabId>[] = [
   {
@@ -30,10 +34,16 @@ export const CONFIG_TABS: readonly PageTab<ConfigTabId>[] = [
   { id: "defaults", label: "默认路由", icon: Route, title: "兜底模型与 legacy 五列" },
   { id: "mcp", label: "MCP 工具", icon: Plug, title: "多 Server 与紧凑工具卡片" },
   {
+    id: "workspaces",
+    label: "工作区",
+    icon: HardDrive,
+    title: "Agent 能碰哪些文件、以什么档位（只读 / 可写）",
+  },
+  {
     id: "sandbox",
     label: "执行边界",
     icon: ShieldCheck,
-    title: "敏感工具沙箱：当前是否可用、限额是多少（只读）",
+    title: "沙箱与出网策略：当前边界是什么、为什么不生效（只读）",
   },
 ];
 
@@ -94,7 +104,13 @@ export function ConfigPage() {
         {tab === "providers" && <ProviderPanel catalog={catalog} />}
         {tab === "defaults" && <DefaultRoutePanel />}
         {tab === "mcp" && <McpPanel />}
-        {tab === "sandbox" && <SandboxPanel />}
+        {tab === "workspaces" && <WorkspacePanel />}
+        {tab === "sandbox" && (
+          <>
+            <SandboxPanel />
+            <EgressPanel />
+          </>
+        )}
       </div>
     </div>
   );

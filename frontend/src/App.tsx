@@ -62,6 +62,7 @@ import { AgentStageModal, type AgentStageDetail } from "./workspace/AgentStageMo
 import { CollaborationGraph } from "./workspace/CollaborationGraph";
 import { CollabCanvas, type CollabConversation } from "./workspace/CollabCanvas";
 import { RunActivity } from "./workspace/RunActivity";
+import { ApprovalCard } from "./workspace/ApprovalCard";
 import { groupUsage, TaskUsagePanel, useWorkflowMetrics } from "./workspace/TaskUsage";
 import {
   buildCollaboration,
@@ -81,6 +82,8 @@ import {
 } from "./workspace/attachments";
 import type {
   Agent,
+  Approval,
+  ApprovalDecision,
   Message,
   OrchestrationMode,
   Session,
@@ -150,6 +153,62 @@ export function App() {
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const finalRefreshDone = useRef<string | null>(null);
+  /* ---------------------------------------------------------------------- */
+  /* 工作区审批（`doc/api.md` §5.20 / §7.1）                                 */
+  /*                                                                        */
+  /* `pending` 是流程的第二段而不是错误：破坏性动作（覆盖 / 删除）由人在卡片上    */
+  /* 放行一次。状态放在这一层，是因为导航角标与对话流卡片要共用同一份；轮询挂在   */
+  /* 会话上——没有会话就没有审批可言。                                        */
+  /* ---------------------------------------------------------------------- */
+  const approvalsFor = session?.id ?? null;
+  const [approvals, setApprovals] = useState<Approval[]>([]);
+  const [approvalBusy, setApprovalBusy] = useState(false);
+  const [approvalError, setApprovalError] = useState("");
+  useEffect(() => {
+    if (!approvalsFor) {
+      setApprovals([]);
+      return;
+    }
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const listing = await api.listApprovals(approvalsFor);
+        if (!cancelled) {
+          setApprovals(listing.items);
+          setApprovalError("");
+        }
+      } catch (cause) {
+        if (!cancelled) {
+          setApprovalError(cause instanceof Error ? cause.message : "审批列表读取失败");
+        }
+      }
+    };
+    void load();
+    const timer = window.setInterval(() => void load(), 3000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [approvalsFor]);
+  const decideApproval = useCallback(
+    async (id: string, decision: ApprovalDecision) => {
+      setApprovalBusy(true);
+      try {
+        await api.decideApproval(id, decision);
+        if (approvalsFor) {
+          const listing = await api.listApprovals(approvalsFor);
+          setApprovals(listing.items);
+        }
+        setApprovalError("");
+      } catch (cause) {
+        setApprovalError(cause instanceof Error ? cause.message : "审批决策失败");
+      } finally {
+        setApprovalBusy(false);
+      }
+    },
+    [approvalsFor],
+  );
+  const pendingApprovals = approvals.filter((item) => item.status === "pending").length;
   const refresh = useCallback(async () => {
     if (!session) return;
     setRefreshing(true);
@@ -450,6 +509,7 @@ export function App() {
           <NavButton
             icon={PanelLeft}
             label="工作台"
+            badge={pendingApprovals}
             active={view === "workspace"}
             onClick={() => {
               setView("workspace");
@@ -578,6 +638,10 @@ export function App() {
               onRemoveAttachment={removeAttachment}
               mode={mode}
               setMode={setMode}
+              approvals={approvals}
+              approvalBusy={approvalBusy}
+              approvalError={approvalError}
+              onDecideApproval={(id, decision) => void decideApproval(id, decision)}
             />
           )}
           {view === "records" && (
@@ -605,19 +669,24 @@ function NavButton({
   label,
   active,
   onClick,
+  badge = 0,
 }: {
   icon: typeof PanelLeft;
   label: string;
   active: boolean;
   onClick: () => void;
+  /** 待处理条数（目前只有工作区审批用）；0 时不渲染角标。 */
+  badge?: number;
 }) {
   return (
     <button
       className={`nav-button ${active ? "active" : ""}`}
       onClick={onClick}
+      aria-label={badge ? `${label}（${badge} 项待确认）` : label}
     >
       <Icon size={17} />
       <span>{label}</span>
+      {badge > 0 && <span className="nav-badge">{badge}</span>}
       {active && <ChevronRight size={14} />}
     </button>
   );
@@ -793,6 +862,11 @@ type WorkspaceProps = {
   /** 编排模式（ADR-019）：`static` 固定三步，`dynamic` 由规划节点按任务分配角色。 */
   mode: OrchestrationMode;
   setMode: (value: OrchestrationMode) => void;
+  /** 工作区审批（§5.20）：状态在 `App` 里维护——导航角标与对话流卡片要共用同一份。 */
+  approvals: Approval[];
+  approvalBusy: boolean;
+  approvalError: string;
+  onDecideApproval: (id: string, decision: ApprovalDecision) => void;
 };
 
 type StageId = (typeof stages)[number]["id"];
@@ -948,6 +1022,10 @@ function Workspace({
   onRemoveAttachment,
   mode,
   setMode,
+  approvals,
+  approvalBusy,
+  approvalError,
+  onDecideApproval,
 }: WorkspaceProps) {
   const stream = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
@@ -966,6 +1044,7 @@ function Workspace({
   useEffect(() => {
     hydrated.current = true;
   }, []);
+
   useEffect(() => {
     for (const item of messages) revealed.current.add(item.id);
   }, [messages]);
@@ -1124,25 +1203,41 @@ function Workspace({
                       {/* 执行活动摆在「提问之后、答复之前」——过程要出现在结果的**上一个位置**，
                           而不是被排到整段对话的最末尾（那样它看起来像另一个任务）。 */}
                       {index === reportIndex && workflow && (
-                        <RunActivity
-                          workflow={workflow}
-                          traces={traces}
-                          stages={STAGE_META}
-                          agents={agents}
-                          completed={completed}
-                        />
+                        <>
+                          <RunActivity
+                            workflow={workflow}
+                            traces={traces}
+                            stages={STAGE_META}
+                            agents={agents}
+                            completed={completed}
+                          />
+                          <ApprovalCard
+                            approvals={approvals}
+                            busy={approvalBusy}
+                            error={approvalError}
+                            onDecide={onDecideApproval}
+                          />
+                        </>
                       )}
                       <MessageBubble message={m} stream={isFresh(m.id)} />
                     </Fragment>
                   ))}
                   {workflow && reportIndex < 0 && (
-                    <RunActivity
-                      workflow={workflow}
-                      traces={traces}
-                      stages={STAGE_META}
-                      agents={agents}
-                      completed={completed}
-                    />
+                    <>
+                      <RunActivity
+                        workflow={workflow}
+                        traces={traces}
+                        stages={STAGE_META}
+                        agents={agents}
+                        completed={completed}
+                      />
+                      <ApprovalCard
+                        approvals={approvals}
+                        busy={approvalBusy}
+                        error={approvalError}
+                        onDecide={onDecideApproval}
+                      />
+                    </>
                   )}
                 </div>
               ) : (

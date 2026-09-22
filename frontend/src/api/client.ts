@@ -3,8 +3,12 @@ import type {
   AgentConfigList,
   AgentConfigUpdate,
   AgentRegistryCreate,
+  Approval,
+  ApprovalDecision,
+  ApprovalList,
   Attachment,
   DataPage,
+  EgressStatus,
   McpCompactToolList,
   McpDiscovery,
   McpServer,
@@ -25,6 +29,11 @@ import type {
   Provider,
   ProviderConfig,
   ProviderConfigUpdate,
+  Workspace,
+  WorkspaceCreate,
+  WorkspaceList,
+  WorkspacePatch,
+  WorkspaceTree,
   ProviderPresetCatalog,
   ProviderRegistry,
   ProviderRegistryCreate,
@@ -284,6 +293,55 @@ export const api = {
     json<McpDiscovery>(`/api/v1/config/mcp/servers/${encodeURIComponent(id)}/discover`, { method: "POST" }),
   /** 紧凑目录：不含 `input_schema`；完整 Schema 走 `getTools`。 */
   listMcpCompactTools: () => json<McpCompactToolList>("/api/v1/config/mcp/tools"),
+
+  /* ---------------------------------------------------------------------- */
+  /* §5.19 工作区                                                            */
+  /* ---------------------------------------------------------------------- */
+
+  /** 登记过的工作区；给 `sessionId` 时只列该会话绑定的。 */
+  listWorkspaces: (sessionId?: string) =>
+    json<WorkspaceList>(`/api/v1/workspaces${query({ session_id: sessionId })}`),
+  /**
+   * 登记工作区。`path` 是**相对工作区根**的路径（留空 = `sessions/<会话 id>/`）——
+   * 接口不接受宿主绝对路径，浏览器也拿不到（`doc/api.md` §7.1）。
+   */
+  createWorkspace: (payload: WorkspaceCreate) =>
+    json<Workspace>("/api/v1/workspaces", body(payload)),
+  getWorkspace: (id: string) =>
+    json<Workspace>(`/api/v1/workspaces/${encodeURIComponent(id)}`),
+  workspaceTree: (id: string, path = "", depth = 1) =>
+    json<WorkspaceTree>(
+      `/api/v1/workspaces/${encodeURIComponent(id)}/tree${query({ path, depth })}`,
+    ),
+  /** 提档 / 降档。**只有人能调**：Agent 没有提权通道（ADR-033 §3）。 */
+  patchWorkspace: (id: string, payload: WorkspacePatch) =>
+    json<Workspace>(`/api/v1/workspaces/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  /** 解除登记；**不删宿主文件**。 */
+  deleteWorkspace: (id: string) =>
+    noContent(`/api/v1/workspaces/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
+  /* ---------------------------------------------------------------------- */
+  /* §5.20 工作区审批                                                        */
+  /* ---------------------------------------------------------------------- */
+
+  listApprovals: (sessionId: string, status?: string) =>
+    json<ApprovalList>(
+      `/api/v1/sessions/${encodeURIComponent(sessionId)}/approvals${query({ status })}`,
+    ),
+  decideApproval: (id: string, decision: ApprovalDecision) =>
+    json<Approval>(
+      `/api/v1/approvals/${encodeURIComponent(id)}/decision`,
+      body({ decision }),
+    ),
+
+  /* ---------------------------------------------------------------------- */
+  /* §5.21 出网策略（只读）                                                  */
+  /* ---------------------------------------------------------------------- */
+
+  getEgressStatus: () => json<EgressStatus>("/api/v1/config/egress"),
 
   /* ---------------------------------------------------------------------- */
   /* §5.7 Agent 角色绑定与调参                                                */

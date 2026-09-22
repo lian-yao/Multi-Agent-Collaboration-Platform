@@ -27,6 +27,7 @@
  */
 
 import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { renderToStaticMarkup } from "react-dom/server";
 import { CollaborationGraph } from "../src/workspace/CollaborationGraph";
 import { CollabCanvas, type CollabConversation } from "../src/workspace/CollabCanvas";
@@ -43,6 +44,8 @@ import {
 } from "../src/workspace/AgentStageModal";
 import { formatStamp } from "../src/config/shared";
 import { Markdown } from "../src/components/Markdown";
+import { ApprovalCard, APPROVAL_STATUS_TEXT } from "../src/workspace/ApprovalCard";
+import type { Approval, ApprovalStatus } from "../src/types/api";
 import { Disclosure } from "../src/components/Disclosure";
 import { RunActivity } from "../src/workspace/RunActivity";
 import { ToolCallBlock } from "../src/workspace/TraceParts";
@@ -1509,6 +1512,105 @@ try {
 } catch (cause) {
   check("读取源文件做静态断言", false, cause instanceof Error ? cause.message : String(cause));
 }
+
+/* -------------------------------------------------------------------------- */
+/* 工作区审批卡片（§5.20 / §7.1）                                              */
+/* -------------------------------------------------------------------------- */
+
+function approval(status: ApprovalStatus, overrides: Partial<Approval> = {}): Approval {
+  return {
+    id: `ap-${status}`,
+    workspace_id: "w-1",
+    session_id: "s-1",
+    run_id: null,
+    kind: "delete",
+    target: "reports/old.md",
+    reason: "删除工作区内的条目",
+    status,
+    payload: {},
+    decided_by: null,
+    requested_at: "2026-09-23T02:01:00Z",
+    decided_at: null,
+    ...overrides,
+  };
+}
+
+const pendingApproval = renderToStaticMarkup(
+  <ApprovalCard approvals={[approval("pending")]} />,
+);
+check(
+  "审批卡片：待决策时给出目标、理由与两个动作",
+  pendingApproval.includes("需要你确认") &&
+    pendingApproval.includes("删除 reports/old.md") &&
+    pendingApproval.includes("删除工作区内的条目") &&
+    pendingApproval.includes("允许一次") &&
+    pendingApproval.includes("拒绝") &&
+    pendingApproval.includes("1 项待决定"),
+  pendingApproval.slice(0, 160),
+);
+check(
+  "审批卡片：把「需要审批」说成等人决策，而不是失败",
+  pendingApproval.includes("待你决定") && !/错误|失败/i.test(pendingApproval),
+  pendingApproval.slice(0, 160),
+);
+check(
+  "审批卡片：写明一次一授权、且需要 Agent 重试同一调用",
+  pendingApproval.includes("一次授权只放行一次") &&
+    APPROVAL_STATUS_TEXT.approved.includes("重试同一调用"),
+  APPROVAL_STATUS_TEXT.approved,
+);
+
+const decidedApproval = renderToStaticMarkup(
+  <ApprovalCard
+    approvals={[
+      approval("approved"),
+      approval("consumed", { id: "ap-consumed" }),
+      approval("denied", { id: "ap-denied" }),
+      approval("expired", { id: "ap-expired" }),
+    ]}
+  />,
+);
+check(
+  "审批卡片：已决策的四种状态各有明确文案",
+  decidedApproval.includes("已允许——Agent 重试同一调用时才会执行") &&
+    decidedApproval.includes("已放行过一次") &&
+    decidedApproval.includes("已拒绝") &&
+    decidedApproval.includes("已过期，未放行"),
+  decidedApproval.slice(0, 200),
+);
+check(
+  "审批卡片：已决策项不再提供动作按钮",
+  !decidedApproval.includes("允许一次") && !decidedApproval.includes(">拒绝<"),
+  decidedApproval.slice(0, 200),
+);
+check(
+  "审批卡片：没有审批时不渲染任何东西",
+  renderToStaticMarkup(<ApprovalCard approvals={[]} />) === "",
+  "",
+);
+
+check(
+  "审批卡片：不消费 allowAutoExecution（不给假开关）",
+  // 断言**渲染结果**：源码注释里说明「为什么不消费它」是允许的
+  // （本轮已经有三次被自己的注释绊倒：full_access / 提权 / allowAutoExecution）。
+  !/allowAutoExecution/.test(pendingApproval) && !/allowAutoExecution/.test(decidedApproval),
+  pendingApproval.slice(0, 120),
+);
+
+const conversationSource = readFileSync(join(process.cwd(), "src", "App.tsx"), "utf8");
+check(
+  "审批卡片挂在对话流：与执行活动相邻、并按会话轮询",
+  /<RunActivity[\s\S]{0,400}<ApprovalCard/.test(conversationSource) &&
+    conversationSource.includes("listApprovals(approvalsFor)"),
+  "",
+);
+check(
+  "导航「工作台」入口带待确认角标（状态在 App 层，卡片与角标共用同一份）",
+  /badge=\{pendingApprovals\}/.test(conversationSource) &&
+    /className="nav-badge"/.test(conversationSource) &&
+    /pendingApprovals = approvals\.filter/.test(conversationSource),
+  "",
+);
 
 const passed = results.filter(([ok]) => ok).length;
 for (const [ok, label] of results) console.log(`${ok ? "PASS" : "FAIL"}  ${label}`);

@@ -2163,3 +2163,148 @@
     grid-template-columns:minmax(0,1fr) auto minmax(0,1fr) 26px
   }
 }
+
+/* -------------------------------------------------------------------------- */
+/* 工作区（§5.19）与出网策略（§5.21）                                          */
+/* -------------------------------------------------------------------------- */
+
+.cfg-ws-list {
+  list-style:none;
+  margin:14px 0 0;
+  padding:0;
+  display:flex;
+  flex-direction:column;
+  gap:6px
+}
+
+.cfg-ws-item {
+  border:1px solid var(--cfg-line-faint);
+  border-radius:var(--cfg-radius-sm);
+  background:var(--cfg-surface-soft)
+}
+
+
+
+.cfg-ws-item.active {
+  border-color:var(--cfg-accent-soft);
+  background:var(--cfg-surface)
+}
+
+
+
+.cfg-ws-open {
+  width:100%;
+  display:flex;
+  flex-direction:column;
+  gap:6px;
+  padding:10px 12px;
+  border:0;
+  background:transparent;
+  font:inherit;
+  text-align:left;
+  cursor:pointer;
+  border-radius:var(--cfg-radius-sm)
+}
+
+
+
+.cfg-ws-open:hover {
+  background:var(--cfg-surface-hover)
+}
+
+
+
+.cfg-ws-open b {
+  font-size:12px;
+  color:#26444f;
+  overflow-wrap:anywhere
+}
+
+
+
+.cfg-ws-meta {
+  display:flex;
+  align-items:center;
+  gap:8px;
+  flex-wrap:wrap
+}
+
+
+
+.cfg-ws-detail {
+  margin-top:16px;
+  padding-top:14px;
+  border-top:1px solid var(--cfg-line-soft)
+}
+
+
+
+.cfg-ws-tree {
+  list-style:none;
+  margin:12px 0 0;
+  padding:0 0 0 12px;
+  display:flex;
+  flex-direction:column;
+  gap:5px;
+  border-left:1px solid var(--cfg-line-soft)
+}
+
+
+
+.cfg-ws-tree li {
+  display:flex;
+  align-items:center;
+  gap:8px;
+  flex-wrap:wrap;
+  font-size:11px
+}
+
+
+
+.cfg-ws-tree li.outside {
+  color:#8b9da5
+}
+
+
+
+.cfg-ws-tree-name {
+  color:#26444f;
+  overflow-wrap:anywhere
+}
+
+
+
+.cfg-ws-tree-facts {
+  color:#8b9da5
+}
+
+
+
+.cfg-egress-blocked {
+  margin-top:14px;
+  font-size:11px;
+  color:#577583
+}
+
+
+
+.cfg-egress-blocked ul {
+  list-style:none;
+  margin:8px 0 0;
+  padding:0;
+  display:flex;
+  flex-wrap:wrap;
+  gap:10px
+}
+
+
+
+.cfg-egress-blocked li {
+  display:flex;
+  align-items:center;
+  gap:6px;
+  padding:4px 8px;
+  border:1px solid var(--cfg-line-faint);
+  border-radius:var(--cfg-radius-sm);
+  background:var(--cfg-surface-soft)
+}

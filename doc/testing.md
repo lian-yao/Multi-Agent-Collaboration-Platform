@@ -1911,8 +1911,13 @@ headless Chrome 打开离线预览页 `file://.../ui-preview.html`，点到「�
   "所有目标都走代理"**（内部服务应直连，`NO_PROXY` 语义要在 `EgressPolicy` 里实现）；
   另外 `host.docker.internal` 在 internal 网络里不可达，内网模型端点必须经代理放行，
   已写进部署文档；
-- **前端还没做**：工作区选择器、档位与目录树、审批卡片、egress 只读面板都属下一批；
-  接口已就绪（§5.19–§5.21），但界面尚未接；
+- **前端已接（同轮）**：配置页新增「工作区」分区（登记、档位提降、目录树与配额、越界
+  符号链接标注），「执行边界」扩成沙箱 + 出网策略（只读），对话流内加审批卡片
+  （pending / approved / consumed / denied / expired 五态），并在 `App.tsx` 按会话轮询审批。
+  门禁：`npm run build`（tsc + vite）通过；`config-smoke` **86/86**（新增工作区与出网 9 条）、
+  `workspace-smoke` **210/210**（新增审批卡片与导航角标 9 条）；部署形态下前端容器已服务新 bundle，
+  `/api/v1/workspaces` 与 `/api/v1/config/egress` 经前端反代均 200。浏览器里的观感仍按
+  `doc/deployment.md`「演示与验收」的清单人工过一遍（前端没有测试框架，这是既有限制）；
 - **`doc/15` 只加了两条**：模块 3 的工作区与出网边界、第五节的三层边界表；该文件是事实源，
   其余表述未动。
 

@@ -39,7 +39,15 @@ import { draftProblem, draftToPayload, parseMcpImport, type McpImportDraft } fro
 import { entriesToRecord, recordToEntries, samePairs } from "../src/config/KeyValueFields";
 import { McpImportModal } from "../src/config/McpImportModal";
 import { SandboxBoundary } from "../src/config/SandboxPanel";
-import type { Agent, ProviderRegistryDetail, SandboxStatus } from "../src/types/api";
+import { EgressBoundary } from "../src/config/EgressPanel";
+import { WorkspaceBoundary } from "../src/config/WorkspacePanel";
+import type {
+  Agent,
+  ProviderRegistryDetail,
+  SandboxStatus,
+  Workspace,
+  WorkspaceTree,
+} from "../src/types/api";
 
 (globalThis as Record<string, unknown>).fetch = async () => ({
   ok: true,
@@ -60,7 +68,11 @@ try {
   check("配置页整体可静态渲染", false, cause instanceof Error ? cause.message : String(cause));
 }
 
-check("渲染出 4 个分区入口", ["Provider", "默认路由", "MCP 工具", "执行边界"].every((label) => page.includes(label)), page.slice(0, 300));
+check(
+  "渲染出 5 个分区入口",
+  ["Provider", "默认路由", "MCP 工具", "工作区", "执行边界"].every((label) => page.includes(label)),
+  page.slice(0, 300),
+);
 check(
   "配置页不再携带已迁走的分区",
   !page.includes("运行采样") && !page.includes("Agent 角色"),
@@ -76,7 +88,7 @@ check(
 );
 check(
   "副路由带 aria-selected 与 tab 角色",
-  (page.match(/role="tab"/g) ?? []).length === 4 && page.includes('aria-selected="true"'),
+  (page.match(/role="tab"/g) ?? []).length === 5 && page.includes('aria-selected="true"'),
   String((page.match(/role="tab"/g) ?? []).length),
 );
 check(
@@ -790,6 +802,146 @@ check(
   page.includes("执行边界") &&
     /id:\s*"sandbox"/.test(configPageSource) &&
     /<SandboxPanel\s*\/>/.test(configPageSource),
+  "",
+);
+
+/* -------------------------------------------------------------------------- */
+/* 工作区（§5.19）与出网策略（§5.21）                                          */
+/* -------------------------------------------------------------------------- */
+
+check(
+  "工作区成为独立分区，且执行边界同时挂沙箱与出网",
+  /id:\s*"workspaces"/.test(configPageSource) &&
+    /<WorkspacePanel\s*\/>/.test(configPageSource) &&
+    /<EgressPanel\s*\/>/.test(configPageSource),
+  "",
+);
+
+const workspaceTree: WorkspaceTree = {
+  workspace_id: "w-1",
+  path: "",
+  depth: 2,
+  truncated: false,
+  limit: 500,
+  entries: [
+    {
+      name: "reports",
+      path: "reports",
+      kind: "dir",
+      outside: false,
+      size_bytes: null,
+      modified_at: null,
+      children: [
+        {
+          name: "summary.md",
+          path: "reports/summary.md",
+          kind: "file",
+          outside: false,
+          size_bytes: 2048,
+          modified_at: null,
+        },
+      ],
+    },
+    {
+      name: "escape",
+      path: "escape",
+      kind: "symlink",
+      outside: true,
+      size_bytes: null,
+      modified_at: null,
+    },
+  ],
+};
+const workspaceRow: Workspace = {
+  id: "w-1",
+  session_id: "s-1",
+  path: "project/reports",
+  mode: "read_only",
+  name: null,
+  quota: { max_file_bytes: 5242880, max_total_bytes: 268435456, max_entries: 2000 },
+  usage: { available: true, total_bytes: 2048, entries: 2, truncated: false },
+  created_by: null,
+  updated_by: null,
+  created_at: "2026-09-23T02:00:00Z",
+};
+const workspaceMarkup = renderToStaticMarkup(
+  <WorkspaceBoundary
+    workspaces={[workspaceRow]}
+    selectedId="w-1"
+    tree={workspaceTree}
+  />,
+);
+check(
+  "工作区：列表、档位、用量与配额都渲染出来",
+  workspaceMarkup.includes("project/reports") &&
+    workspaceMarkup.includes("只读") &&
+    workspaceMarkup.includes("2.0 KB") &&
+    workspaceMarkup.includes("256.0 MB"),
+  workspaceMarkup.slice(0, 200),
+);
+check(
+  "工作区：越界符号链接被标出来且不展开",
+  workspaceMarkup.includes("工作区外") &&
+    // 越界链接没有子项，所以 only 工作区内的目录才带下一层
+    workspaceMarkup.includes("summary.md"),
+  workspaceMarkup.slice(0, 200),
+);
+check(
+  "工作区：提档是显式动作，且没有 full_access 这一档",
+  workspaceMarkup.includes("提档为可写") && !workspaceMarkup.includes("full_access"),
+  workspaceMarkup.slice(0, 200),
+);
+check(
+  "工作区：明确说明覆盖与删除需要人工审批",
+  workspaceMarkup.includes("人工审批"),
+  workspaceMarkup.slice(0, 200),
+);
+
+const egressMarkup = renderToStaticMarkup(
+  <EgressBoundary
+    status={{
+      mode: "public_only",
+      allow_hosts: ["*.example.com"],
+      deny_hosts: [],
+      internal_hosts: ["redis", "search-gateway"],
+      allowed_ports: [443, 8800],
+      model_exempt: true,
+      max_redirects: 5,
+      blocked: {},
+    }}
+  />,
+);
+check(
+  "出网策略：只读展示模式、内部服务与端口",
+  egressMarkup.includes("只放公网") &&
+    egressMarkup.includes("search-gateway") &&
+    egressMarkup.includes("443、8800") &&
+    !/<input|<select|<textarea/.test(egressMarkup),
+  egressMarkup.slice(0, 200),
+);
+check(
+  "出网策略：计数为 0 时说明这是进程内计数，不说成「没有被拦过」",
+  egressMarkup.includes("本进程还没有拒绝记录") &&
+    egressMarkup.includes("macp_egress_blocked_total"),
+  egressMarkup.slice(0, 200),
+);
+
+const configPanelSource = readFileSync(
+  join(process.cwd(), "src", "config", "WorkspacePanel.tsx"),
+  "utf8",
+);
+check(
+  "工作区面板：不做原生目录对话框、不出现 full_access、也不提供提权入口",
+  !/showDirectoryPicker|type="file"/.test(configPanelSource) &&
+    // 只看**渲染结果**：源码注释里解释「为什么不提供这一档 / 这个入口」是允许的，
+    // 断言源码会把解释本身判成违规（这一条就是被自己的注释绊倒过一次）。
+    !/full_access|提权/.test(workspaceMarkup),
+  workspaceMarkup.slice(0, 120),
+);
+check(
+  "审批入口指向对话流而不是配置页（归属不重复）",
+  configPanelSource.includes("审批入口在对话流") &&
+    !/decideApproval/.test(configPanelSource),
   "",
 );
 
