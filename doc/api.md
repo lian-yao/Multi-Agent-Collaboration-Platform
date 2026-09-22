@@ -1534,6 +1534,41 @@ POST /api/v1/agents/{agent_id}/run
      `metrics` 指标采样（§5.6）。三者的体量与读取频率差很多，同页混排会互相淹没。
      容器与行渲染器在 `frontend/src/records/Inspection.tsx`
      （`Records` 统一「加载中 / 失败 / 未接入 / 无记录 / 有数据」五态，分页仅在多页时出现）。
+  4. 「工具与配置」新增 `workspaces` 分区（`config/WorkspacePanel.tsx`，§5.19）：
+     工作区列表 + 选中后的目录树与配额。**登记与提档是人的动作**——它是本页唯一
+     会改变 Agent 能力边界的分区，因此也放在「写配置」这一组里。
+     「执行边界」分区扩成两段：沙箱（§5.15）+ **出网策略（§5.21，只读）**——
+     两者都是部署期安全边界，只回答「现在是什么口径」，不给运行期开关。
+  5. 对话流内的**审批卡片**（`workspace/ApprovalCard.tsx`，§5.20）：破坏性动作
+     （覆盖 / 删除）的放行入口。挂在执行活动卡片里（`workspace/RunActivity.tsx`），
+     与触发它的那次工具调用同处；顶栏「对话」入口带 pending 角标。
+
+### 7.1 工作区与审批的前端约定（§5.19 / §5.20 / §5.21）
+
+- **不要做「选择本地文件夹」的原生对话框**：浏览器给不了后端宿主路径。用户能选的是
+  **服务端可见的根内子目录**（`WORKSPACE_HOST_ROOT` 之下），列表来自 `GET /workspaces`
+  与 `GET /workspaces/{id}/tree`。文案照此写，避免让人以为能选任意路径（ADR-033 §1）。
+- **档位只有两档，且提档是人的动作**：`read_only` ⇄ `workspace_write`（`PATCH`，§5.19）。
+  **界面上不出现 `full_access`**——它没有实现，放上去就是假开关（ADR-033 §2）。
+  档位切换要写明后果：「提档后本次会话的 Agent 多出三个写工具（新建 / 建目录 / 移动）」。
+- **Agent 没有提权通道**：不要做「Agent 申请提权 → 用户点同意」的卡片。越界访问由服务端
+  直接拒绝（`WORKSPACE_PATH_REJECTED`），界面只如实转述（ADR-033 §3）。
+- **目录树是只读视图**：`kind=symlink` 且 `outside=true` 的条目要标出来且**不可展开**；
+  它们不是可读内容，也不该在界面上看起来像普通目录。
+- **审批卡片回答三个问题**：要动什么（`kind` + `target`）、为什么要人来看（`reason`，
+  由平台生成）、决策后会发生什么。三个按钮状态要对齐服务端语义：
+  `approved` = 「已允许，Agent 重试同一调用才会执行」、`denied` = 「已拒绝」、
+  `consumed` = 「已放行过一次」、`expired` = 「已过期，未放行」。
+  **不要把「需要审批」渲染成「失败」**：Agent 侧那条 `409 WORKSPACE_APPROVAL_REQUIRED`
+  是流程的第二段，不是错误终点。
+- **`allowAutoExecution` 不给界面出口**：它至今没有消费方（ADR-020 / ADR-026 同一取向），
+  审批落地后它才有语义；在那之前不给假开关。
+- **出网策略只读**：`GET /config/egress` 只展示模式、白/黑名单、内部服务、端口、
+  模型豁免与**进程内**拒绝计数。计数在 worker 进程里增长，界面要么标注「本进程」，
+  要么引导看 Prometheus 的 `macp_egress_blocked_total`——不要把 0 说成「没有被拦过」。
+- 联调与冒烟：`frontend/rendercheck/config-smoke.tsx` 覆盖工作区面板与出网段的
+  「加载 / 失败 / 空 / 有数据」四态；`workspace-smoke.tsx` 覆盖审批卡片在
+  pending / approved / consumed / expired 四种状态下的渲染，且断言文案与服务端语义一致。
 - 全站版式与控件复用：
   - 页面级标题一律用 `.page-heading`（眉标 + `h1` + 一句话释义），左对齐、不居中。
   - 页面级副路由一律用 `components/PageTabs.tsx`（`role="tablist"`、←/→ 键盘可达、
