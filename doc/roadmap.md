@@ -761,7 +761,15 @@ Supervisor 的 handoff 与二次规划（属 A）。
 要严格执行审批就设 `WORKSPACE_SANDBOX_MOUNT=ro`；② Docker Desktop 把 bind 统一显示为
 uid 0，非 0 身份的沙箱写不进去，所以 compose 默认 `SANDBOX_UID/GID=0`。
 
-**仍未做**：网络层代理强制与 MCP/模型 SDK 内的 IP 钉扎（ADR-034 实现口径列出四项）、
-前端四个界面（工作区选择器、档位与目录树、审批卡片、egress 面板）。
+**第二轮补齐（同日）**：ADR-034 原先列的四项已全部落地并实测——新增 `egress-proxy`
+作为硬边界（明文 HTTP 绝对 URI + HTTPS `CONNECT`，共用同一套判定与钉扎），MCP 与模型
+SDK 靠 `HTTP_PROXY`/`HTTPS_PROXY` 整段落到代理上（因此不再需要 SDK 内部钉扎），
+search-gateway 脚本显式接入代理，沙箱联网时只接内部网络并注入代理变量；最后把
+**backend 与 search-gateway 挪到 internal-only 网络**，从物理上断掉直连（实测：内网里
+外部 DNS 都不通，但经代理的 HTTPS 返回 200；私网与云元数据由代理回 403）。
+代价与连带改动写在 `doc/testing.md` §4.16：backend 不再发布 8000、宿主入口改走前端反代，
+内网模型端点必须经代理放行。
+
+**仍未做**：前端四个界面（工作区选择器、档位与目录树、审批卡片、egress 面板）。
 详情见 `doc/testing.md` §4.16。
 

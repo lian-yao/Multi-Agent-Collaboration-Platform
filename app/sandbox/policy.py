@@ -52,6 +52,15 @@ ALLOWED_MODULES: frozenset[str] = frozenset(
     }
 )
 
+NETWORK_MODULES: frozenset[str] = frozenset({"urllib", "http", "httpx", "urllib3"})
+"""HTTP 客户端模块：**只在沙箱联网打开时**放行（ADR-034 §4）。
+
+默认禁网时连它们一起禁——"没有网却允许写网络代码"只会让失败发生在更晚、更难查的地方。
+
+`socket` **始终禁止**：那等于允许任意端口探测。放行的是 HTTP 客户端这一层，
+而沙箱的网络出口本身就只有代理（容器只接 internal 网络，没有默认路由）。
+"""
+
 FORBIDDEN_CALLS: frozenset[str] = frozenset(
     {
         "__import__",
@@ -81,10 +90,11 @@ FORBIDDEN_ATTRIBUTES: frozenset[str] = frozenset(
     }
 )
 
-def check_python_source(code: str) -> None:
+def check_python_source(code: str, *, allow_network: bool = False) -> None:
     """校验一段 Python 源码，越权时抛 `SandboxViolation`。
 
     拒绝：语法错误、非白名单 import、危险内建调用、双下划线逃逸属性。
+    `allow_network=True`（沙箱联网打开时）额外放行 HTTP 客户端模块。
     """
 
     if not code.strip():
@@ -96,9 +106,11 @@ def check_python_source(code: str) -> None:
 
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            _check_import_names([alias.name for alias in node.names])
+            _check_import_names(
+                [alias.name for alias in node.names], allow_network=allow_network
+            )
         elif isinstance(node, ast.ImportFrom):
-            _check_import_names([node.module or ""])
+            _check_import_names([node.module or ""], allow_network=allow_network)
         elif isinstance(node, ast.Call):
             _check_call(node)
         elif isinstance(node, ast.Attribute):
@@ -135,12 +147,13 @@ _FORBIDDEN_SHELL_PATTERNS: tuple[tuple[str, str], ...] = (
 )
 
 
-def _check_import_names(modules: list[str]) -> None:
+def _check_import_names(modules: list[str], *, allow_network: bool = False) -> None:
+    allowed = ALLOWED_MODULES | NETWORK_MODULES if allow_network else ALLOWED_MODULES
     for module in modules:
         root = module.split(".")[0]
         if not root:
             raise SandboxViolation("禁止相对导入")
-        if root not in ALLOWED_MODULES:
+        if root not in allowed:
             raise SandboxViolation(f"禁止导入模块: {module}")
 
 

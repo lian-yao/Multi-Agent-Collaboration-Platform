@@ -651,3 +651,52 @@ def test_uid_and_gid_are_used_when_configured(monkeypatch):
 
     _, kwargs = client.run_calls[0]
     assert kwargs["user"] == "1000:1000"
+
+
+# --- 联网沙箱：只接内部网络 + 必须走代理（ADR-034 §4） ----------------------
+
+
+def test_networked_sandbox_is_confined_to_the_internal_network(monkeypatch):
+    """允许联网时不是"把沙箱接到公网"，而是"接内部网 + 只给代理出口"。"""
+
+    client = _install_fake_docker(monkeypatch)
+    sandbox = DockerSandbox(
+        _settings(
+            network_enabled=True,
+            egress_network="macp-internal",
+            egress_proxy_url="http://egress-proxy:8888",
+        )
+    )
+
+    sandbox.run(CODE)
+
+    _, kwargs = client.run_calls[0]
+    assert kwargs["network_disabled"] is False
+    assert kwargs["network"] == "macp-internal"
+    assert kwargs["environment"]["HTTP_PROXY"] == "http://egress-proxy:8888"
+    assert kwargs["environment"]["HTTPS_PROXY"] == "http://egress-proxy:8888"
+    assert kwargs["environment"]["NO_PROXY"] == "localhost,127.0.0.1,::1"
+
+
+def test_networked_sandbox_without_an_internal_network_still_runs(monkeypatch):
+    """没配内部网络名时不静默假装受约束：照常启动，但不会有 network 参数。"""
+
+    client = _install_fake_docker(monkeypatch)
+    sandbox = DockerSandbox(_settings(network_enabled=True))
+
+    sandbox.run(CODE)
+
+    _, kwargs = client.run_calls[0]
+    assert "network" not in kwargs
+    assert "environment" not in kwargs
+
+
+def test_sandbox_network_stays_off_by_default(monkeypatch):
+    client = _install_fake_docker(monkeypatch)
+
+    DockerSandbox(_settings()).run(CODE)
+
+    _, kwargs = client.run_calls[0]
+    assert kwargs["network_disabled"] is True
+    assert "network" not in kwargs
+    assert "environment" not in kwargs

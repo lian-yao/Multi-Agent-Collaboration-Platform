@@ -81,12 +81,14 @@ if ($upExitCode -ne 0) {
 }
 
 Wait-HttpHealth "Frontend" "http://localhost:5173/"
-Wait-HttpHealth "Backend" "http://localhost:8000/health"
+# backend 只接 internal 网络、不再发布 8000（ADR-034 §4 的网络层强制），
+# 所以它的健康探针经前端反代走 —— nginx 里有一条 `location = /health`。
+Wait-HttpHealth "Backend" "http://localhost:5173/health"
 Wait-HttpHealth "Dapr Sidecar" "http://localhost:3500/v1.0/metadata"
 
 Write-Host ""
 Write-Host "Web UI:       http://localhost:5173"
-Write-Host "Backend:      http://localhost:8000"
+Write-Host "Backend API:  http://localhost:5173/api/v1  (经前端反代；backend 不发布宿主端口)"
 Write-Host "Dapr API:     http://localhost:3500"
 Write-Host "Jaeger:       http://localhost:16686"
 Write-Host "Prometheus:   http://localhost:9090"

@@ -92,6 +92,7 @@ cd deploy; .\start.ps1                     # 起完整环境
 | U-21 | 工作区写档位与破坏性动作审批（ADR-033 阶段 2/3） | 只读档位下**写工具不进工具集**（档位决定可用动作集合）；写新文件免审批并自动建父目录、`overwrite=true` 在目标存在时提交审批而新建时仍算新建；配额与越界写各自拒绝；删除进 `.trash/<时间戳>-<名>`（软删除）；审批四条不变量——**一次一授权**（放行后置 `consumed`，再动同一目标要重新申请）、**不覆盖既成决定**（二次决策 409）、**过期不放行**（TTL 后置 `expired`）、**不刷屏**（同一目标复用同一条 pending）；审批按 `workspace_id + kind + target` 匹配（不同目标/工作区/动作互不放行） | M5 后（§4.16） |
 | U-22 | 沙箱挂载会话工作区与宿主路径反查（ADR-033 §7） | 沙箱容器参数多一条：只挂**本次会话**的工作区且挂到与 backend 相同的路径；**档位决定 `rw`/`ro`**；`SANDBOX_WORKSPACE_MOUNT=none` 时退回 `/tmp` 不挂；`uid/gid` 配置生效；**不变量——沙箱容器绝不挂宿主 Docker socket**（专例钉住）；宿主路径反查按真实 mountinfo 数据测三种形态（Linux bind 取 source、Docker Desktop 9p/drvfs 取「盘符 + root」拼 `/run/desktop/mnt/host/<盘符>/…`、最长挂载点优先），翻不出来时显式报错并指向 `SANDBOX_WORKSPACE_HOST_ROOT`；`open`/`io`/`pathlib`/`glob` 放行而 `os`/网络/进程执行仍禁 | M5 后（§4.16） |
 | U-23 | 出网策略：判定、钉扎与接线（ADR-034） | SSRF 表 24 例（各私网与保留网段边界值、`169.254.169.254`、IPv6 与 IPv4-mapped、十进制与十六进制 IP 写法、`user:pass@`、非 http(s)、端口白名单）；域名规则（`*.` 按 **label 边界**、黑名单优先、allowlist 模式、非法规则的配置错误）；解析失败必须**拒绝而非放行**；内部服务与模型流量两类豁免的边界（同一内网地址：`purpose=model` 放行、`purpose=tool` 拒绝；豁免私网判定**不等于**豁免端口）；**真起本地 HTTP 服务**验钉扎连接、逐跳重校验重定向、重定向上限、响应体上限、被拒时不开 socket；接线两处——工具侧默认取数拒绝映射为 `retryable=false`、MCP `http`/`sse` 在**打开会话时**判定（构造会话工厂保持零 IO，ADR-026） | M5 后（§4.16） |
+| U-24 | 强制出网代理与联网沙箱（ADR-034 §4 四项补齐） | 代理两种形态各自成例：`CONNECT` 到私网目标回 403 且在**代理侧**计数、`CONNECT` 到允许目标真的把字节转过去（回显验证）、绝对 URI 转发可到达允许目标、私网目标 403、相对 URI 400（不被误当自建服务）；**代理模式**下客户端不本地解析 DNS（用"解析就失败"的替身钉住）但仍执行 scheme/端口/域名规则；**客户端 → 代理 → 上游**真跑一遍（客户端只连代理，判定与取数在代理侧）、代理侧拒绝如实回给客户端；联网沙箱只接内部网络并带 `HTTP_PROXY`/`NO_PROXY`，未配网络名时不假装受约束、默认仍然禁网；网关的 `_build_opener` 在配了代理环境变量时才挂 `ProxyHandler` | M5 后（§4.16） |
 
 ### 2.2 集成测试（I）
 
@@ -1894,9 +1895,22 @@ headless Chrome 打开离线预览页 `file://.../ui-preview.html`，点到「�
 - **沙箱进程身份**：代码默认 `nobody`，但 Docker Desktop 把 bind 统一显示为 uid 0，
   `nobody` 写不进去（真机实测 `PermissionError`）。compose 因此默认 `SANDBOX_UID/GID=0`，
   Linux 宿主建议改成宿主 uid；
-- **出网策略的四个未做项**（理由见 ADR-034 实现口径）：网络层代理强制、MCP/模型 SDK 内的
-  IP 钉扎（当前只做建连前判定，仍有"判定时公网、连接时内网"的理论窗口）、search-gateway
-  脚本自身出网、以及沙箱（它根本没有网络）；
+- **出网策略的四项已补齐，但最后一步未实测**：新增 `egress-proxy`（明文 HTTP 绝对 URI +
+  HTTPS `CONNECT`，两种形态共用同一套「解析 → 私网判定 → 钉扎」），MCP/模型 SDK 靠
+  `HTTP_PROXY`/`HTTPS_PROXY` 整段落到代理上（不再需要 SDK 内部钉扎），search-gateway 脚本
+  显式构造 `ProxyHandler` 接入，沙箱联网时只接内部网络并注入代理变量。
+  **最后一步（internal-only 网络）已实测**：backend 与 search-gateway 只接
+  `internal: true` 的网络，物理上无法直连出网；宿主侧入口改为前端反代
+  （`/api/` 与新增的 `/health`，`start.ps1` 随之改）。实测结论：
+  **internal 网络里端口发布无效、外部 DNS 也不通**（正好印证代理模式的设计），
+  backend 里 `socket.gethostbyname('www.baidu.com')` → `gaierror`，而同一进程走代理的
+  `urlopen('https://www.baidu.com')` → **200**；`http://10.0.0.5/` 与
+  `http://169.254.169.254/` 由**代理侧**回 403；联网沙箱里同样"代理 200 / 私网 403"。
+  过程中踩到两个真问题并修掉：**gRPC 只认小写 `no_proxy`**（只给大写会让 Dapr 的
+  durabletask worker 把 gRPC 发给代理拿 403 后无限重试）、以及**应用侧把"有代理"错当成
+  "所有目标都走代理"**（内部服务应直连，`NO_PROXY` 语义要在 `EgressPolicy` 里实现）；
+  另外 `host.docker.internal` 在 internal 网络里不可达，内网模型端点必须经代理放行，
+  已写进部署文档；
 - **前端还没做**：工作区选择器、档位与目录树、审批卡片、egress 只读面板都属下一批；
   接口已就绪（§5.19–§5.21），但界面尚未接；
 - **`doc/15` 只加了两条**：模块 3 的工作区与出网边界、第五节的三层边界表；该文件是事实源，

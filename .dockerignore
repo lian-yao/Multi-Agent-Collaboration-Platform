@@ -12,3 +12,4 @@ examples
 # scripts/ 整体不进镜像，只有 web_search 的网关需要（ADR-032）。
 scripts/*
 !scripts/search_gateway.py
+!scripts/egress_proxy.py

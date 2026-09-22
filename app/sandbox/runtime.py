@@ -142,7 +142,8 @@ def run_in_sandbox(
         )
 
     if resolved_language == "python":
-        check_python_source(code)
+        # 联网开关同时决定"能不能写网络代码"：默认禁网时连 urllib/httpx 一起禁。
+        check_python_source(code, allow_network=resolved_settings.network_enabled)
     else:
         check_shell_command(code)
 

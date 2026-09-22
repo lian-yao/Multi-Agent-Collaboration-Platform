@@ -84,6 +84,25 @@ def test_file_access_is_allowed_now_that_the_sandbox_mounts_the_workspace():
     check_python_source("import pathlib\npathlib.Path('a.txt').write_text('x')")
 
 
+def test_network_modules_are_only_allowed_when_networking_is_on():
+    """联网开关同时决定"能不能写网络代码"（ADR-034 §4）：
+
+    默认禁网时连 `urllib` 都禁；打开联网后放行 HTTP 客户端模块，
+    但 `socket` 仍然禁止——那等于允许任意端口探测。
+    """
+
+    with pytest.raises(SandboxViolation):
+        check_python_source("import urllib.request")
+
+    check_python_source("import urllib.request", allow_network=True)
+    check_python_source("import httpx", allow_network=True)
+
+    with pytest.raises(SandboxViolation):
+        check_python_source("import socket", allow_network=True)
+    with pytest.raises(SandboxViolation):
+        check_python_source("import subprocess", allow_network=True)
+
+
 @pytest.mark.parametrize(
     "code",
     [

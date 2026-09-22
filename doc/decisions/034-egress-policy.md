@@ -161,17 +161,53 @@
   那条路径要求零 IO（ADR-026），构造期做 DNS 会把目录变成"网络可用性的函数"；
 - `GET /api/v1/config/egress` 提供只读投影（理由：能改策略的接口就是绕过边界的路）。
 
-**明确未做**（不是遗漏，是排期与可行性）：
+## 修订（2026-09-23）：四项补齐——代理落地，其余全部逼到代理上
 
-1. **网络层强制**（§4 第 2 步的 egress 代理）：应用层挡得住我们自己的代码，挡不住
-   未来某处的直连，这条要等代理落地；
-2. **MCP / 模型 SDK 内的 IP 钉扎**：MCP 的 streamable-http/sse 客户端与模型 SDK 自建
-   httpx 连接，不接受自定义 transport，所以现在只能做**建连前判定**，理论上留着
-   "判定时公网、连接时内网"的窗口。工具侧没有这个问题（自己建连接，已钉扎）；
-3. **search-gateway 脚本自身的出网**：它是独立容器里的标准库脚本、上游是固定的
-   `cn.bing.com`，目标不由模型决定，因此暂不引入 app 依赖去接策略；
-4. **沙箱**：`SANDBOX_NETWORK_ENABLED=false`，沙箱根本没有网络——它不需要这层策略，
-   将来要开也只准走代理（§4 末段）。
+第一版实现之后留了四条口子。第二轮的做法是**先造出那个真正的强制点**，再把其余三项
+都变成「把流量逼到它上面」：
+
+1. **网络层强制：新增 `egress-proxy` 服务**（`scripts/egress_proxy.py`，与 backend 共用
+   镜像）。它是 HTTP 代理：明文 HTTP 走绝对 URI 转发、HTTPS 走 `CONNECT` 隧道，
+   两种形态都先经**同一套策略**（解析 → 私网判定 → 钉在 IP 上连接）再转发，
+   策略日志与 `macp_egress_blocked_total` 一并复用。代理自己**不允许再配代理**
+   （启动即拒绝，避免绕圈），且 `EGRESS_INTERNAL_HOSTS` 留空——代理只服务公网访问，
+   内部服务由客户端直连（`NO_PROXY` 排除），否则代理会变成"任何容器都能探测内网"的跳板。
+2. **MCP / 模型 SDK 的钉扎问题，由代理解决**：这两个 SDK 自建 httpx 连接、不接受自定义
+   transport，但它们都认 `HTTP_PROXY`/`HTTPS_PROXY`，于是请求整段落到代理手里——
+   "解析域名 + 判私网 + 钉住 IP 连接"三件事在代理侧一次完成。客户端侧因此**不再需要
+   DNS**：代理模式下客户端只解析代理主机（compose 服务名），`EgressPolicy.evaluate`
+   相应跳过本地解析与私网判定（scheme / 端口 / 域名白黑名单仍在本地跑，好处是拒绝快、
+   原因准）。
+3. **search-gateway 脚本出网**：保持"只用标准库"的设计，靠 `HTTP_PROXY`/`HTTPS_PROXY`
+   环境变量接入（脚本里显式构造 `ProxyHandler`，不是依赖 urllib 的隐式行为）。
+4. **沙箱联网**：`SANDBOX_NETWORK_ENABLED=true` 时，沙箱**只接内部网络**
+   （`SANDBOX_EGRESS_NETWORK`，compose 里 `internal: true`，没有默认路由），并注入
+   `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`。于是"允许沙箱联网"等于"允许它经代理访问公网"，
+   而不是把它直接接到公网。默认仍然是关的。
+
+**最后一步已落地并实测**（2026-09-23，引擎恢复后）：backend 与 search-gateway 改为
+**internal-only**，前端 / Dapr sidecar / Redis / PostgreSQL / Jaeger / Prometheus 双网
+（既服务宿主发布，又能访问 internal 上的 backend），`egress-proxy` 双网。
+实测到的三条关键事实，逐条影响着实现：
+
+1. **internal 容器的端口发布无效**（宿主连不上）→ backend 因此**不再发布 8000**，
+   宿主侧入口统一走前端：nginx 反代 `/api/` 与新增的 `location = /health`，
+   `start.ps1` 的「Backend is healthy」也改走 `http://localhost:5173/health`；
+2. **internal 网络里外部 DNS 也不通**（`gaierror`）→ 这正好印证了代理模式的设计：
+   客户端只解析代理主机（compose 服务名），目标域名与地址判定全在代理侧；
+3. **gRPC 只认小写 `no_proxy`** → 只给大写时，Dapr 的 durabletask worker 会把 gRPC
+   连接发给代理、拿到 403、然后无限重试（实测 `UNAVAILABLE ... HTTP proxy returned
+   response code 403`）。compose 因此**两种大小写都给**，并在应用侧加了
+   `EGRESS_NO_PROXY`（内部服务直连，不走代理）。
+
+另一个如实记录的后果：**`host.docker.internal` 在 internal 网络里不可达**
+（`192.168.65.254` 没有路由，实测 `Network is unreachable`）。所以内网模型端点
+（Ollama、自建网关）必须**经代理放行**：`EGRESS_PROXY_INTERNAL_HOSTS` 写主机名、
+从 `NO_PROXY` 去掉它、端口加进 `EGRESS_ALLOWED_PORTS`。公网模型服务（默认路线）不受影响。
+
+还有一条代理的固有性质：**`CONNECT` 隧道里代理看不到也不能校验目标证书**，
+证书校验由客户端完成。所以这里的"钉扎"含义是"连接钉在解析出的公网 IP 上 + 私网一律
+拒绝"，不是"代理替客户端做 TLS 校验"。
 
 另外补了一条实现细节：**端口白名单与私网豁免是两件事**。search-gateway 是内网服务，
 但它在 8800 端口，所以部署侧要同时配 `EGRESS_INTERNAL_HOSTS=…search-gateway…` 与

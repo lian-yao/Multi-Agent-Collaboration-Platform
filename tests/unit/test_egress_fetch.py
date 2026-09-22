@@ -117,3 +117,85 @@ def test_rejections_show_up_in_the_prometheus_probe(server):
         http_get(f"{server}/json", policy=policy)
 
     assert b"macp_egress_blocked_total" in render_prometheus_metrics()
+
+
+# --------------------------------------------------------------------------- #
+# 强制代理模式：客户端 → 代理 → 上游（ADR-034 §4）
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def proxy_server(server):
+    """一个策略允许本机目标（内部服务）的代理，供客户端经它取数。"""
+
+    from scripts.egress_proxy import build_server
+
+    port = server.rsplit(":", 1)[1]
+    policy = EgressPolicy(
+        EgressSettings(
+            _env_file=None,
+            allowed_ports=f"443,{port}",
+            internal_hosts="127.0.0.1",
+        )
+    )
+    httpd = build_server("127.0.0.1", 0, policy=policy, timeout=5.0)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield httpd.server_address[1]
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
+
+
+def test_client_fetches_through_the_proxy(server, proxy_server):
+    """真正走一遍：客户端只连代理（不解析目标域名），代理负责判定与取数。"""
+
+    port = server.rsplit(":", 1)[1]
+    client_policy = EgressPolicy(
+        EgressSettings(
+            _env_file=None,
+            allowed_ports=f"443,{port}",
+            internal_hosts="",  # 客户端不认识这个地址，全靠代理放行
+            proxy_url=f"http://127.0.0.1:{proxy_server}",
+            # 目标刚好在回环上，而 `no_proxy` 默认含回环 → 显式清空，本用例要验的
+            # 就是"经代理"这条路径（直连语义在 test_egress_policy 里单独覆盖）。
+            no_proxy="",
+        )
+    )
+
+    assert fetch_json(f"{server}/json", policy=client_policy) == {"ok": True}
+
+
+def test_proxy_denies_what_the_client_cannot_judge(server, proxy_server):
+    """代理侧拒绝要如实回给客户端：客户端拿到 403，并翻译成不可重试的 EgressDenied。"""
+
+    from scripts.egress_proxy import build_server
+
+    port = server.rsplit(":", 1)[1]
+    # 这个代理自己的策略**不放行**本机地址（模拟"代理才是硬边界"）
+    strict_policy = EgressPolicy(
+        EgressSettings(_env_file=None, allowed_ports=f"443,{port}", internal_hosts="")
+    )
+    httpd = build_server("127.0.0.1", 0, policy=strict_policy, timeout=5.0)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        client_policy = EgressPolicy(
+            EgressSettings(
+                _env_file=None,
+                allowed_ports=f"443,{port}",
+                proxy_url=f"http://127.0.0.1:{httpd.server_address[1]}",
+                no_proxy="",
+            )
+        )
+        with pytest.raises(EgressDenied) as excinfo:
+            fetch_json(f"{server}/json", policy=client_policy, timeout=5)
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
+
+    assert excinfo.value.reason == "http_status"
+    assert strict_policy.blocked.get("private_ip") == 1, "拦截确实发生在代理侧"

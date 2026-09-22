@@ -215,3 +215,76 @@ def test_ipv4_mapped_helper_is_consistent():
     assert is_blocked_address("::ffff:10.0.0.1") is True
     assert is_blocked_address("::ffff:93.184.216.34") is False
     assert is_blocked_address("not-an-ip") is True
+
+
+# --------------------------------------------------------------------------- #
+# 强制代理模式（ADR-034 §4）
+# --------------------------------------------------------------------------- #
+
+
+def test_proxy_mode_skips_local_dns_but_keeps_host_rules():
+    """有代理时不本地解析（代理才是硬边界），但 scheme/端口/域名规则仍在本地跑。"""
+
+    def explode(_host):
+        pytest.fail("代理模式下不应该做本地 DNS 解析")
+
+    policy = _policy(
+        proxy_url="http://egress-proxy:8888",
+        resolver=explode,
+        deny_hosts="blocked.example.com",
+        allowed_ports="443",
+    )
+
+    target = policy.evaluate("https://example.com/")
+    assert target.via_proxy is True
+    assert target.addresses == ()
+    assert target.private_exempt is False, "代理模式下本地不做私网判定，但也不声称豁免"
+
+    with pytest.raises(EgressDenied) as denied_host:
+        policy.evaluate("https://blocked.example.com/")
+    assert denied_host.value.reason == "denied_host"
+
+    with pytest.raises(EgressDenied) as denied_port:
+        policy.evaluate("https://example.com:9999/")
+    assert denied_port.value.reason == "port"
+
+
+def test_proxy_mode_still_rejects_illegal_schemes_and_userinfo():
+    policy = _policy(proxy_url="http://egress-proxy:8888")
+
+    with pytest.raises(EgressDenied) as scheme:
+        policy.evaluate("ftp://example.com/")
+    assert scheme.value.reason == "scheme"
+
+    with pytest.raises(EgressDenied) as userinfo:
+        policy.evaluate("https://user:pass@example.com/")
+    assert userinfo.value.reason == "userinfo"
+
+
+def test_internal_services_and_no_proxy_hosts_connect_directly():
+    """有代理 ≠ 所有目标都走代理：内部服务与 NO_PROXY 列表必须直连。
+
+    这条是实测逼出来的——把 search-gateway 也发给代理，代理按设计（内部服务列表为空）
+    会把它当内网目标拦下，`web_search` 直接 403。
+    """
+
+    policy = _policy(
+        proxy_url="http://egress-proxy:8888",
+        internal_hosts="search-gateway",
+        no_proxy="localhost,127.0.0.1",
+        resolver=_resolver({"search-gateway": ["172.18.0.5"], "localhost": ["127.0.0.1"]}),
+    )
+
+    internal = policy.evaluate("http://search-gateway:8800/search")
+    assert internal.via_proxy is False
+    assert internal.private_exempt is True, "内部服务仍然豁免私网判定"
+
+    # `no_proxy` 只表示"不走代理"，**不表示放行**：localhost 仍要在本地过私网判定，
+    # 于是被拦下——拒绝发生在本地（没有代理往返）这一点由 blocked 计数证实。
+    with pytest.raises(EgressDenied) as denied:
+        policy.evaluate("http://localhost:8800/health")
+    assert denied.value.reason == "private_ip"
+    assert policy.blocked["private_ip"] == 1
+
+    public = policy.evaluate("https://example.com/")
+    assert public.via_proxy is True

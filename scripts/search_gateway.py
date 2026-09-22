@@ -57,6 +57,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
 import sys
 import urllib.error
 import urllib.parse
@@ -68,6 +69,14 @@ from typing import Any
 USER_AGENT = "macp-agent/0.1 (+multi-agent-collaboration-platform)"
 DEFAULT_UPSTREAM = "https://cn.bing.com/search"
 """Bing 的 RSS 输出（`?format=rss`）是免密钥且在国内网络可直连的检索入口。"""
+
+PROXY_ENV_VARS = ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy")
+"""上游取数是否经出网代理（ADR-034 第 4 条）。
+
+网关是独立进程、刻意只用标准库，所以不引入 `app.security`；它靠**环境变量**接入代理，
+而代理自己会做域名白黑名单与私网拦截。容器部署里这个网关处在一个
+`internal: true` 的网络里——没有默认路由，不走代理就连不出去。
+"""
 
 SEARCH_PATH = "/search"
 """与 `TOOL_SEARCH_ENDPOINT` 拼查询串的方式一致：`{endpoint}?q=...&format=json`。"""
@@ -91,13 +100,32 @@ def fetch_rss(upstream: str, query: str, timeout: float) -> str:
 
     url = f"{upstream}?{urllib.parse.urlencode({'q': query, 'format': 'rss'})}"
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    opener = _build_opener()
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with opener.open(request, timeout=timeout) as response:
             return response.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as exc:
         raise UpstreamError(f"上游返回 HTTP {exc.code}：{upstream}") from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise UpstreamError(f"上游不可达（{exc}）：{upstream}") from exc
+
+
+def _build_opener() -> urllib.request.OpenerDirector:
+    """按环境变量决定走不走代理。
+
+    `urllib` 默认就会读 `HTTP_PROXY`/`HTTPS_PROXY`，但显式构造代理 handler 更清楚：
+    我们只希望它**经代理**，而不是两套语义各说各话。未配代理时等价于原行为。
+    """
+
+    proxies = {key: value for key in PROXY_ENV_VARS if (value := os.environ.get(key))}
+    if not proxies:
+        return urllib.request.build_opener()
+    scheme_map = {name.lower(): value for name, value in proxies.items()}
+    normalized = {"http": scheme_map.get("http_proxy"), "https": scheme_map.get("https_proxy") or scheme_map.get("http_proxy")}
+    logger.info("upstream_via_proxy proxies=%s", sorted(proxies))
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({k: v for k, v in normalized.items() if v})
+    )
 
 
 def parse_rss(body: str) -> list[dict[str, str]]:
