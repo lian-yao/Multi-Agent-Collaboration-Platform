@@ -25,6 +25,16 @@ from app.attachments import (
 )
 from app.config import get_settings
 from app.core import mcp_registry, model_registry
+from app.workspace import service as workspace_service
+from app.workspace import (
+    WorkspaceDisabled,
+    WorkspaceError,
+    WorkspaceExistsError,
+    WorkspaceModeUnavailable,
+    WorkspaceNotFoundError,
+    WorkspacePathError,
+    WorkspaceRootUnavailable,
+)
 from app.core.agent_config import (
     AgentConfigError,
     OVERRIDE_FIELDS,
@@ -960,6 +970,58 @@ def _registry_call(call: Callable[[], Any], *, failure_message: str) -> Any:
         raise ApiError("VALIDATION_ERROR", "条目已存在", status.HTTP_409_CONFLICT) from exc
     except (SQLAlchemyError, OSError, ValueError, KeyError) as exc:
         raise ApiError("DATA_SOURCE_UNAVAILABLE", failure_message, 503) from exc
+
+
+# 工作区错误族（`doc/api.md` §5.19、ADR-033）：顺序敏感——先判子类再判基类。
+_WORKSPACE_ERRORS = (
+    WorkspaceNotFoundError,
+    WorkspaceExistsError,
+    WorkspaceDisabled,
+    WorkspaceRootUnavailable,
+    WorkspacePathError,
+    WorkspaceModeUnavailable,
+    WorkspaceError,
+)
+
+
+def _workspace_api_error(exc: Exception) -> ApiError:
+    """工作区异常 → 契约错误码（`doc/api.md` §5.19）。"""
+
+    if isinstance(exc, WorkspaceNotFoundError):
+        return ApiError("WORKSPACE_NOT_FOUND", str(exc), status.HTTP_404_NOT_FOUND)
+    if isinstance(exc, WorkspaceExistsError):
+        return ApiError("WORKSPACE_EXISTS", str(exc), status.HTTP_409_CONFLICT)
+    if isinstance(exc, WorkspaceDisabled):
+        return ApiError("WORKSPACE_DISABLED", str(exc), 503)
+    if isinstance(exc, WorkspaceRootUnavailable):
+        return ApiError("WORKSPACE_ROOT_UNAVAILABLE", str(exc), 503)
+    if isinstance(exc, WorkspacePathError):
+        return ApiError("WORKSPACE_PATH_REJECTED", str(exc), status.HTTP_422_UNPROCESSABLE_ENTITY)
+    if isinstance(exc, WorkspaceModeUnavailable):
+        return ApiError(
+            "WORKSPACE_MODE_UNAVAILABLE", str(exc), status.HTTP_422_UNPROCESSABLE_ENTITY
+        )
+    if isinstance(exc, WorkspaceError):
+        return ApiError(
+            "VALIDATION_ERROR", str(exc), status.HTTP_422_UNPROCESSABLE_ENTITY
+        )
+    return ApiError("DATA_SOURCE_UNAVAILABLE", "工作区服务不可用，请稍后重试", 503)
+
+
+def _workspace_call(call: Callable[[], Any]) -> Any:
+    """执行一次工作区调用并翻译异常；存储与文件系统故障统一归为 503。"""
+
+    try:
+        return call()
+    except _WORKSPACE_ERRORS as exc:
+        raise _workspace_api_error(exc) from exc
+    except IntegrityError as exc:
+        # `ux_workspaces_path` 竞态：先查后写没拦住，这里兜底成 409。
+        raise ApiError("WORKSPACE_EXISTS", "该路径已登记", status.HTTP_409_CONFLICT) from exc
+    except (SQLAlchemyError, OSError, ValueError, KeyError) as exc:
+        raise ApiError(
+            "DATA_SOURCE_UNAVAILABLE", "工作区服务不可用，请稍后重试", 503
+        ) from exc
 
 
 @app.exception_handler(ApiError)
@@ -2161,3 +2223,157 @@ def discover_mcp_server(server_id: str) -> McpDiscoveryResponse:
         failure_message="MCP Server 发现失败，请稍后重试",
     )
     return McpDiscoveryResponse.model_validate(data)
+
+
+# --------------------------------------------------------------------------- #
+# §5.19 工作区（只读档，ADR-033 阶段 1）
+#
+# 阶段 1 只提供 read_only：写/删/移动在阶段 2、审批在阶段 3。因此这里没有 PATCH，
+# 也没有"提档"接口——存下来却不生效的档位是假开关，宁可先不给。
+# --------------------------------------------------------------------------- #
+
+
+class WorkspaceQuota(BaseModel):
+    max_file_bytes: int
+    max_total_bytes: int
+    max_entries: int
+
+
+class WorkspaceUsage(BaseModel):
+    """用量视图；根被挪走或目录被删时 `available=false` 并给出原因，而不是整体 500。"""
+
+    available: bool = True
+    total_bytes: int = 0
+    entries: int = 0
+    truncated: bool = False
+    scan_limit: int | None = None
+    reason: str | None = None
+
+
+class WorkspaceResponse(BaseModel):
+    id: str
+    session_id: str | None = None
+    path: str = ""
+    mode: Literal["read_only", "workspace_write"]
+    name: str | None = None
+    quota: WorkspaceQuota
+    usage: WorkspaceUsage | None = None
+    created_by: str | None = None
+    created_at: datetime | None = None
+
+
+class WorkspaceListResponse(BaseModel):
+    items: list[WorkspaceResponse]
+    total: int
+
+
+class WorkspaceEntry(BaseModel):
+    name: str
+    path: str
+    kind: Literal["file", "dir", "symlink", "other"]
+    outside: bool = False
+    size_bytes: int | None = None
+    modified_at: str | None = None
+    children: list[WorkspaceEntry] | None = None
+
+
+WorkspaceEntry.model_rebuild()
+
+
+class WorkspaceTreeResponse(BaseModel):
+    workspace_id: str
+    path: str = ""
+    depth: int
+    entries: list[WorkspaceEntry]
+    truncated: bool
+    limit: int
+
+
+class WorkspaceCreateRequest(BaseModel):
+    """`POST /api/v1/workspaces` 的请求体（`doc/api.md` §5.19）。
+
+    `path` 是**相对工作区根**的路径；留空时默认绑到 `sessions/<session_id>/`。
+    """
+
+    session_id: str | None = None
+    path: str | None = Field(default=None, max_length=500)
+    mode: Literal["read_only", "workspace_write"] = "read_only"
+    name: str | None = Field(default=None, max_length=100)
+
+
+@app.get("/api/v1/workspaces", response_model=WorkspaceListResponse)
+def list_workspace_registry(
+    session_id: str | None = Query(default=None),
+) -> WorkspaceListResponse:
+    """列出工作区（`doc/api.md` §5.19）；给 `session_id` 时只列该会话绑定的。
+
+    会话存在性先校验：非法或未知的会话 id 返回 404 `SESSION_NOT_FOUND`，
+    而不是把存储层的 UUID 解析错误冒成 500。
+    """
+
+    if session_id:
+        _session_or_404(session_id)
+    data = _workspace_call(
+        lambda: workspace_service.list_workspaces(session_id=session_id)
+    )
+    return WorkspaceListResponse.model_validate(data)
+
+
+@app.post("/api/v1/workspaces", response_model=WorkspaceResponse, status_code=201)
+def create_workspace_registry(
+    payload: WorkspaceCreateRequest,
+    request: Request,
+) -> WorkspaceResponse:
+    """登记一个工作区（`doc/api.md` §5.19）。
+
+    会话必须已存在（否则 404 `SESSION_NOT_FOUND`）；目录不存在时由平台创建。
+    路径越界、符号链接逃逸返回 422 `WORKSPACE_PATH_REJECTED`；
+    `mode=workspace_write` 当前返回 422 `WORKSPACE_MODE_UNAVAILABLE`。
+    """
+
+    if payload.session_id:
+        _session_or_404(payload.session_id)
+    data = _workspace_call(
+        lambda: workspace_service.create_workspace(
+            session_id=payload.session_id,
+            path=payload.path,
+            mode=payload.mode,
+            name=payload.name,
+            actor=request.headers.get("X-Request-ID"),
+        )
+    )
+    return WorkspaceResponse.model_validate(data)
+
+
+@app.get("/api/v1/workspaces/{workspace_id}", response_model=WorkspaceResponse)
+def read_workspace_registry(workspace_id: str) -> WorkspaceResponse:
+    """读取一个工作区（含配额与当前用量）。"""
+
+    data = _workspace_call(lambda: workspace_service.get_workspace(workspace_id))
+    return WorkspaceResponse.model_validate(data)
+
+
+@app.get("/api/v1/workspaces/{workspace_id}/tree", response_model=WorkspaceTreeResponse)
+def read_workspace_tree(
+    workspace_id: str,
+    path: str = Query(default="", max_length=500),
+    depth: int = Query(default=1, ge=1, le=8),
+) -> WorkspaceTreeResponse:
+    """列出工作区内的目录树；`path` 相对工作区，符号链接越界只标记不跟随。"""
+
+    data = _workspace_call(
+        lambda: workspace_service.workspace_tree(workspace_id, path=path, depth=depth)
+    )
+    return WorkspaceTreeResponse.model_validate(data)
+
+
+@app.delete("/api/v1/workspaces/{workspace_id}", status_code=204)
+def delete_workspace_registry(workspace_id: str, request: Request) -> Response:
+    """解除登记（`doc/api.md` §5.19）。**不删宿主文件**。"""
+
+    _workspace_call(
+        lambda: workspace_service.delete_workspace(
+            workspace_id, actor=request.headers.get("X-Request-ID")
+        )
+    )
+    return Response(status_code=204)

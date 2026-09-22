@@ -1279,6 +1279,86 @@ latin-1 编码报错）。
 | 404 | `SESSION_NOT_FOUND` | 会话不存在 |
 | 503 | `DATA_SOURCE_UNAVAILABLE` | 存储（PostgreSQL / Dapr）读不到 |
 
+### 5.19 工作区（work_dir，阶段 1：只读）
+
+`GET|POST /api/v1/workspaces`、`GET /api/v1/workspaces/{workspace_id}`、
+`GET /api/v1/workspaces/{workspace_id}/tree`、`DELETE /api/v1/workspaces/{workspace_id}`
+
+工作区的授权单位是**宿主固定根下的子目录**（`WORKSPACE_HOST_ROOT` 挂进容器的 `/workspace`，
+见 ADR-033）：接口不接收宿主绝对路径，`path` 一律相对工作区根。阶段 1 只提供
+`read_only` 档位；绑定之后该会话的 Agent 多出 `list_work_files` / `read_work_file`
+两个**会话级**工具（与 §5.3 的静态目录无关——那份目录列的是进程级注册表）。
+
+`POST /api/v1/workspaces` 请求：
+
+```json
+{ "session_id": "3f2b…", "path": "sessions/3f2b…", "mode": "read_only", "name": null }
+```
+
+- `path` 省略或为空时默认绑到 `sessions/<session_id>/`；目录不存在时由**平台**创建。
+- `mode` 只接受 `read_only`；`workspace_write` 返回 422 `WORKSPACE_MODE_UNAVAILABLE`
+  （阶段 2 与写/删/移动工具一起开放，不在界面上给假开关）。
+
+响应 `201`（`GET /workspaces/{id}` 同形；列表为 `{"items": [...], "total": n}`）：
+
+```json
+{
+  "id": "9f1c…",
+  "session_id": "3f2b…",
+  "path": "sessions/3f2b…",
+  "mode": "read_only",
+  "name": null,
+  "quota": { "max_file_bytes": 5242880, "max_total_bytes": 268435456, "max_entries": 2000 },
+  "usage": { "available": true, "total_bytes": 0, "entries": 0, "truncated": false, "scan_limit": 10000 },
+  "created_by": null,
+  "created_at": "2026-09-23T02:00:00Z"
+}
+```
+
+- `usage` 按需扫描工作区目录得到（不落库，避免多写者下的计数漂移）；目录被删或工作区根
+  不可用时为 `{"available": false, "reason": "…"}`，而不是整体 500。
+- `quota` 里阶段 1 真正生效的是 `max_file_bytes`（单次读取上限）；另两项供阶段 2 使用。
+
+`GET /api/v1/workspaces/{workspace_id}/tree?path=&depth=1`：
+
+```json
+{
+  "workspace_id": "9f1c…",
+  "path": "",
+  "depth": 1,
+  "entries": [
+    { "name": "reports", "path": "reports", "kind": "dir", "outside": false, "size_bytes": null, "modified_at": "2026-09-23T02:00:00Z" },
+    { "name": "escape", "path": "escape", "kind": "symlink", "outside": true, "size_bytes": null, "modified_at": null }
+  ],
+  "truncated": false,
+  "limit": 500
+}
+```
+
+- `path` 相对**工作区**，`depth` 取值 1–8（超出按上限截断）。
+- `kind` 取 `file` / `dir` / `symlink` / `other`；指向工作区之外的符号链接
+  `outside=true` 且**不跟随**——不列它的子项，也不把根外的结构暴露出去。
+- 条目数超过 `WORKSPACE_TREE_MAX_ENTRIES` 时 `truncated=true`。
+
+`DELETE /api/v1/workspaces/{workspace_id}` 返回 204：只解除登记，**不删宿主文件**。
+
+路径校验（ADR-033 §4）：只接受相对路径；`..`、绝对路径/盘符/UNC、Windows 保留名与
+非法字符、NTFS 数据流，以及解析后落在工作区之外的符号链接一律拒绝。
+
+错误码：
+
+| HTTP | code | 含义 |
+| --- | --- | --- |
+| 404 | `SESSION_NOT_FOUND` | 会话不存在（`session_id` 非空时先校验） |
+| 404 | `WORKSPACE_NOT_FOUND` | 工作区不存在 |
+| 409 | `WORKSPACE_EXISTS` | 该相对路径已登记 |
+| 422 | `WORKSPACE_PATH_REJECTED` | 路径非法或越出工作区 |
+| 422 | `WORKSPACE_MODE_UNAVAILABLE` | 档位未开放（`workspace_write`） |
+| 422 | `VALIDATION_ERROR` | 其它取值问题（例如 `mode` 取值无效） |
+| 503 | `WORKSPACE_DISABLED` | `WORKSPACE_ENABLED=false` |
+| 503 | `WORKSPACE_ROOT_UNAVAILABLE` | 工作区根不存在或不是目录 |
+| 503 | `DATA_SOURCE_UNAVAILABLE` | 存储读写失败 |
+
 ## 6. 规划接口（当前未实现）
 
 下列接口已列入设计方向，但当前 FastAPI 不提供路由，前端不得直接调用：
@@ -1286,11 +1366,7 @@ latin-1 编码报错）。
 | 方法 | 路径 | 规划用途 |
 | --- | --- | --- |
 | POST | `/api/v1/agents/{agent_id}/run` | 单 Agent 调试执行 |
-| GET | `/api/v1/workspaces` | 列出工作区（宿主固定根下的可见子目录、档位与配额） |
-| POST | `/api/v1/workspaces` | 登记一个工作区子目录并绑定到会话，档位默认 `read_only` |
-| GET | `/api/v1/workspaces/{workspace_id}/tree` | 目录树浏览，只列工作区根内路径 |
 | PATCH | `/api/v1/workspaces/{workspace_id}` | 改档位（`read_only` ⇄ `workspace_write`）与配额 |
-| DELETE | `/api/v1/workspaces/{workspace_id}` | 解除绑定（**不删**宿主文件） |
 | GET | `/api/v1/sessions/{session_id}/approvals` | 列出本会话的审批记录（含待决策） |
 | POST | `/api/v1/approvals/{approval_id}/decision` | 批准或拒绝一次待决策动作 |
 | GET | `/api/v1/config/egress` | 出网策略只读状态（模式、豁免、拒绝计数） |
@@ -1308,39 +1384,19 @@ POST /api/v1/agents/{agent_id}/run
 
 `PATCH /api/v1/config/agents/{agent_id}` 已按上述要求实现，见 §5.7。
 
-### 6.2 工作区与审批（规划契约，ADR-033）
+### 6.2 工作区的剩余能力与审批（规划契约，ADR-033）
 
-工作区的授权单位是**宿主固定根下的子目录**（`WORKSPACE_ROOT` 挂进容器 `/workspace`，
-见 ADR-033）；本接口不接收宿主绝对路径，`path` 一律是相对工作区根的路径。
-
-```json
-POST /api/v1/workspaces
-{
-  "session_id": "3f2b…",
-  "path": "sessions/3f2b…",
-  "mode": "read_only"
-}
-```
-
-响应 `201`：
+工作区的**登记、列表、目录树、读取**已实现，见 §5.19。这一节记录尚未落地的部分：
 
 ```json
-{
-  "id": "w-1",
-  "session_id": "3f2b…",
-  "path": "sessions/3f2b…",
-  "mode": "read_only",
-  "quota": { "max_file_bytes": 5242880, "max_total_bytes": 268435456, "max_entries": 2000 },
-  "usage": { "total_bytes": 0, "entries": 0 },
-  "created_at": "2026-09-23T02:00:00Z"
-}
+PATCH /api/v1/workspaces/{workspace_id}
+{ "mode": "workspace_write" }
 ```
 
 - `mode` 只有 `read_only` / `workspace_write` 两个取值；**没有工作区之外的档位**，
-  需要更大的范围只能由管理员改 `WORKSPACE_ROOT` 并重建 backend（ADR-033 §2）。
-- 档位只能由用户在此接口或 Web UI 上调整，**Agent 没有提权通道**；越界访问一律拒绝并记审计。
-- 路径校验规则见 ADR-033 §4：`..`、绝对路径、符号链接指向根外、Windows 保留名、UNC 与
-  NTFS 数据流全部拒绝。
+  需要更大的范围只能由管理员改 `WORKSPACE_HOST_ROOT` 并重建 backend（ADR-033 §2）。
+- 档位调整只能由**人**在接口或 Web UI 上做；Agent 没有提权通道，越界访问一律拒绝并记审计。
+- `PATCH` 与写/删/移动工具（阶段 2）一起上线，在那之前 `workspace_write` 由 §5.19 拒绝。
 
 审批（删除与覆盖命中时产生，复用既有会话/Workflow 暂停恢复）：
 

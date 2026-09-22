@@ -291,17 +291,21 @@ def session_scoped_registry(
     registry: ToolRegistry | None,
     session_id: str | None,
 ) -> ToolRegistry | None:
-    """给注册表追加「读本次会话附件」的工具（成员 C 在 `app/tools/session_files.py` 提供）。
+    """给注册表追加**会话级**工具：本次会话的附件（`app/tools/session_files.py`）
+    与本次会话绑定的工作目录（`app/tools/work_files.py`）。
 
     与 `default_tool_registry` 走同一条接缝：`app/mcp` 尚未提供该入口时原样返回，
     流水线行为与之前完全一致。会话级工具**不能**进 `build_tool_registry()` ——
     那个注册表按进程缓存（ADR-009），塞进会话相关的工具会串会话。
+
+    工作目录工具只在会话**登记过工作区**时才出现（ADR-033）；未登记时该层为空操作，
+    因此没开工作区的部署行为与之前完全一致。
     """
 
     if registry is None or not session_id:
         return registry
     try:
-        from app.mcp.registry import with_session_files
+        from app.mcp.registry import with_session_files, with_workspace_files
     except ModuleNotFoundError:
         return registry
-    return with_session_files(registry, session_id)
+    return with_workspace_files(with_session_files(registry, session_id), session_id)

@@ -53,6 +53,7 @@ from app.orchestration.tools import ToolCall, ToolSpec
 from app.tools.base import BuiltinTool, ToolExecutionError
 from app.tools.registry import BuiltinToolRegistry, build_builtin_registry
 from app.tools.session_files import session_file_tools
+from app.tools.work_files import work_file_tools
 
 logger = get_logger("mcp.registry")
 
@@ -143,6 +144,19 @@ def with_session_files(registry: Any, session_id: str | None) -> Any:
     """给注册表挂上会话文件工具；没绑定会话或功能关闭时原样返回。"""
 
     tools = session_file_tools(session_id)
+    if not tools:
+        return registry
+    return SessionFileRegistry(registry, tools)
+
+
+def with_workspace_files(registry: Any, session_id: str | None) -> Any:
+    """给注册表挂上工作目录读取工具（ADR-033 阶段 1）；没有绑定工作区时原样返回。
+
+    与 `with_session_files` 复用同一个装饰器：它做的事就是「按名字分派到附加工具，
+    其余透传」，与会话附件无关。
+    """
+
+    tools = work_file_tools(session_id)
     if not tools:
         return registry
     return SessionFileRegistry(registry, tools)

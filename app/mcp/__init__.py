@@ -10,6 +10,7 @@ from app.mcp.registry import (
     reset_registered_servers_cache,
     reset_tool_registry_cache,
     tool_catalog,
+    with_workspace_files,
     with_session_files,
 )
 from app.mcp.server import build_mcp_server
@@ -26,5 +27,6 @@ __all__ = [
     "reset_registered_servers_cache",
     "reset_tool_registry_cache",
     "tool_catalog",
+    "with_workspace_files",
     "with_session_files",
 ]

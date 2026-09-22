@@ -74,6 +74,10 @@
    （`file.txt:stream`）；
 5. 每次操作**重新校验**，不能只校验父目录——`move` 的来源与目标各自都要过这一关。
 
+> 实现口径（`app/workspace/paths.py`，2026-09-23）：第 4 条**不按平台分支**——容器里跑
+> Linux、工作区内容却来自 Windows 宿主，按最严的一侧统一拒绝才能保证行为可预期；
+> 另外整串首尾空白先 `strip()`，段内以空格或点结尾按 Windows 语义拒绝。
+
 工具集（会话级，按 ADR-025 的 `session_scoped_registry` 就地拼进本次执行，不进
 `GET /api/v1/tools` 静态目录）：`list_work_files` / `read_work_file` /
 `write_work_file` / `make_work_dir` / `move_work_entry` / `delete_work_entry`。

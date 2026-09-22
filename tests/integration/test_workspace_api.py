@@ -1,0 +1,337 @@
+"""工作区接口的 HTTP 契约：`/api/v1/workspaces`（`doc/api.md` §5.19、ADR-033）。
+
+分层意图与 `test_registry_api.py` 一致：路径与目录树语义的证据在
+`tests/unit/test_workspace_service.py` / `test_workspace_paths.py`，这里只钉住
+**接口边界**——路径与方法、状态码、契约错误码、出参形状。
+
+因此把 `app.workspace.service` 的公开函数换成替身：每条用例只声明「这一层返回什么 /
+抛什么」，不重复实现业务语义。
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+import pytest
+from fastapi.testclient import TestClient
+
+import app.api.main as api_main
+from app.workspace import service as workspace_service
+from app.workspace.errors import (
+    WorkspaceDisabled,
+    WorkspaceError,
+    WorkspaceExistsError,
+    WorkspaceModeUnavailable,
+    WorkspaceNotFoundError,
+    WorkspacePathError,
+    WorkspaceRootUnavailable,
+)
+
+WORKSPACE_VIEW = {
+    "id": "w-1",
+    "session_id": "3f2b8f4e-1b6d-4c3a-9c6f-2c1b7f7a1a11",
+    "path": "sessions/3f2b8f4e",
+    "mode": "read_only",
+    "name": None,
+    "quota": {
+        "max_file_bytes": 5242880,
+        "max_total_bytes": 268435456,
+        "max_entries": 2000,
+    },
+    "usage": {"available": True, "total_bytes": 12, "entries": 2, "truncated": False},
+    "created_by": None,
+    "created_at": datetime(2026, 9, 23, tzinfo=timezone.utc),
+}
+
+TREE_VIEW = {
+    "workspace_id": "w-1",
+    "path": "",
+    "depth": 1,
+    "entries": [
+        {
+            "name": "reports",
+            "path": "reports",
+            "kind": "dir",
+            "outside": False,
+            "size_bytes": None,
+            "modified_at": None,
+        },
+        {
+            "name": "escape",
+            "path": "escape",
+            "kind": "symlink",
+            "outside": True,
+            "size_bytes": None,
+            "modified_at": None,
+        },
+    ],
+    "truncated": False,
+    "limit": 500,
+}
+
+SESSION_ID = "3f2b8f4e-1b6d-4c3a-9c6f-2c1b7f7a1a11"
+
+
+class Stub:
+    """按名字记录调用并返回预设结果（与 `test_registry_api.py` 同形）。"""
+
+    def __init__(self, name: str, outcome) -> None:
+        self.name = name
+        self.outcome = outcome
+        self.calls: list[tuple[tuple, dict]] = []
+
+    def __call__(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        if callable(self.outcome):
+            return self.outcome(*args, **kwargs)
+        if isinstance(self.outcome, Exception):
+            raise self.outcome
+        return self.outcome
+
+    @property
+    def last_call(self) -> tuple[tuple, dict]:
+        assert self.calls, f"{self.name} 未被调用"
+        return self.calls[-1]
+
+
+class WorkspaceApi:
+    """把 `app.workspace.service` 的函数换成替身，并按名字取用。"""
+
+    FUNCTIONS = (
+        "list_workspaces",
+        "create_workspace",
+        "get_workspace",
+        "workspace_tree",
+        "delete_workspace",
+    )
+
+    def __init__(self, monkeypatch) -> None:
+        self.stubs: dict[str, Stub] = {}
+        for name in self.FUNCTIONS:
+            stub = Stub(name, self._default_for(name))
+            monkeypatch.setattr(workspace_service, name, stub)
+            self.stubs[name] = stub
+        # 会话存在性：默认全部存在，需要 404 的用例单独覆盖。
+        monkeypatch.setattr(
+            api_main.api_store,
+            "get_session",
+            lambda session_id: {"id": str(session_id)},
+        )
+
+    @staticmethod
+    def _default_for(name: str):
+        if name == "list_workspaces":
+            return {"items": [WORKSPACE_VIEW], "total": 1}
+        if name == "create_workspace":
+            return WORKSPACE_VIEW
+        if name == "get_workspace":
+            return WORKSPACE_VIEW
+        if name == "workspace_tree":
+            return TREE_VIEW
+        if name == "delete_workspace":
+            return None
+        raise AssertionError(f"未预设 {name}")
+
+    def stub(self, name: str, outcome) -> Stub:
+        stub = self.stubs[name]
+        stub.outcome = outcome
+        return stub
+
+    def __getitem__(self, name: str) -> Stub:
+        return self.stubs[name]
+
+
+@pytest.fixture
+def api(monkeypatch):
+    return WorkspaceApi(monkeypatch), TestClient(api_main.app)
+
+
+# --------------------------------------------------------------------------- #
+# 读
+# --------------------------------------------------------------------------- #
+
+
+def test_list_workspaces_returns_the_contract(api):
+    stub, client = api
+
+    response = client.get("/api/v1/workspaces")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 1
+    assert body["items"][0]["path"] == "sessions/3f2b8f4e"
+    assert body["items"][0]["mode"] == "read_only"
+    assert body["items"][0]["quota"]["max_entries"] == 2000
+    assert stub["list_workspaces"].last_call[1] == {"session_id": None}
+
+
+def test_list_workspaces_filters_by_session(api):
+    stub, client = api
+
+    response = client.get(f"/api/v1/workspaces?session_id={SESSION_ID}")
+
+    assert response.status_code == 200
+    assert stub["list_workspaces"].last_call[1] == {"session_id": SESSION_ID}
+
+
+def test_list_workspaces_with_unknown_session_is_404(api, monkeypatch):
+    _, client = api
+    monkeypatch.setattr(api_main.api_store, "get_session", lambda session_id: None)
+
+    response = client.get(f"/api/v1/workspaces?session_id={SESSION_ID}")
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "SESSION_NOT_FOUND"
+
+
+def test_get_workspace_returns_usage(api):
+    _, client = api
+
+    response = client.get("/api/v1/workspaces/w-1")
+
+    assert response.status_code == 200
+    assert response.json()["usage"]["entries"] == 2
+
+
+def test_get_missing_workspace_is_404(api):
+    stub, client = api
+    stub.stub("get_workspace", WorkspaceNotFoundError("w-x"))
+
+    response = client.get("/api/v1/workspaces/w-x")
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "WORKSPACE_NOT_FOUND"
+
+
+def test_tree_returns_entries_and_marks_outside_symlinks(api):
+    stub, client = api
+
+    response = client.get("/api/v1/workspaces/w-1/tree?path=&depth=2")
+
+    assert response.status_code == 200
+    entries = response.json()["entries"]
+    assert [entry["kind"] for entry in entries] == ["dir", "symlink"]
+    assert entries[1]["outside"] is True
+    assert stub["workspace_tree"].last_call[0][0] == "w-1"
+    assert stub["workspace_tree"].last_call[1] == {"path": "", "depth": 2}
+
+
+def test_tree_rejects_a_depth_out_of_range(api):
+    _, client = api
+
+    response = client.get("/api/v1/workspaces/w-1/tree?depth=99")
+
+    assert response.status_code == 422
+
+
+# --------------------------------------------------------------------------- #
+# 写
+# --------------------------------------------------------------------------- #
+
+
+def test_create_workspace_returns_201(api):
+    stub, client = api
+
+    response = client.post(
+        "/api/v1/workspaces",
+        json={"session_id": SESSION_ID, "path": "project", "name": "项目"},
+    )
+
+    assert response.status_code == 201
+    assert response.json()["id"] == "w-1"
+    kwargs = stub["create_workspace"].last_call[1]
+    assert kwargs["session_id"] == SESSION_ID
+    assert kwargs["path"] == "project"
+    assert kwargs["mode"] == "read_only"
+
+
+def test_create_workspace_with_unknown_session_is_404(api, monkeypatch):
+    _, client = api
+    monkeypatch.setattr(api_main.api_store, "get_session", lambda session_id: None)
+
+    response = client.post("/api/v1/workspaces", json={"session_id": SESSION_ID})
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "SESSION_NOT_FOUND"
+
+
+def test_escaping_path_is_422(api):
+    stub, client = api
+    stub.stub("create_workspace", WorkspacePathError("路径越出工作区：../etc"))
+
+    response = client.post("/api/v1/workspaces", json={"path": "../etc"})
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "WORKSPACE_PATH_REJECTED"
+
+
+def test_workspace_write_mode_is_422_until_phase_two(api):
+    stub, client = api
+    stub.stub(
+        "create_workspace",
+        WorkspaceModeUnavailable("写档位（workspace_write）还未开放"),
+    )
+
+    response = client.post("/api/v1/workspaces", json={"mode": "workspace_write"})
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "WORKSPACE_MODE_UNAVAILABLE"
+
+
+def test_duplicate_path_is_409(api):
+    stub, client = api
+    stub.stub("create_workspace", WorkspaceExistsError("该路径已登记：project"))
+
+    response = client.post("/api/v1/workspaces", json={"path": "project"})
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "WORKSPACE_EXISTS"
+
+
+def test_unavailable_root_is_503(api):
+    stub, client = api
+    stub.stub("create_workspace", WorkspaceRootUnavailable("工作区根不可用：/workspace"))
+
+    response = client.post("/api/v1/workspaces", json={"path": "project"})
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "WORKSPACE_ROOT_UNAVAILABLE"
+
+
+def test_disabled_workspace_is_503(api):
+    stub, client = api
+    stub.stub("list_workspaces", WorkspaceDisabled("工作区功能已关闭"))
+
+    response = client.get("/api/v1/workspaces")
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "WORKSPACE_DISABLED"
+
+
+def test_unknown_workspace_error_is_422(api):
+    stub, client = api
+    stub.stub("create_workspace", WorkspaceError("mode 取值无效：admin"))
+
+    response = client.post("/api/v1/workspaces", json={"mode": "read_only"})
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "VALIDATION_ERROR"
+
+
+def test_delete_workspace_is_204(api):
+    stub, client = api
+
+    response = client.delete("/api/v1/workspaces/w-1")
+
+    assert response.status_code == 204
+    assert stub["delete_workspace"].last_call[0][0] == "w-1"
+
+
+def test_delete_missing_workspace_is_404(api):
+    stub, client = api
+    stub.stub("delete_workspace", WorkspaceNotFoundError("w-x"))
+
+    response = client.delete("/api/v1/workspaces/w-x")
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "WORKSPACE_NOT_FOUND"

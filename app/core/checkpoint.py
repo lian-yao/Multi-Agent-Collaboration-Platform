@@ -430,6 +430,37 @@ class McpServerRecord(Base):
     updated_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
 
+class WorkspaceRecord(Base):
+    """`workspaces` 表：工作区登记（`doc/data-model.md` §3.3、ADR-033）。
+
+    `path` **只存相对工作区根的路径**：宿主绝对路径由部署层的 `WORKSPACE_HOST_ROOT`
+    决定，不进库——否则改一次部署根就会让所有历史行失效。
+    """
+
+    __tablename__ = "workspaces"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    session_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("sessions.id", ondelete="CASCADE"), nullable=True
+    )
+    path: Mapped[str] = mapped_column(String(500), nullable=False)
+    mode: Mapped[str] = mapped_column(String(20), default="read_only", nullable=False)
+    name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    quota: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    created_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+    __table_args__ = (
+        Index("idx_workspaces_session", "session_id"),
+        UniqueConstraint("path", name="ux_workspaces_path"),
+    )
+
+
 def _provider_config_to_dict(row: ProviderConfigRecord) -> dict[str, Any]:
     return {
         "id": row.id,
@@ -1092,6 +1123,85 @@ def update_mcp_server(server_id: str, **fields: Any) -> dict[str, Any] | None:
 def delete_mcp_server(server_id: str) -> bool:
     with get_session_factory()() as session:
         row = session.get(McpServerRecord, server_id)
+        if row is None:
+            return False
+        session.delete(row)
+        session.commit()
+        return True
+
+
+def _workspace_to_dict(row: WorkspaceRecord) -> dict[str, Any]:
+    return {
+        "id": str(row.id),
+        "session_id": str(row.session_id) if row.session_id else None,
+        "path": row.path,
+        "mode": row.mode,
+        "name": row.name,
+        "quota": row.quota or {},
+        "created_by": row.created_by,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+    }
+
+
+def list_workspaces(
+    *, session_id: str | uuid.UUID | None = None
+) -> list[dict[str, Any]]:
+    """按登记时间列出工作区；给 `session_id` 时只列该会话绑定的那些。"""
+
+    statement = select(WorkspaceRecord).order_by(
+        WorkspaceRecord.created_at.asc(), WorkspaceRecord.id.asc()
+    )
+    if session_id is not None:
+        statement = statement.where(WorkspaceRecord.session_id == _as_uuid(session_id))
+    with get_session_factory()() as session:
+        return [_workspace_to_dict(row) for row in session.scalars(statement).all()]
+
+
+def get_workspace(workspace_id: str | uuid.UUID) -> dict[str, Any] | None:
+    with get_session_factory()() as session:
+        row = session.get(WorkspaceRecord, _as_uuid(workspace_id))
+        return _workspace_to_dict(row) if row else None
+
+
+def find_workspace_by_path(path: str) -> dict[str, Any] | None:
+    statement = select(WorkspaceRecord).where(WorkspaceRecord.path == path)
+    with get_session_factory()() as session:
+        row = session.scalars(statement).first()
+        return _workspace_to_dict(row) if row else None
+
+
+def create_workspace(
+    *,
+    workspace_id: str | uuid.UUID,
+    path: str,
+    mode: str,
+    session_id: str | uuid.UUID | None = None,
+    name: str | None = None,
+    quota: dict[str, Any] | None = None,
+    created_by: str | None = None,
+) -> dict[str, Any]:
+    record = WorkspaceRecord(
+        id=_as_uuid(workspace_id),
+        session_id=_as_uuid(session_id) if session_id else None,
+        path=path,
+        mode=mode,
+        name=name,
+        quota=quota or {},
+        created_by=created_by,
+    )
+    with get_session_factory()() as session:
+        session.add(record)
+        session.commit()
+        session.refresh(record)
+        return _workspace_to_dict(record)
+
+
+def delete_workspace(workspace_id: str | uuid.UUID) -> bool:
+    """只解除登记，**不删宿主文件**（`doc/api.md` §5.19）。"""
+
+    with get_session_factory()() as session:
+        row = session.get(WorkspaceRecord, _as_uuid(workspace_id))
         if row is None:
             return False
         session.delete(row)
