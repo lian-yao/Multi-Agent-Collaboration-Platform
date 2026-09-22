@@ -17,8 +17,11 @@
 
 from __future__ import annotations
 
+import os
+import sys
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -37,6 +40,7 @@ from app.mcp import (
     tool_catalog,
 )
 from app.mcp import registry as registry_module
+from app.mcp.client import McpTransportUnsupported, _resolve_stdio_command
 from app.mcp.server import build_mcp_server as build_mcp_server_from_server_module
 from app.orchestration.tools import ToolCall, ToolRegistry, ToolSpec
 from app.tools import BuiltinToolRegistry, ToolExecutionError
@@ -428,6 +432,47 @@ def test_composite_registry_closes_the_base_registry():
 
 
 # --- 注册条目的读取策略 -----------------------------------------------------
+
+
+# --- stdio 条目的 command 解析（doc/api.md §5.11） --------------------------
+
+
+def test_stdio_command_with_a_path_separator_is_used_as_is():
+    assert _resolve_stdio_command(sys.executable) == sys.executable
+
+
+def test_bare_stdio_command_is_resolved_to_an_absolute_path(tmp_path, monkeypatch):
+    """裸名经 PATH 解析**一次**并固定成绝对路径：子进程启动不再看当时的 PATH。"""
+
+    name = "macp-probe"
+    fake = tmp_path / (f"{name}.cmd" if os.name == "nt" else name)
+    fake.write_text("@echo off\n" if os.name == "nt" else "#!/bin/sh\n", encoding="utf-8")
+    if os.name != "nt":
+        fake.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+
+    # Windows 的 `shutil.which` 会连 PATHEXT 的大小写一起返回（`macp-probe.CMD`），
+    # 所以按路径分量断言，不比对字面串。
+    resolved = Path(_resolve_stdio_command(name))
+    assert resolved.parent == tmp_path
+    assert resolved.name.lower().startswith(name)
+
+
+def test_unresolvable_stdio_command_explains_what_to_write():
+    """原来会变成子进程里的 `ModuleNotFoundError: No module named 'mcp'`，看不出原因。"""
+
+    with pytest.raises(McpTransportUnsupported) as excinfo:
+        _resolve_stdio_command("macp-definitely-missing-binary")
+
+    message = str(excinfo.value)
+    assert "找不到可执行文件" in message
+    assert "macp-definitely-missing-binary" in message
+    assert "/app/.venv/bin/python" in message
+
+
+def test_empty_stdio_command_is_rejected():
+    with pytest.raises(McpTransportUnsupported):
+        _resolve_stdio_command("   ")
 
 
 def test_registered_servers_are_ignored_by_default(monkeypatch):

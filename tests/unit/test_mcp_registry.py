@@ -330,6 +330,23 @@ def test_discover_wraps_connection_failure(store):
         mcp_registry.discover_server("filesystem", discoverer=broken)
 
 
+def test_discover_unresolvable_stdio_command_says_what_to_write(store):
+    """`command` 解析不到时，502 的 message 必须直接说清「写绝对路径」（doc/api.md §5.11）。
+
+    走真实 `discover_registry_server`，但解析在起子进程之前就失败，因此不产生进程或网络。
+    """
+
+    mcp_registry.create_server(
+        server_id="broken",
+        name="坏条目",
+        transport="stdio",
+        command="macp-definitely-missing-binary",
+    )
+
+    with pytest.raises(mcp_registry.McpDiscoveryError, match="找不到可执行文件"):
+        mcp_registry.discover_server("broken")
+
+
 def test_discover_keeps_existing_cache_when_refresh_fails(store):
     mcp_registry.create_server(**_stdio_server())
     mcp_registry.discover_server("filesystem", discoverer=_discoverer())

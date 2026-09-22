@@ -830,6 +830,11 @@ Token 归到具体 Agent 的标签；`agent_id` 在采样里目前不存在。�
 - `transport`：`stdio` / `http` / `sse` / `ws`。
 - `transport=stdio` 时必填 `command`（1–500 字符），`args` 为字符串数组（≤64 项），
   `env` 为 `{key: value}`，`cwd` 可选；此时 `url` 必须为空。
+  `command` 在**建立连接时**解析：含路径分隔符按原值使用；裸名（如 `python`、`npx`）
+  经 `PATH` 解析成绝对路径后再启动子进程。解析不到时不算配置非法（创建仍返回 201），
+  而是「这条 Server 在当前环境连不上」：`discover` 回 502，合并进工具目录时跳过并记
+  `registry.server_skipped`。**容器部署请写绝对路径**（如 `/app/.venv/bin/python`）——
+  裸名能否解析取决于启动 backend 那个进程的 `PATH`，写绝对路径才不会随启动方式漂移。
 - `transport` 为 `http`/`sse`/`ws` 时必填 `url`（`http(s)` / `ws(s)`），可选 `headers`；
   此时 `command`/`args`/`env`/`cwd` 必须为空。
 - `tool_options`：`{toolName: {disabled?: bool, allowAutoExecution?: bool}}`。

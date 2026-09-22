@@ -243,6 +243,17 @@ def test_unsupported_transport_is_skipped_at_collect():
     assert _names(registry) == ["platform_only"], "调不通的 transport 在合成时就被排除"
 
 
+def test_unresolvable_stdio_command_is_skipped_at_collect():
+    """`command` 在 PATH 里找不到：跳过并留日志，不把整条目录带崩（doc/api.md §5.11）。"""
+
+    row = _entry("extra", tool_names=(SERVER_TOOL,))
+    row["command"] = "macp-definitely-missing-binary"
+
+    registry = _registry([row])
+
+    assert _names(registry) == ["platform_only"], "连不上的条目只影响它自己"
+
+
 def test_registry_table_failure_degrades_to_builtin_tools(monkeypatch):
     """配置面读不到时：流水线照常用内置工具，而且**只尝试一次**，不反复卡超时。"""
 

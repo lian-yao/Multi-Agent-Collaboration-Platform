@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import shutil
 import threading
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Callable, Sequence
@@ -105,7 +107,12 @@ def build_http_session_factory(settings: McpSettings) -> SessionFactory:
 
 
 class McpTransportUnsupported(RuntimeError):
-    """该 transport 当前没有可用的客户端实现（API 层归一化为 502）。"""
+    """该条目当前建立不了连接：transport 没有客户端实现，或 stdio 的 command 不可用。
+
+    两种情况在调用方是同一件事——「这条 Server 现在连不上」，因此共用一种错误：
+    `discover` 归一化为 502 `MCP_DISCOVERY_FAILED`，合并进工具目录时跳过并记
+    `registry.server_skipped`（`doc/api.md` §5.11）。
+    """
 
 
 _SERVER_INFO_ATTRIBUTE = "_macp_server_info"
@@ -134,7 +141,7 @@ def build_stdio_session_factory_for(
     cwd: str | None = None,
 ) -> SessionFactory:
     parameters = StdioServerParameters(
-        command=command,
+        command=_resolve_stdio_command(command),
         args=list(args or []),
         env=dict(env) if env else None,
         cwd=cwd,
@@ -148,6 +155,28 @@ def build_stdio_session_factory_for(
                 yield session
 
     return factory
+
+
+def _resolve_stdio_command(command: str) -> str:
+    """把 stdio 条目的 `command` 解析成绝对路径（`doc/api.md` §5.11）。
+
+    裸名（`python` / `npx`）在这里按 `PATH` 解析**一次**并固定下来：子进程启动不再
+    依赖当时的 `PATH`，失败现象也从子进程里的 `ModuleNotFoundError: No module named
+    'mcp'`（看不出是解释器选错了）变成明确说出「找不到可执行文件 + 写绝对路径」。
+    """
+
+    resolved = (command or "").strip()
+    if not resolved:
+        raise McpTransportUnsupported("stdio 条目的 command 为空，无法建立连接")
+    if os.sep in resolved or (os.altsep and os.altsep in resolved):
+        return resolved
+    found = shutil.which(resolved)
+    if found is None:
+        raise McpTransportUnsupported(
+            f"找不到可执行文件：{resolved}；stdio 条目的 command 需要是绝对路径，"
+            "或位于启动 backend 那个进程的 PATH 中（容器内可用 /app/.venv/bin/python）"
+        )
+    return found
 
 
 def build_streamable_http_session_factory_for(
