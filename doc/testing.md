@@ -88,6 +88,10 @@ cd deploy; .\start.ps1                     # 起完整环境
 | U-17 | 编排层工具枚举不产生 IO（ADR-026） | 注册表 Server 的工具与内置合成、目录只取已发现的缓存（不重新握手）、`disabled` 摘除、重名内置优先、调用路由到真 Server（走真实 MCP 协议往返）、读表失败**只尝试一次**、刷新后目录跟随 | M5（§4.6） |
 | U-18 | 扫描版 PDF 的页面渲染（ADR-027） | 真实夹具渲出**结构自校验的 PNG**（签名 + 逐块 CRC + IHDR + 解压行长 + filter 字节全 0），多页按文档序；页数上限生效且**如实报告**少带了几页；单页超体积先重渲再丢页、合计到顶提前停；畸形 / 截断 / 渲染组件缺失一律降级而不抛；展开成逐页图片载荷（名字带「第k页/共N页」、id 沿用父附件）后附件计数**不虚高**；执行时渲染失败 → **这一次执行**降级为 `failed` 而不沿用上传时的说明 | M5（§4.7） |
 | U-19 | 阶段执行轨迹的读取契约（§5.17） | 从阶段状态里取回产出、按序的工具调用（含失败调用的原因）与**上游输入**（`input` + `input_from`）；三种「没有轨迹」给三句不同的话（尚未开始 / 正在执行 / 已完成但状态被清理）；动态链路报 `not_integrated` 并说明原因；超长正文与超大工具载荷**截断并标记**（不静默剪）；坏载荷只说明「无法解析」不抛异常；读取器异常**继续上抛**（由接口层归一化成 503，不伪装成「这个阶段没有轨迹」） | M5（§4.8） |
+| U-20 | 工作区：路径守卫、登记、目录树、配额（ADR-033 阶段 1/2） | 路径逃逸表 34 例（`..`、绝对路径/盘符/UNC、Windows 保留名与非法字符、NTFS 数据流、超长、段内尾随空格/点、**符号链接指向工作区外一律拒绝**、指向区内允许）；登记默认绑 `sessions/<id>/` 且平台建目录、重复路径 409 语义、`mode` 取值校验；目录树目录优先排序、跳过 `.trash`、**越界符号链接只标记 `outside=true` 不跟随**（用字面路径算相对位置，避免 `resolve()` 跟随越界链接时抛异常）；用量扫描按 `scan_limit` 截断并标记；配额三项（单文件 / 总字节 / 条目数）在**写之前**校验且错误里带当前用量 | M5 后（§4.16） |
+| U-21 | 工作区写档位与破坏性动作审批（ADR-033 阶段 2/3） | 只读档位下**写工具不进工具集**（档位决定可用动作集合）；写新文件免审批并自动建父目录、`overwrite=true` 在目标存在时提交审批而新建时仍算新建；配额与越界写各自拒绝；删除进 `.trash/<时间戳>-<名>`（软删除）；审批四条不变量——**一次一授权**（放行后置 `consumed`，再动同一目标要重新申请）、**不覆盖既成决定**（二次决策 409）、**过期不放行**（TTL 后置 `expired`）、**不刷屏**（同一目标复用同一条 pending）；审批按 `workspace_id + kind + target` 匹配（不同目标/工作区/动作互不放行） | M5 后（§4.16） |
+| U-22 | 沙箱挂载会话工作区与宿主路径反查（ADR-033 §7） | 沙箱容器参数多一条：只挂**本次会话**的工作区且挂到与 backend 相同的路径；**档位决定 `rw`/`ro`**；`SANDBOX_WORKSPACE_MOUNT=none` 时退回 `/tmp` 不挂；`uid/gid` 配置生效；**不变量——沙箱容器绝不挂宿主 Docker socket**（专例钉住）；宿主路径反查按真实 mountinfo 数据测三种形态（Linux bind 取 source、Docker Desktop 9p/drvfs 取「盘符 + root」拼 `/run/desktop/mnt/host/<盘符>/…`、最长挂载点优先），翻不出来时显式报错并指向 `SANDBOX_WORKSPACE_HOST_ROOT`；`open`/`io`/`pathlib`/`glob` 放行而 `os`/网络/进程执行仍禁 | M5 后（§4.16） |
+| U-23 | 出网策略：判定、钉扎与接线（ADR-034） | SSRF 表 24 例（各私网与保留网段边界值、`169.254.169.254`、IPv6 与 IPv4-mapped、十进制与十六进制 IP 写法、`user:pass@`、非 http(s)、端口白名单）；域名规则（`*.` 按 **label 边界**、黑名单优先、allowlist 模式、非法规则的配置错误）；解析失败必须**拒绝而非放行**；内部服务与模型流量两类豁免的边界（同一内网地址：`purpose=model` 放行、`purpose=tool` 拒绝；豁免私网判定**不等于**豁免端口）；**真起本地 HTTP 服务**验钉扎连接、逐跳重校验重定向、重定向上限、响应体上限、被拒时不开 socket；接线两处——工具侧默认取数拒绝映射为 `retryable=false`、MCP `http`/`sse` 在**打开会话时**判定（构造会话工厂保持零 IO，ADR-026） | M5 后（§4.16） |
 
 ### 2.2 集成测试（I）
 
@@ -109,6 +113,8 @@ cd deploy; .\start.ps1                     # 起完整环境
 | I-11 | 多模态附件接口契约 | `POST /api/v1/attachments` 的 201、四类 400（非法 base64 / 空 / 超限 / 格式不支持）；发消息带上 `attachment_ids` 后附件归属回填且**只挂一次**（重复提交进 `unattached_attachment_ids`）；「只带图不带文字」可发送；`GET .../content` 对图片回 `inline`、对文本与文档（**含解析失败项**）回 `attachment` 原件、对无字节的旧行回 404；`DELETE` 未归属 204 / 已发出 409；删会话级联清附件（ADR-021 / ADR-024） | M5 |
 | I-12 | 执行边界诊断接口 | `GET /api/v1/config/sandbox`：200 时 `available` / `reason` 的语义；原因**原样透传**后端给出的文案（不再由接口层编兜底话术）；探测自身抛异常时仍回 200 + 原因；`PUT` / `POST` 一律 405（ADR-020 / ADR-023） | M5 |
 | I-13 | 会话的历史工作流列表（§5.18） | `GET /api/v1/sessions/{id}/workflows`：未知会话 404、草稿态会话回空列表（**不建会话**）、**乱序写入也必须按 `created_at` 升序返回**（对话编号由位置决定，倒序会让回看的编号整体错位）、只含本会话的工作流、运行中的那条要带出 `current_step` 与 `checkpoint` | M5（§4.9） |
+| I-14 | 工作区与审批接口契约（§5.19 / §5.20） | 登记 201 与默认路径、列表按会话过滤、目录树出参形状与 `depth` 越界 422；**错误码逐一**：404 `WORKSPACE_NOT_FOUND` / 409 `WORKSPACE_EXISTS` / 422 `WORKSPACE_PATH_REJECTED` / 409 `WORKSPACE_QUOTA_EXCEEDED` / 409 `WORKSPACE_APPROVAL_REQUIRED` / 503 `WORKSPACE_DISABLED` / 503 `WORKSPACE_ROOT_UNAVAILABLE`；`session_id` 非空时**先校验会话**（非法 id 回 404 而不是把存储层 UUID 解析错误冒成 500）；提档 PATCH 200 且回显操作者、非法档位由 Pydantic 收口；审批列表的 `status` 过滤与 `pending` 计数、决策 200、二次决策 409、非法 decision 422 | M5 后（§4.16） |
+| I-15 | 出网策略只读投影（§5.21） | `GET /api/v1/config/egress` 回配置口径（模式、白/黑名单、内部服务、端口、模型豁免、跳数）与进程内拒绝计数；**没有写接口**（能改策略就是绕过边界的路）；策略构造失败（配置写错）返回 503 而不是静默用默认值 | M5 后（§4.16） |
 
 ### 2.3 端到端测试（E）
 
@@ -1825,6 +1831,76 @@ headless Chrome 打开离线预览页 `file://.../ui-preview.html`，点到「�
 - **只跑了前端门禁**：未跑全量 pytest（Docker Desktop 未启动，同前几轮）。
 - `rendercheck/ui-preview.html` 的 jsdom 自检脚本（`verify_preview.mjs`）不在仓库里
   （项目刻意不引前端测试依赖），本轮改用 CDP 实跑替代，覆盖更强。
+
+### 4.16 工作区沙箱、破坏性动作审批与出网策略（2026-09-23，成员 D）
+
+**1. 背景与前置决策**
+
+需求原话是四条：用户选一个本地工作文件夹；Agent 全部业务限定在该文件夹内；目录内可
+增删改查；禁止访问目录之外的本地文件——另加一条「网络要单独做一层白/黑名单，拦
+`127.0.0.1`/`10.x`/`172.16-31`/`192.168.x`，只允许公网域名」。设计先落成两份 ADR
+（[ADR-033](decisions/033-workspace-sandbox.md) / [ADR-034](decisions/034-egress-policy.md)），
+使用者拍板了四个口径：宿主固定根挂 `/workspace`；默认档位 `read_only`；出网默认
+`public_only`；**模型流量按平台内部依赖处理**（豁免私网判定，Ollama 与内网网关继续可用）；
+**沙箱要能直接读写 `/workspace`**。
+
+**2. 分期与实现**
+
+| 阶段 | 提交 | 内容 | 关键取舍 |
+| --- | --- | --- | --- |
+| 设计 | `adf58ac` | ADR-033/034 + `doc/api.md` §6 规划契约 + `doc/data-model.md` §3.3 + `doc/deployment.md` | 工作区授权单位是「根 + 根内子目录」（浏览器给不了后端宿主路径，bind mount 又在容器创建时固定） |
+| 阶段 1 | `562360d` | `app/workspace/`（守卫/服务）、`workspaces` 表、五个工作区接口、`list_work_files`/`read_work_file` | **只读起步**：写档位先不提供，避免"存下来却不生效的假开关" |
+| 部署接线 | `427fa81` | compose 挂 `${WORKSPACE_HOST_ROOT}:/workspace`、`WORKSPACE_ROOT` 与沙箱宿主根分开 | 同名变量最容易把宿主路径与容器路径写串 |
+| 阶段 2 | `85f06c5` | 写档位 + `write_work_file`/`make_work_dir`/`move_work_entry` + 配额 + 提档 PATCH | 只放开**非破坏性**写：删除与覆盖要审批，而审批在阶段 3 |
+| 阶段 3 | `b23dd5b` | `approvals` 表与接口、`delete_work_entry`（软删除）、覆盖/移动覆盖走审批 | 不做工作流级挂起，改「批准一次、放行一次」——比长期放行更强 |
+| 沙箱挂载 | `e37b757` | `app/sandbox/workspace_bind.py`、容器只挂会话工作区、`open` 放行 | 沙箱是**兄弟容器**，bind 来源必须是宿主路径；翻不出来就显式失败 |
+| 出网策略 | `1f2087e` | `app/security/`（判定 + 钉扎取数）、工具与 MCP 接线、`GET /config/egress` | 策略检查放在**打开会话时**，保住 ADR-026「合并工具目录零 IO」 |
+
+**3. 验证（本轮）**
+
+```bash
+.\.venv\Scripts\python.exe -m pytest tests/unit tests/integration/test_workspace_api.py tests/integration/test_egress_api.py -q
+# 902 passed, 12 failed（12 条仍是本地缺 pypdfium2 的附件/PDF 渲染用例，与本轮无关）
+```
+
+新/改套件共 **225 例**：`test_workspace_paths` 34、`test_workspace_service` 45、
+`test_work_file_tools` 20、`test_workspace_approvals` 11、`test_workspace_api` 29、
+`test_sandbox_workspace_bind` 9、`test_egress_policy` 35、`test_egress_fetch` 6、
+`test_egress_wiring` 3、`test_egress_api` 2，另有 `test_sandbox_docker_runtime`（+9）与
+`test_search_gateway`（+2）的增量。
+
+真机（重建后的部署栈，不是单测）：
+
+- **阶段 1/2**：登记工作区 201 → 容器内写 `reports/2026/summary.md`（自动建两层目录）
+  → 目录树看到 15 B → `read_work_file` / `make_work_dir` / `move_work_entry` 均生效
+  → 覆盖与越界分别得到「需要审批」「路径不能包含 `..`」且都**不可重试**
+  → 解绑 204 后**宿主文件仍在**（只解除登记，不删文件）；
+- **阶段 3**：新文件免审批 → 覆盖得到 pending → 列表 `pending=2` → 批准 → 重试覆盖读出 v2
+  → 批准删除 → 重试后进 `.trash/20260922T171508-todo.md` → 二次决策 409 `APPROVAL_NOT_PENDING`
+  → 两条审批最终都是 `consumed`；
+- **沙箱挂载**：`resolve_host_path` 从真实 mountinfo 里算出
+  `/run/desktop/mnt/host/c/…`，先用 `docker run -v` 实测该路径可当 bind 来源；写档下
+  沙箱列出/读出/写入工作区文件（宿主侧能看到 `from_sandbox.txt`），切只读档后挂载变 `ro`、
+  **读仍成功而写入 `OSError`**；
+- **出网策略**：`https://10.0.0.5/`、`169.254.169.254` 被 `private_ip` 拦下；
+  **本网络把 `api.github.com` 解析到 `127.0.0.1`，也被拦下**（真实的 DNS 污染案例）；
+  私网 MCP 条目在建会话时被拒；模型豁免按 `purpose` 区分同一地址；`web_search` 经内部
+  search-gateway 仍正常返回结果；`GET /config/egress` 正确投影配置。
+
+**4. 边界（如实记录）**
+
+- **`rw` 挂载下审批可被绕过**：沙箱代码能直接写/删工作区文件，不经过审批。要严格执行
+  审批就把 `WORKSPACE_SANDBOX_MOUNT` 设为 `ro`（沙箱只读，写全走被审批的工具）；
+- **沙箱进程身份**：代码默认 `nobody`，但 Docker Desktop 把 bind 统一显示为 uid 0，
+  `nobody` 写不进去（真机实测 `PermissionError`）。compose 因此默认 `SANDBOX_UID/GID=0`，
+  Linux 宿主建议改成宿主 uid；
+- **出网策略的四个未做项**（理由见 ADR-034 实现口径）：网络层代理强制、MCP/模型 SDK 内的
+  IP 钉扎（当前只做建连前判定，仍有"判定时公网、连接时内网"的理论窗口）、search-gateway
+  脚本自身出网、以及沙箱（它根本没有网络）；
+- **前端还没做**：工作区选择器、档位与目录树、审批卡片、egress 只读面板都属下一批；
+  接口已就绪（§5.19–§5.21），但界面尚未接；
+- **`doc/15` 只加了两条**：模块 3 的工作区与出网边界、第五节的三层边界表；该文件是事实源，
+  其余表述未动。
 
 ## 5. 失败处理约定
 - 任一用例失败：先复现，再定位，修复后将失败模式固化为新的测试或本文档约束；
