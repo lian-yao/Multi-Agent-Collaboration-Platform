@@ -374,6 +374,52 @@ Prompt 时需同步 roles.py 与 `BUILTIN_AGENT_SEED`，避免目录与 Prompt �
 代价是库体积，因此上传侧对单文件大小与单消息数量都有硬上限（`app/attachments/spec.py`）。
 `data` 只对图片落字节（要 base64 进模型请求）；文本与文档在上传时就抽出正文，原始字节用完即弃。
 
+### 3.3 工作区与审批（**规划**，ADR-033；实现后以模型代码为准）
+
+工作区描述的是「宿主固定根下的一个子目录 + 它的档位与配额」。表里**只存相对路径**：
+宿主绝对路径由部署层的 `WORKSPACE_ROOT` 决定，不进库——否则一次部署改根就会让所有历史行失效。
+
+#### workspaces（工作区）
+
+| 字段 | 类型 | 约束 | 说明 |
+| --- | --- | --- | --- |
+| id | UUID | PK | |
+| session_id | UUID | FK → sessions，可空 | 绑定的会话；共享工作区为空 |
+| path | VARCHAR(500) | NOT NULL | **相对**工作区根的路径，如 `sessions/3f2b…` |
+| mode | VARCHAR(20) | NOT NULL | `read_only`（默认）/ `workspace_write`；无「根之外」档位 |
+| name | VARCHAR(100) | NULL | 展示名 |
+| quota | JSONB | NOT NULL | `{max_file_bytes, max_total_bytes, max_entries}` |
+| created_by | VARCHAR(100) | NULL | 操作者标识（沿用注册表的 `updated_by` 口径） |
+| created_at / updated_at | TIMESTAMPTZ | NOT NULL | |
+
+索引：`idx_workspaces_session (session_id)`、`ux_workspaces_path (path)`。
+
+不变量：`path` 必须是根内的相对路径且不含 `..`；`mode` 只允许两个取值；档位调整只改本表，
+**Agent 无法写入本表**（提权只由人在 API/UI 上做）。
+
+`usage`（当前用量）**不落库**：每次按需扫描工作区目录得到，避免多写者下的计数漂移；
+真要做硬配额得靠文件系统配额或独立卷，见 ADR-033「代价」。
+
+#### approvals（审批记录）
+
+| 字段 | 类型 | 约束 | 说明 |
+| --- | --- | --- | --- |
+| id | UUID | PK | |
+| session_id | UUID | FK → sessions | |
+| run_id | UUID | 可空 | 触发审批的执行 |
+| kind | VARCHAR(20) | NOT NULL | `write` / `overwrite` / `delete` |
+| target | VARCHAR(500) | NOT NULL | 工作区相对路径 |
+| reason | TEXT | NULL | 给用户看的说明（**来自平台模板，不照抄模型文本**） |
+| payload | JSONB | NULL | 供卡片渲染的附加信息（大小、覆盖前后差异摘要等） |
+| status | VARCHAR(20) | NOT NULL | `pending` / `approved` / `denied` / `expired` |
+| decided_by | VARCHAR(100) | NULL | 决策人 |
+| requested_at / decided_at | TIMESTAMPTZ | NOT NULL / NULL | |
+
+索引：`idx_approvals_session (session_id, status)`。
+
+不变量：`reason` 不直接采用模型生成的文案（提示注入会经由审批卡片影响人）；审批只影响
+**那一次**动作，不构成长期放行；超时 → `expired` → 执行按失败结束，不自动放行。
+
 ## 4. Redis 结构
 
 | Key | 类型 | TTL | 用途 | 一致性说明 |

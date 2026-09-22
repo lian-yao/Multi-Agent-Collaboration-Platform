@@ -1286,6 +1286,14 @@ latin-1 编码报错）。
 | 方法 | 路径 | 规划用途 |
 | --- | --- | --- |
 | POST | `/api/v1/agents/{agent_id}/run` | 单 Agent 调试执行 |
+| GET | `/api/v1/workspaces` | 列出工作区（宿主固定根下的可见子目录、档位与配额） |
+| POST | `/api/v1/workspaces` | 登记一个工作区子目录并绑定到会话，档位默认 `read_only` |
+| GET | `/api/v1/workspaces/{workspace_id}/tree` | 目录树浏览，只列工作区根内路径 |
+| PATCH | `/api/v1/workspaces/{workspace_id}` | 改档位（`read_only` ⇄ `workspace_write`）与配额 |
+| DELETE | `/api/v1/workspaces/{workspace_id}` | 解除绑定（**不删**宿主文件） |
+| GET | `/api/v1/sessions/{session_id}/approvals` | 列出本会话的审批记录（含待决策） |
+| POST | `/api/v1/approvals/{approval_id}/decision` | 批准或拒绝一次待决策动作 |
+| GET | `/api/v1/config/egress` | 出网策略只读状态（模式、豁免、拒绝计数） |
 
 ### 6.1 规划请求示例（不保证可用）
 
@@ -1299,6 +1307,72 @@ POST /api/v1/agents/{agent_id}/run
 该接口落地前，必须先补充 Pydantic Schema、存储写入、权限边界、审计记录和测试，并同步更新本文档。
 
 `PATCH /api/v1/config/agents/{agent_id}` 已按上述要求实现，见 §5.7。
+
+### 6.2 工作区与审批（规划契约，ADR-033）
+
+工作区的授权单位是**宿主固定根下的子目录**（`WORKSPACE_ROOT` 挂进容器 `/workspace`，
+见 ADR-033）；本接口不接收宿主绝对路径，`path` 一律是相对工作区根的路径。
+
+```json
+POST /api/v1/workspaces
+{
+  "session_id": "3f2b…",
+  "path": "sessions/3f2b…",
+  "mode": "read_only"
+}
+```
+
+响应 `201`：
+
+```json
+{
+  "id": "w-1",
+  "session_id": "3f2b…",
+  "path": "sessions/3f2b…",
+  "mode": "read_only",
+  "quota": { "max_file_bytes": 5242880, "max_total_bytes": 268435456, "max_entries": 2000 },
+  "usage": { "total_bytes": 0, "entries": 0 },
+  "created_at": "2026-09-23T02:00:00Z"
+}
+```
+
+- `mode` 只有 `read_only` / `workspace_write` 两个取值；**没有工作区之外的档位**，
+  需要更大的范围只能由管理员改 `WORKSPACE_ROOT` 并重建 backend（ADR-033 §2）。
+- 档位只能由用户在此接口或 Web UI 上调整，**Agent 没有提权通道**；越界访问一律拒绝并记审计。
+- 路径校验规则见 ADR-033 §4：`..`、绝对路径、符号链接指向根外、Windows 保留名、UNC 与
+  NTFS 数据流全部拒绝。
+
+审批（删除与覆盖命中时产生，复用既有会话/Workflow 暂停恢复）：
+
+```json
+GET /api/v1/sessions/3f2b…/approvals
+{
+  "items": [
+    {
+      "id": "ap-1",
+      "session_id": "3f2b…",
+      "run_id": "run-9",
+      "kind": "delete",
+      "target": "reports/old.xlsx",
+      "reason": "删除工作区内的文件",
+      "status": "pending",
+      "requested_at": "2026-09-23T02:01:00Z",
+      "decided_by": null,
+      "decided_at": null
+    }
+  ],
+  "total": 1
+}
+```
+
+```json
+POST /api/v1/approvals/ap-1/decision
+{ "decision": "approved" }
+```
+
+`kind` 取值 `write` / `overwrite` / `delete`；`decision` 取值 `approved` / `denied`。
+决策后该次执行从 `paused` 恢复；未决策的审批超时后置 `expired` 并让执行以失败结束
+（不自动放行）。
 
 ## 7. 前端对接约束
 
