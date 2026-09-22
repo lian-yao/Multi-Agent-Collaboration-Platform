@@ -1436,6 +1436,40 @@ POST /api/v1/approvals/ap-1/decision
 | 422 | `VALIDATION_ERROR` | `decision` / `status` 取值不合法 |
 | 503 | `DATA_SOURCE_UNAVAILABLE` | 存储读写失败 |
 
+### 5.21 出网策略（只读）
+
+`GET /api/v1/config/egress`
+
+出网策略由环境变量决定（ADR-034），这里只做**只读投影**——能改策略的接口等于给了一条
+绕过安全边界的路。响应 `200`：
+
+```json
+{
+  "mode": "public_only",
+  "allow_hosts": ["*.example.com"],
+  "deny_hosts": ["blocked.example.com"],
+  "internal_hosts": ["redis", "search-gateway"],
+  "allowed_ports": [443, 8800],
+  "model_exempt": true,
+  "max_redirects": 5,
+  "blocked": { "private_ip": 2, "denied_host": 1 }
+}
+```
+
+| 字段 | 说明 |
+| --- | --- |
+| `mode` | `public_only`（默认，只放公网）/ `allowlist`（再要求域名命中白名单） |
+| `allow_hosts` / `deny_hosts` | 域名白/黑名单，**黑名单优先**；按 label 边界匹配 |
+| `internal_hosts` | 平台内部依赖的精确主机名，豁免私网判定（**不是"整个内网"**） |
+| `allowed_ports` | 允许的端口；豁免私网判定不等于豁免端口 |
+| `model_exempt` | 模型流量是否豁免私网判定（Ollama 与内网网关继续可用） |
+| `blocked` | **进程内**按原因累计的拒绝次数。工具调用发生在 worker 进程，所以这里通常是空的——看全局要用 Prometheus 的 `macp_egress_blocked_total`（每个进程各自暴露，由 scrape 汇总） |
+
+配置非法时返回 503 `VALIDATION_ERROR`（策略在首次构造时校验，不做"跳过这条规则"的宽容处理）。
+被拒绝的调用不会重试：工具侧返回 `retryable=false`；MCP 远程条目的策略判定发生在
+**建立会话时**（构造会话工厂保持零 IO，ADR-026），`discover` 因此返回
+502 `MCP_DISCOVERY_FAILED`，调用期则表现为那次调用失败。
+
 ## 6. 规划接口（当前未实现）
 
 下列接口已列入设计方向，但当前 FastAPI 不提供路由，前端不得直接调用：
@@ -1443,7 +1477,6 @@ POST /api/v1/approvals/ap-1/decision
 | 方法 | 路径 | 规划用途 |
 | --- | --- | --- |
 | POST | `/api/v1/agents/{agent_id}/run` | 单 Agent 调试执行 |
-| GET | `/api/v1/config/egress` | 出网策略只读状态（模式、豁免、拒绝计数） |
 
 ### 6.1 规划请求示例（不保证可用）
 
@@ -1461,7 +1494,8 @@ POST /api/v1/agents/{agent_id}/run
 ### 6.2 其余规划项
 
 工作区的登记 / 目录树 / 读取 / 提档 / 四个写工具（含审批）见 §5.19 与 §5.20，均已实现。
-尚未落地的是**出网策略**（ADR-034，`GET /api/v1/config/egress` 只是它的只读投影）。
+出网策略的应用层判定与只读投影见 §5.21；**尚未落地**的是 ADR-034 §4 的网络层强制
+（egress 代理）与 MCP / 模型 SDK 内的 IP 钉扎，理由与残余风险记在 ADR-034 的实现口径一节。
 
 ## 7. 前端对接约束
 

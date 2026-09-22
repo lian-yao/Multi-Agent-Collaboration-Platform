@@ -59,6 +59,26 @@ def _get(url: str) -> tuple[int, dict]:
         return exc.code, json.loads(exc.read().decode("utf-8"))
 
 
+def _allow_local_egress(monkeypatch, base: str) -> None:
+    """把用例访问的本地网关列进内部服务并放行其端口（ADR-034）。
+
+    生产里对应的是 compose 把 `search-gateway` 写进 `EGRESS_INTERNAL_HOSTS`、
+    把 8800 写进 `EGRESS_ALLOWED_PORTS`。测试不读环境变量，所以这里显式装一个策略：
+    默认策略只放 443 与公网，`127.0.0.1` 会被正确地拦下来。
+    """
+
+    from app.security import egress as egress_module
+    from app.security.config import EgressSettings
+
+    port = base.rsplit(":", 1)[1]
+    policy = egress_module.EgressPolicy(
+        EgressSettings(
+            _env_file=None, allowed_ports=f"443,{port}", internal_hosts="127.0.0.1"
+        )
+    )
+    monkeypatch.setattr(egress_module, "get_egress_policy", lambda: policy)
+
+
 @contextlib.contextmanager
 def running_gateway(
     monkeypatch, body: str | None = RSS_BODY, *, fetch=None
@@ -204,6 +224,7 @@ def test_gateway_reports_upstream_failure_as_502(monkeypatch):
 
 def test_web_search_tool_consumes_the_gateway(monkeypatch):
     with running_gateway(monkeypatch, RSS_BODY) as base:
+        _allow_local_egress(monkeypatch, base)
         settings = ToolSettings(
             _env_file=None,
             search_endpoint=f"{base}/search",
@@ -228,6 +249,7 @@ def test_web_search_tool_consumes_the_gateway(monkeypatch):
 
 def test_web_search_tool_honours_max_results(monkeypatch):
     with running_gateway(monkeypatch, RSS_BODY) as base:
+        _allow_local_egress(monkeypatch, base)
         settings = ToolSettings(
             _env_file=None,
             search_endpoint=f"{base}/search",

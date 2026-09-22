@@ -302,10 +302,12 @@ bind mount），`WORKSPACE_ROOT` 是**容器内**的挂载点（应用读的是�
 | `WORKSPACE_SANDBOX_MOUNT` | 阶段 4 | 沙箱挂载工作区的方式：`rw`（默认）/ `ro`（**审批才拦得住**：沙箱只读，写走文件工具）/ `none`（沙箱看不到用户文件） |
 | `SANDBOX_UID` / `SANDBOX_GID` | 阶段 4 | 沙箱进程身份，代码默认 `nobody`；compose 默认 `0`——Docker Desktop 把 bind 显示为 uid 0，非 0 身份写不进工作区。Linux 宿主改成宿主 uid，或用 `WORKSPACE_SANDBOX_MOUNT=ro` |
 | `SANDBOX_WORKSPACE_HOST_ROOT` | 阶段 4 | 仅当自动反查宿主路径失败时用：显式指定宿主侧工作区根（沙箱是兄弟容器，bind 来源必须是宿主路径） |
-| `EGRESS_MODE` | 阶段 4 | `public_only`（默认，只放公网）或 `allowlist`（再要求域名命中白名单） |
-| `EGRESS_ALLOW_HOSTS` / `EGRESS_DENY_HOSTS` | 阶段 4 | 域名白/黑名单，**黑名单优先**；只支持精确主机名与 `*.` 前缀通配，按 label 边界匹配 |
-| `EGRESS_INTERNAL_HOSTS` | 阶段 4 | 平台内部依赖的**精确主机名**白名单（Dapr、Redis、PostgreSQL、Jaeger、`search-gateway`），豁免私网判定 |
-| `EGRESS_MODEL_EXEMPT` | 阶段 4 | 默认 `true`：模型流量豁免私网判定，Ollama（`host.docker.internal`）与内网自建网关继续可用；仍受 scheme/端口/域名黑名单约束 |
+| `EGRESS_MODE` | 已实现 | `public_only`（默认，只放公网）或 `allowlist`（再要求域名命中白名单） |
+| `EGRESS_ALLOW_HOSTS` / `EGRESS_DENY_HOSTS` | 已实现 | 域名白/黑名单，**黑名单优先**；只支持精确主机名与 `*.` 前缀通配，按 label 边界匹配 |
+| `EGRESS_INTERNAL_HOSTS` | 已实现 | 平台内部依赖的**精确主机名**（Dapr、Redis、PostgreSQL、Jaeger、`search-gateway`），豁免私网判定 |
+| `EGRESS_ALLOWED_PORTS` | 已实现 | 默认 `443`；compose 里放宽到 `443,8800`（search-gateway 自己的端口）。**端口与私网豁免是两件事** |
+| `EGRESS_MODEL_EXEMPT` | 已实现 | 默认 `true`：模型流量豁免私网判定，Ollama（`host.docker.internal`）与内网自建网关继续可用；仍受 scheme/端口/域名黑名单约束 |
+| `EGRESS_MAX_REDIRECTS` / `EGRESS_TIMEOUT_SECONDS` / `EGRESS_MAX_RESPONSE_BYTES` | 已实现 | 重定向跳数（5）、超时（8s）与响应体上限（1 MB） |
 
 两条容易误读的点：`EGRESS_INTERNAL_HOSTS` 放行的是**列出的服务**，不是"整个内网"；
 模型豁免放行的是**模型这一类调用**，不是"任何指向内网地址的请求"（ADR-034 §3）。

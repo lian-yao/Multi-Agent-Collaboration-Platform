@@ -186,6 +186,9 @@ def build_streamable_http_session_factory_for(
     async def factory() -> AsyncIterator[ClientSession]:
         from mcp.client.streamable_http import streamablehttp_client
 
+        # 校验放在**打开会话时**，不是构造工厂时：合并工具目录那条路径要"零 IO"
+        # （ADR-026），构造期做 DNS 会把目录变成网络可用性的函数。
+        _ensure_egress_allowed(url, transport="http")
         async with streamablehttp_client(url, headers=dict(headers or {})) as (
             read,
             write,
@@ -205,6 +208,7 @@ def build_sse_session_factory_for(
     async def factory() -> AsyncIterator[ClientSession]:
         from mcp.client.sse import sse_client
 
+        _ensure_egress_allowed(url, transport="sse")
         async with sse_client(url, headers=dict(headers or {})) as (
             read,
             write,
@@ -214,6 +218,25 @@ def build_sse_session_factory_for(
                 yield session
 
     return factory
+
+
+def _ensure_egress_allowed(url: str, *, transport: str) -> None:
+    """远程 MCP Server 也要过出网策略（ADR-034）。
+
+    拒绝复用既有语义：`McpTransportUnsupported` → `discover` 归一化为 502、
+    合并工具目录时跳过并记日志。**注意**：这里只校验 URL（解析 + 私网判定），
+    MCP SDK 自己建连接时仍会再解析一次 DNS——策略还没法把连接钉死在那个 IP 上
+    （SDK 不接受自定义 httpx transport），这段残余窗口记在 ADR-034 的修订里。
+    """
+
+    from app.security.egress import EgressDenied, get_egress_policy
+
+    try:
+        get_egress_policy().evaluate(url, purpose="mcp")
+    except EgressDenied as exc:
+        raise McpTransportUnsupported(
+            f"{transport} MCP Server 被出网策略拒绝（{exc.reason}）：{exc.detail}"
+        ) from exc
 
 
 def build_registry_session_factory(entry: dict[str, Any]) -> SessionFactory:

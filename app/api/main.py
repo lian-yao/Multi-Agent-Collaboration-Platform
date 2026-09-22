@@ -39,6 +39,7 @@ from app.workspace import (
     WorkspaceRootUnavailable,
 )
 from app.workspace import approvals as workspace_approvals
+from app.security import egress as egress_module
 from app.core.agent_config import (
     AgentConfigError,
     OVERRIDE_FIELDS,
@@ -2508,3 +2509,45 @@ def decide_approval(
         )
     )
     return ApprovalResponse.model_validate(data)
+
+
+# --------------------------------------------------------------------------- #
+# §5.21 出网策略（只读，ADR-034）
+# --------------------------------------------------------------------------- #
+
+
+class EgressStatusResponse(BaseModel):
+    """出网策略的只读投影：让使用者能确认「现在到底是什么口径」。"""
+
+    mode: Literal["public_only", "allowlist"]
+    allow_hosts: list[str]
+    deny_hosts: list[str]
+    internal_hosts: list[str]
+    allowed_ports: list[int]
+    model_exempt: bool
+    max_redirects: int
+    blocked: dict[str, int] = Field(default_factory=dict)
+
+
+@app.get("/api/v1/config/egress", response_model=EgressStatusResponse)
+def read_egress_status() -> EgressStatusResponse:
+    """读取出网策略状态（`doc/api.md` §5.21）。
+
+    只读：策略由环境变量决定，运行期不给改——能改策略的接口等于给了一条绕过安全边界的路。
+    配置非法时这里会以 503 暴露出来（策略在首次构造时就校验）。
+    """
+
+    try:
+        policy = egress_module.get_egress_policy()
+    except egress_module.EgressConfigError as exc:
+        raise ApiError("VALIDATION_ERROR", str(exc), 503) from exc
+    return EgressStatusResponse(
+        mode=policy.settings.mode,
+        allow_hosts=sorted(policy._allow),
+        deny_hosts=sorted(policy._deny),
+        internal_hosts=sorted(policy._internal),
+        allowed_ports=sorted(policy._ports),
+        model_exempt=policy.settings.model_exempt,
+        max_redirects=policy.settings.max_redirects,
+        blocked=dict(policy.blocked),
+    )

@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 
 from app.tools.base import BuiltinTool, ToolExecutionError
 from app.tools.config import ToolSettings, get_tool_settings
+from app.security.egress import EgressConfigError, EgressDenied, fetch_json as egress_fetch_json
 
 USER_AGENT = "macp-agent/0.1 (+multi-agent-collaboration-platform)"
 
@@ -49,7 +50,7 @@ class WebSearchTool(BuiltinTool):
         fetch_json: JsonFetcher | None = None,
     ) -> None:
         self._settings = settings or get_tool_settings()
-        self._fetch_json = fetch_json or _http_get_json
+        self._fetch_json = fetch_json or _egress_get_json
 
     def run(self, args: WebSearchArgs) -> dict[str, Any]:
         endpoint = self._settings.search_endpoint
@@ -72,7 +73,7 @@ class WebSearchTool(BuiltinTool):
 
 
 def _http_get_json(endpoint: str, params: dict[str, str], timeout: float) -> Any:
-    """默认 HTTP 传输：构造带查询串的 GET 并解析 JSON。"""
+    """裸 HTTP 传输（保留给测试与排障）：不带出网策略。"""
 
     url = f"{endpoint}?{urllib.parse.urlencode(params)}"
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
@@ -107,6 +108,21 @@ def _unreachable_message(endpoint: str, reason: Any) -> str:
         f"搜索服务不可达（{reason}）：{endpoint}；"
         "该工具需要出网访问搜索服务，离线环境可改用 TOOL_SEARCH_ENDPOINT 指向自建网关"
     )
+
+
+def _egress_get_json(endpoint: str, params: dict[str, str], timeout: float) -> Any:
+    """默认 HTTP 传输：走**出网策略**（ADR-034），内网拦截与域名白/黑名单都在那里。
+
+    策略拒绝是确定性失败——同样的地址再试一次还是会被拒（ADR-009 修订 3），
+    所以 `retryable=False`；网络层的瞬时故障仍然是可重试的。
+    """
+
+    try:
+        return egress_fetch_json(endpoint, params, timeout, purpose="tool")
+    except EgressDenied as exc:
+        raise ToolExecutionError(f"出网被策略拒绝（{exc.reason}）：{exc.detail}", retryable=False) from exc
+    except EgressConfigError as exc:  # 配置本身非法：不要让模型以为是"网络抖动"
+        raise ToolExecutionError(f"出网策略配置错误：{exc}", retryable=False) from exc
 
 
 def _parse_results(payload: Any) -> list[dict[str, str]]:

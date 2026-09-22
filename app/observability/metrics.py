@@ -102,6 +102,12 @@ PROM_METRICS_BUFFER = Gauge(
     "待写入 metrics 表的采样条数",
     registry=PROMETHEUS_REGISTRY,
 )
+PROM_EGRESS_BLOCKED = Counter(
+    "macp_egress_blocked_total",
+    "出网被策略拒绝的次数（按原因）",
+    ["reason"],
+    registry=PROMETHEUS_REGISTRY,
+)
 
 
 class MetricSample(BaseModel):
@@ -505,3 +511,14 @@ def set_metrics_collector(collector: MetricsCollector | None) -> None:
 
     global _collector
     _collector = collector
+
+
+def record_egress_blocked(reason: str) -> None:
+    """记录一次被策略拒绝的出网（ADR-034）。
+
+    只进 Prometheus 与日志，**不写 `metrics` 表**：出网拒绝是安全事件而不是业务指标，
+    量级可能很大，落库会挤占业务采样的写入预算。排查时看 Prometheus 与
+    `egress.blocked` 日志。
+    """
+
+    PROM_EGRESS_BLOCKED.labels(reason=reason).inc()

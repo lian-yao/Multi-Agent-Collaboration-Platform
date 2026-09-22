@@ -145,3 +145,34 @@
 - **域名边界**：`evil-example.com` 不命中 `example.com`；punycode 域名按同一套规则判定；
 - **配置校验**：非法 CIDR / 非法通配 / 空条目在启动时失败，而不是被忽略；
 - **代理层**：应用层被绕过后（例如直接 `requests` 测试脚本）仍然连不出去。
+
+## 实现口径（2026-09-23）
+
+已落地的是**应用层判定 + 钉扎取数**，落在 `app/security/`：
+
+- `egress.py`：按 §2 的顺序判定（scheme → 端口 → 域名黑/白名单 → 解析 → 私网 CIDR →
+  逐跳重校验重定向），连接**钉在解析出的 IP** 上（HTTPS 仍按原域名做 SNI/证书校验），
+  响应体有上限；被拒时抛 `EgressDenied(reason)` 并同时记 `egress.blocked` 日志与
+  Prometheus 的 `macp_egress_blocked_total`；
+- 配置在**构造时**校验：非法端口/通配/字符直接抛 `EgressConfigError`，不做"跳过这条"；
+- 接线两处：工具侧（`app/tools/search.py` 的默认取数以 `purpose="tool"` 走策略，
+  拒绝映射为 `retryable=false`）与远程 MCP（`http`/`sse` 在**打开会话时**判定，
+  拒绝复用 `McpTransportUnsupported`）。校验刻意不做在构造会话工厂时：合并工具目录
+  那条路径要求零 IO（ADR-026），构造期做 DNS 会把目录变成"网络可用性的函数"；
+- `GET /api/v1/config/egress` 提供只读投影（理由：能改策略的接口就是绕过边界的路）。
+
+**明确未做**（不是遗漏，是排期与可行性）：
+
+1. **网络层强制**（§4 第 2 步的 egress 代理）：应用层挡得住我们自己的代码，挡不住
+   未来某处的直连，这条要等代理落地；
+2. **MCP / 模型 SDK 内的 IP 钉扎**：MCP 的 streamable-http/sse 客户端与模型 SDK 自建
+   httpx 连接，不接受自定义 transport，所以现在只能做**建连前判定**，理论上留着
+   "判定时公网、连接时内网"的窗口。工具侧没有这个问题（自己建连接，已钉扎）；
+3. **search-gateway 脚本自身的出网**：它是独立容器里的标准库脚本、上游是固定的
+   `cn.bing.com`，目标不由模型决定，因此暂不引入 app 依赖去接策略；
+4. **沙箱**：`SANDBOX_NETWORK_ENABLED=false`，沙箱根本没有网络——它不需要这层策略，
+   将来要开也只准走代理（§4 末段）。
+
+另外补了一条实现细节：**端口白名单与私网豁免是两件事**。search-gateway 是内网服务，
+但它在 8800 端口，所以部署侧要同时配 `EGRESS_INTERNAL_HOSTS=…search-gateway…` 与
+`EGRESS_ALLOWED_PORTS=443,8800`——豁免的是「目标是不是内网」，不是「这个端口能不能用」。

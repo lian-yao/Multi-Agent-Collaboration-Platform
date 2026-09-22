@@ -67,6 +67,16 @@ services:
       # WORKSPACE_SANDBOX_MOUNT=ro 用文件工具写（那条路有审批）。
       SANDBOX_UID: ${SANDBOX_UID:-0}
       SANDBOX_GID: ${SANDBOX_GID:-0}
+      # 出网策略（ADR-034）：默认只放公网，内网/保留网段一律拦；白/黑名单按域名。
+      EGRESS_MODE: ${EGRESS_MODE:-public_only}
+      EGRESS_ALLOW_HOSTS: ${EGRESS_ALLOW_HOSTS:-}
+      EGRESS_DENY_HOSTS: ${EGRESS_DENY_HOSTS:-}
+      # 平台内部依赖的**精确主机名**：放行的只是这些服务，不是"整个内网"。
+      EGRESS_INTERNAL_HOSTS: ${EGRESS_INTERNAL_HOSTS:-search-gateway,dapr-sidecar,redis,postgres,jaeger}
+      # 端口白名单：443 给公网；8800 是 search-gateway 自己的端口。
+      # 用 Ollama 时要加上 11434（端口与私网豁免是两件事，见 ADR-034）。
+      EGRESS_ALLOWED_PORTS: ${EGRESS_ALLOWED_PORTS:-443,8800}
+      EGRESS_MODEL_EXEMPT: ${EGRESS_MODEL_EXEMPT:-true}
     extra_hosts:
       - host.docker.internal:host-gateway
     volumes:
