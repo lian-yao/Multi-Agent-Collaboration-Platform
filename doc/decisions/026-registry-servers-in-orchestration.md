@@ -117,3 +117,21 @@ MCP Server），登记表决定「**用户另外**挂了哪些 Server」。这�
   路由、传输不支持、读表失败只试一次、刷新生效、`close` 释放）；
 - `GET /api/v1/tools`（§5.3）的目录**从此包含注册表 Server 的工具**——这份目录描述的是
   "平台当前可用的全部工具"，之前漏了它们；未发现过的 Server 仍不出现（与 §5.11 前置条件一致）。
+
+## 修订（2026-09-22）：部署侧显式打开 `MCP_INCLUDE_REGISTERED_SERVERS`
+
+实现落地时给这条合成加了开关 `MCP_INCLUDE_REGISTERED_SERVERS`（`app/mcp/config.py`），
+**代码默认关闭**——理由是默认部署下 `GET /api/v1/tools` 与阶段活动都不该依赖配置库可达。
+代价是：默认部署里「登记 + 发现」之后 Agent 的工具集**并不变化**，与上面「影响」一节和
+`doc/api.md` §5.3 的描述不一致（实测确认：`include_registered_servers=False` 时，
+发现成功的外部 Server 工具不出现在 `GET /api/v1/tools`）。
+
+本修订统一口径为「代码默认关闭、部署侧显式打开」：
+
+- `deploy/compose.yaml` 的 backend 环境里加
+  `MCP_INCLUDE_REGISTERED_SERVERS: ${MCP_INCLUDE_REGISTERED_SERVERS:-true}`；
+- 需要退回「只暴露平台内置工具」时在 `deploy/.env` 设 `false`；
+- 代码默认值保持 `false`：库不可达时工具目录不能被拖成超时（见上文「决策 3」）。
+
+于是「登记 Server 的工具会出现在目录里」在**部署形态下成立**，而单进程/测试形态仍可
+显式关闭。`doc/api.md` §5.3、`doc/deployment.md` 的环境变量表同步了这一口径。

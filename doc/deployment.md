@@ -269,6 +269,7 @@ npm run dev
 | `MCP_TRANSPORT` | 工具注册表传输：`inprocess`（默认）/ `stdio` / `http`（见 ADR-012） |
 | `MCP_SERVER_COMMAND` | `stdio` 传输时启动 MCP Server 的命令，默认当前解释器 |
 | `MCP_SERVER_URL` | `http` 传输时的 MCP Server 地址 |
+| `MCP_INCLUDE_REGISTERED_SERVERS` | 是否把登记并「发现」过的 MCP Server 工具并入 Agent 工具集与 `GET /api/v1/tools`；部署默认 `true`，代码默认 `false`（见 ADR-026） |
 | `TOOL_SEARCH_ENDPOINT` | 网页搜索端点，默认 DuckDuckGo Instant Answer |
 | `TOOL_SQL_DSN` | 只读 SQL 工具的 DSN，留空则用 `DATABASE_URL` |
 | `SANDBOX_BACKEND` | 代码执行沙箱后端：`docker`（默认）/ `denied` |

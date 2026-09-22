@@ -44,6 +44,10 @@ services:
       OBS_TRACING_ENDPOINT: http://jaeger:4318/v1/traces
       OBS_TRACING_ENABLED: "true"
       OBS_METRICS_SINK: postgres
+      # 用户登记的 MCP Server（ADR-026）：登记并「发现」之后，其工具要进 Agent 的
+      # 工具集与 GET /api/v1/tools。代码默认关闭（免让工具目录依赖配置库），部署侧
+      # 显式打开；要退回「只暴露平台内置工具」设 MCP_INCLUDE_REGISTERED_SERVERS=false。
+      MCP_INCLUDE_REGISTERED_SERVERS: ${MCP_INCLUDE_REGISTERED_SERVERS:-true}
       # 沙箱容器建在**宿主机**守护进程上（见下面 volumes），所以沙箱镜像必须先存在于宿主机。
       # 这里指到本项目自建镜像：compose 一定会把它构建出来，离线/内网环境也能用。
       # 能拉到官方镜像的环境可以删掉这行，回落到代码默认的 python:3.12-slim（更小、无本项目代码）。
