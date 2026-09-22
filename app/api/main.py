@@ -27,6 +27,8 @@ from app.config import get_settings
 from app.core import mcp_registry, model_registry
 from app.workspace import service as workspace_service
 from app.workspace import (
+    ApprovalNotFoundError,
+    ApprovalNotPendingError,
     WorkspaceApprovalRequired,
     WorkspaceDisabled,
     WorkspaceError,
@@ -36,6 +38,7 @@ from app.workspace import (
     WorkspaceQuotaExceeded,
     WorkspaceRootUnavailable,
 )
+from app.workspace import approvals as workspace_approvals
 from app.core.agent_config import (
     AgentConfigError,
     OVERRIDE_FIELDS,
@@ -975,6 +978,8 @@ def _registry_call(call: Callable[[], Any], *, failure_message: str) -> Any:
 
 # 工作区错误族（`doc/api.md` §5.19、ADR-033）：顺序敏感——先判子类再判基类。
 _WORKSPACE_ERRORS = (
+    ApprovalNotFoundError,
+    ApprovalNotPendingError,
     WorkspaceNotFoundError,
     WorkspaceExistsError,
     WorkspaceDisabled,
@@ -989,6 +994,10 @@ _WORKSPACE_ERRORS = (
 def _workspace_api_error(exc: Exception) -> ApiError:
     """工作区异常 → 契约错误码（`doc/api.md` §5.19）。"""
 
+    if isinstance(exc, ApprovalNotFoundError):
+        return ApiError("APPROVAL_NOT_FOUND", str(exc), status.HTTP_404_NOT_FOUND)
+    if isinstance(exc, ApprovalNotPendingError):
+        return ApiError("APPROVAL_NOT_PENDING", str(exc), status.HTTP_409_CONFLICT)
     if isinstance(exc, WorkspaceNotFoundError):
         return ApiError("WORKSPACE_NOT_FOUND", str(exc), status.HTTP_404_NOT_FOUND)
     if isinstance(exc, WorkspaceExistsError):
@@ -2419,3 +2428,83 @@ def delete_workspace_registry(workspace_id: str, request: Request) -> Response:
         )
     )
     return Response(status_code=204)
+
+
+# --------------------------------------------------------------------------- #
+# §5.20 工作区审批（ADR-033 §6）
+#
+# 破坏性动作（覆盖已有文件、删除、覆盖式移动）先落一条 `pending`，由人在界面上决策；
+# 批准后**同工作区、同动作、同目标**的下一次调用放行一次（`consumed`）。
+# --------------------------------------------------------------------------- #
+
+
+class ApprovalResponse(BaseModel):
+    id: str
+    workspace_id: str | None = None
+    session_id: str | None = None
+    run_id: str | None = None
+    kind: Literal["overwrite", "delete"]
+    target: str
+    reason: str | None = None
+    status: Literal["pending", "approved", "denied", "expired", "consumed"]
+    payload: dict[str, Any] = Field(default_factory=dict)
+    decided_by: str | None = None
+    requested_at: datetime | None = None
+    decided_at: datetime | None = None
+
+
+class ApprovalListResponse(BaseModel):
+    items: list[ApprovalResponse]
+    total: int
+    pending: int
+
+
+class ApprovalDecisionRequest(BaseModel):
+    """`POST /api/v1/approvals/{approval_id}/decision` 的请求体。"""
+
+    decision: Literal["approved", "denied"]
+
+
+@app.get(
+    "/api/v1/sessions/{session_id}/approvals",
+    response_model=ApprovalListResponse,
+)
+def list_session_approvals(
+    session_id: str,
+    status: str | None = Query(default=None),
+) -> ApprovalListResponse:
+    """列出会话的审批记录（`doc/api.md` §5.20）；`status` 省略或 `all` 表示全部。
+
+    读取时顺手把超过 TTL 的 `pending` 标成 `expired`——不放行，也不删记录。
+    """
+
+    _session_or_404(session_id)
+    data = _workspace_call(
+        lambda: workspace_approvals.list_session_approvals(session_id, status=status)
+    )
+    return ApprovalListResponse.model_validate(data)
+
+
+@app.post(
+    "/api/v1/approvals/{approval_id}/decision",
+    response_model=ApprovalResponse,
+)
+def decide_approval(
+    approval_id: str,
+    payload: ApprovalDecisionRequest,
+    request: Request,
+) -> ApprovalResponse:
+    """批准或拒绝一次待决策动作（`doc/api.md` §5.20）。
+
+    只有 `pending` 可以决策；重复决策返回 409 `APPROVAL_NOT_PENDING`——不覆盖既成的
+    决定。批准不等于"以后都行"：放行一次之后该记录置 `consumed`。
+    """
+
+    data = _workspace_call(
+        lambda: workspace_approvals.decide(
+            approval_id,
+            decision=payload.decision,
+            actor=request.headers.get("X-Request-ID"),
+        )
+    )
+    return ApprovalResponse.model_validate(data)

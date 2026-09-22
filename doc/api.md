@@ -1376,6 +1376,66 @@ latin-1 编码报错）。
 | 503 | `WORKSPACE_ROOT_UNAVAILABLE` | 工作区根不存在或不是目录 |
 | 503 | `DATA_SOURCE_UNAVAILABLE` | 存储读写失败 |
 
+### 5.20 工作区审批（覆盖 / 删除）
+
+`GET /api/v1/sessions/{session_id}/approvals`、
+`POST /api/v1/approvals/{approval_id}/decision`
+
+工作区里的**破坏性动作**要人工审批（ADR-033 §6）：覆盖已有文件、删除条目、覆盖式移动。
+Agent 第一次调用只会**提交申请**并拿到一条非重试错误（文案里带审批 id），它应当停下来；
+批准之后**重试同一调用**才真正执行。
+
+```json
+GET /api/v1/sessions/3f2b…/approvals?status=pending
+{
+  "items": [
+    {
+      "id": "ap-1",
+      "workspace_id": "9f1c…",
+      "session_id": "3f2b…",
+      "run_id": null,
+      "kind": "delete",
+      "target": "reports/old.md",
+      "reason": "删除工作区内的条目",
+      "status": "pending",
+      "payload": { "kind": "file" },
+      "decided_by": null,
+      "requested_at": "2026-09-23T02:01:00Z",
+      "decided_at": null
+    }
+  ],
+  "total": 1,
+  "pending": 1
+}
+```
+
+```json
+POST /api/v1/approvals/ap-1/decision
+{ "decision": "approved" }
+```
+
+`decision` 取 `approved` / `denied`；响应为该条审批的完整视图。语义要点：
+
+- **一次一授权**：批准只放行「同工作区 + 同动作 + 同目标」的下一次调用，放行后该记录置
+  `consumed`；再想覆盖/删除同一个目标要重新申请。
+- **不覆盖既成决定**：只有 `pending` 可以决策，重复决策返回 409 `APPROVAL_NOT_PENDING`。
+- **过期不放行**：超过 `WORKSPACE_APPROVAL_TTL_SECONDS`（默认 900 秒）未决策的 `pending`
+  在列表/决策时被标成 `expired`——既不放行也不删记录。
+- **不刷屏**：同一目标反复请求会复用同一条未决策记录；已批准的未消费记录也会被复用。
+- `status` 取 `pending` / `approved` / `denied` / `expired` / `consumed`，省略或 `all`
+  返回全部；列表响应额外给 `pending` 计数，供界面角标使用。
+- `reason` 由平台生成，**不照抄模型输出**（提示注入会经由审批卡片影响人）。
+
+错误码：
+
+| HTTP | code | 含义 |
+| --- | --- | --- |
+| 404 | `SESSION_NOT_FOUND` | 会话不存在 |
+| 404 | `APPROVAL_NOT_FOUND` | 审批记录不存在 |
+| 409 | `APPROVAL_NOT_PENDING` | 该审批已被决策（或已过期），不能再次决策 |
+| 422 | `VALIDATION_ERROR` | `decision` / `status` 取值不合法 |
+| 503 | `DATA_SOURCE_UNAVAILABLE` | 存储读写失败 |
+
 ## 6. 规划接口（当前未实现）
 
 下列接口已列入设计方向，但当前 FastAPI 不提供路由，前端不得直接调用：
@@ -1383,8 +1443,6 @@ latin-1 编码报错）。
 | 方法 | 路径 | 规划用途 |
 | --- | --- | --- |
 | POST | `/api/v1/agents/{agent_id}/run` | 单 Agent 调试执行 |
-| GET | `/api/v1/sessions/{session_id}/approvals` | 列出本会话的审批记录（含待决策） |
-| POST | `/api/v1/approvals/{approval_id}/decision` | 批准或拒绝一次待决策动作 |
 | GET | `/api/v1/config/egress` | 出网策略只读状态（模式、豁免、拒绝计数） |
 
 ### 6.1 规划请求示例（不保证可用）
@@ -1400,50 +1458,10 @@ POST /api/v1/agents/{agent_id}/run
 
 `PATCH /api/v1/config/agents/{agent_id}` 已按上述要求实现，见 §5.7。
 
-### 6.2 工作区的删除/覆盖与审批（规划契约，ADR-033）
+### 6.2 其余规划项
 
-工作区的**登记、列表、目录树、读取、提档与三个非破坏性写工具**已实现，见 §5.19。
-这一节记录尚未落地的部分——**破坏性动作**：
-
-- `delete_work_entry`（软删除到工作区内的 `.trash/`，保留期后清理）；
-- `write_work_file(overwrite=true)` 与 `move_work_entry` 的覆盖语义（目标已存在时改判为
-  "覆盖"而不是直接拒绝）。
-
-两者都必须先有人工审批（ADR-033 §6），所以和审批链路一起做。审批复用既有的
-会话/Workflow 暂停恢复：命中时写 `approvals` 记录、把该次执行置 `paused`、前端弹卡片，
-用户允许或拒绝后 `resume`。
-
-审批（删除与覆盖命中时产生，复用既有会话/Workflow 暂停恢复）：
-
-```json
-GET /api/v1/sessions/3f2b…/approvals
-{
-  "items": [
-    {
-      "id": "ap-1",
-      "session_id": "3f2b…",
-      "run_id": "run-9",
-      "kind": "delete",
-      "target": "reports/old.xlsx",
-      "reason": "删除工作区内的文件",
-      "status": "pending",
-      "requested_at": "2026-09-23T02:01:00Z",
-      "decided_by": null,
-      "decided_at": null
-    }
-  ],
-  "total": 1
-}
-```
-
-```json
-POST /api/v1/approvals/ap-1/decision
-{ "decision": "approved" }
-```
-
-`kind` 取值 `write` / `overwrite` / `delete`；`decision` 取值 `approved` / `denied`。
-决策后该次执行从 `paused` 恢复；未决策的审批超时后置 `expired` 并让执行以失败结束
-（不自动放行）。
+工作区的登记 / 目录树 / 读取 / 提档 / 四个写工具（含审批）见 §5.19 与 §5.20，均已实现。
+尚未落地的是**出网策略**（ADR-034，`GET /api/v1/config/egress` 只是它的只读投影）。
 
 ## 7. 前端对接约束
 

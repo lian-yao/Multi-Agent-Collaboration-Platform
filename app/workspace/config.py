@@ -51,6 +51,9 @@ class WorkspaceSettings(BaseSettings):
     delete_trash_dir: str = ".trash"
     """软删除目录名（阶段 2 的删除工具使用；阶段 1 只用于跳过它，不列给模型）。"""
 
+    approval_ttl_seconds: int = 900
+    """审批的有效期。超时未决策的 `pending` 会被标成 `expired`：不放行，也不删记录。"""
+
 
 @lru_cache
 def get_workspace_settings() -> WorkspaceSettings:

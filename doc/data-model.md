@@ -406,20 +406,22 @@ Prompt 时需同步 roles.py 与 `BUILTIN_AGENT_SEED`，避免目录与 Prompt �
 | 字段 | 类型 | 约束 | 说明 |
 | --- | --- | --- | --- |
 | id | UUID | PK | |
-| session_id | UUID | FK → sessions | |
-| run_id | UUID | 可空 | 触发审批的执行 |
-| kind | VARCHAR(20) | NOT NULL | `write` / `overwrite` / `delete` |
+| workspace_id | UUID | FK → workspaces（ON DELETE CASCADE），可空 | **放行按它匹配**：只按路径会让 A 工作区的审批放行 B 工作区的同名文件 |
+| session_id | UUID | FK → sessions（ON DELETE CASCADE） | |
+| run_id | UUID | 可空 | 触发审批的执行（当前由调用方留空） |
+| kind | VARCHAR(20) | NOT NULL | `overwrite` / `delete` |
 | target | VARCHAR(500) | NOT NULL | 工作区相对路径 |
 | reason | TEXT | NULL | 给用户看的说明（**来自平台模板，不照抄模型文本**） |
 | payload | JSONB | NULL | 供卡片渲染的附加信息（大小、覆盖前后差异摘要等） |
-| status | VARCHAR(20) | NOT NULL | `pending` / `approved` / `denied` / `expired` |
+| status | VARCHAR(20) | NOT NULL | `pending` / `approved` / `denied` / `expired` / `consumed` |
 | decided_by | VARCHAR(100) | NULL | 决策人 |
 | requested_at / decided_at | TIMESTAMPTZ | NOT NULL / NULL | |
 
-索引：`idx_approvals_session (session_id, status)`。
+索引：`idx_approvals_session (session_id, status)`、`idx_approvals_target (workspace_id, kind, target, status)`。
 
 不变量：`reason` 不直接采用模型生成的文案（提示注入会经由审批卡片影响人）；审批只影响
-**那一次**动作，不构成长期放行；超时 → `expired` → 执行按失败结束，不自动放行。
+**那一次**动作（放行后置 `consumed`，再要动同一个目标得重新申请）；超时 → `expired`
+→ 不放行，也不删记录。
 
 ## 4. Redis 结构
 

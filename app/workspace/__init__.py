@@ -5,6 +5,13 @@
 """
 
 from app.workspace.config import WorkspaceSettings, get_workspace_settings
+from app.workspace import approvals
+from app.workspace.approvals import (
+    ApprovalNotFoundError,
+    ApprovalNotPendingError,
+    decide as decide_approval,
+    list_session_approvals,
+)
 from app.workspace.errors import (
     WorkspaceApprovalRequired,
     WorkspaceDisabled,
@@ -28,7 +35,10 @@ from app.workspace.service import (
 )
 
 __all__ = [
+    "ApprovalNotFoundError",
+    "ApprovalNotPendingError",
     "LocalWorkspaceSource",
+    "approvals",
     "WorkspaceApprovalRequired",
     "WorkspaceDisabled",
     "WorkspaceError",
@@ -39,10 +49,12 @@ __all__ = [
     "WorkspaceRootUnavailable",
     "WorkspaceSettings",
     "create_workspace",
+    "decide_approval",
     "delete_workspace",
     "get_workspace",
     "get_workspace_settings",
     "list_workspaces",
+    "list_session_approvals",
     "normalize_relative",
     "resolve_in_workspace",
     "resolve_root",

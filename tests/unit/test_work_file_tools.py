@@ -79,6 +79,11 @@ class FakeSource:
             raise self._error
         return {"source": source, "target": target}
 
+    def delete_entry(self, path: str) -> dict[str, Any]:
+        if self._error is not None:
+            raise self._error
+        return {"path": path, "trashed_to": f".trash/x-{path}", "kind": "file"}
+
 
 class StubRegistry:
     """最小注册表：只回答目录与调用，其余按需在用例里断言。"""
@@ -125,8 +130,8 @@ def test_read_only_tier_has_no_write_tools(settings):
     assert [tool.name for tool in tools] == ["list_work_files", "read_work_file"]
 
 
-def test_write_tier_adds_the_non_destructive_tools(settings):
-    """阶段 2 的写档位只放开三种非破坏性动作；删除在阶段 3（要审批）之前不存在。"""
+def test_write_tier_adds_write_tools_including_the_approval_gated_delete(settings):
+    """写档位放开四个工具；其中删除与覆盖是破坏性动作，必须走审批（阶段 3）。"""
 
     tools = work_file_tools(
         "s-1", settings=settings, source=FakeSource(mode="workspace_write")
@@ -139,8 +144,9 @@ def test_write_tier_adds_the_non_destructive_tools(settings):
         "write_work_file",
         "make_work_dir",
         "move_work_entry",
+        "delete_work_entry",
     ]
-    assert not any("delete" in name for name in names), "删除必须等审批链路（ADR-033 §6）"
+    assert "delete_work_entry" in names
 
 
 def test_list_tool_returns_entries_and_hint(settings):
@@ -312,6 +318,42 @@ def test_move_tool_returns_source_and_target(settings):
 
     assert result["source"] == "a.txt"
     assert result["target"] == "docs/a.txt"
+
+
+def test_delete_tool_reports_the_trash_location(settings):
+    tool = {
+        t.name: t
+        for t in work_file_tools(
+            "s-1", settings=settings, source=FakeSource(mode="workspace_write")
+        )
+    }["delete_work_entry"]
+
+    result = tool.invoke({"path": "reports/old.md"})
+
+    assert result["path"] == "reports/old.md"
+    assert result["trashed_to"].startswith(".trash/")
+
+
+def test_delete_tool_surfaces_the_pending_approval(settings):
+    """第一次删除只会拿到"已提交审批"，模型必须把决定权交回用户。"""
+
+    tool = {
+        t.name: t
+        for t in work_file_tools(
+            "s-1",
+            settings=settings,
+            source=FakeSource(
+                mode="workspace_write",
+                error=WorkspaceApprovalRequired("删除需要人工审批：a.txt；已提交审批 ap-1"),
+            ),
+        )
+    }["delete_work_entry"]
+
+    with pytest.raises(ToolExecutionError) as excinfo:
+        tool.invoke({"path": "a.txt"})
+
+    assert excinfo.value.retryable is False
+    assert "已提交审批" in str(excinfo.value)
 
 
 # --------------------------------------------------------------------------- #

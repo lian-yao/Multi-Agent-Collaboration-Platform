@@ -462,6 +462,42 @@ class WorkspaceRecord(Base):
     )
 
 
+class ApprovalRecord(Base):
+    """`approvals` 表：工作区破坏性动作的人工审批（`doc/data-model.md` §3.3、ADR-033 §6）。
+
+    `target` 是工作区相对路径；`workspace_id` 用来在放行时重新确认「同一个工作区里的
+    同一个目标」——只按路径匹配会让 A 工作区的审批放行 B 工作区的同名文件。
+    """
+
+    __tablename__ = "approvals"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
+    workspace_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=True
+    )
+    session_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("sessions.id", ondelete="CASCADE"), nullable=True
+    )
+    run_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    target: Mapped[str] = mapped_column(String(500), nullable=False)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSONB, default=dict, nullable=False)
+    status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
+    decided_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, nullable=False
+    )
+    decided_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        Index("idx_approvals_session", "session_id", "status"),
+        Index("idx_approvals_target", "workspace_id", "kind", "target", "status"),
+    )
+
+
 def _provider_config_to_dict(row: ProviderConfigRecord) -> dict[str, Any]:
     return {
         "id": row.id,
@@ -1232,6 +1268,119 @@ def update_workspace(
         session.commit()
         session.refresh(row)
         return _workspace_to_dict(row)
+
+
+def _approval_to_dict(row: ApprovalRecord) -> dict[str, Any]:
+    return {
+        "id": str(row.id),
+        "workspace_id": str(row.workspace_id) if row.workspace_id else None,
+        "session_id": str(row.session_id) if row.session_id else None,
+        "run_id": str(row.run_id) if row.run_id else None,
+        "kind": row.kind,
+        "target": row.target,
+        "reason": row.reason,
+        "payload": row.payload or {},
+        "status": row.status,
+        "decided_by": row.decided_by,
+        "requested_at": row.requested_at,
+        "decided_at": row.decided_at,
+    }
+
+
+def create_approval(
+    *,
+    approval_id: str | uuid.UUID,
+    kind: str,
+    target: str,
+    workspace_id: str | uuid.UUID | None = None,
+    session_id: str | uuid.UUID | None = None,
+    run_id: str | uuid.UUID | None = None,
+    reason: str | None = None,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    record = ApprovalRecord(
+        id=_as_uuid(approval_id),
+        workspace_id=_as_uuid(workspace_id) if workspace_id else None,
+        session_id=_as_uuid(session_id) if session_id else None,
+        run_id=_as_uuid(run_id) if run_id else None,
+        kind=kind,
+        target=target,
+        reason=reason,
+        payload=payload or {},
+        status="pending",
+    )
+    with get_session_factory()() as session:
+        session.add(record)
+        session.commit()
+        session.refresh(record)
+        return _approval_to_dict(record)
+
+
+def get_approval(approval_id: str | uuid.UUID) -> dict[str, Any] | None:
+    with get_session_factory()() as session:
+        row = session.get(ApprovalRecord, _as_uuid(approval_id))
+        return _approval_to_dict(row) if row else None
+
+
+def list_approvals(
+    *,
+    session_id: str | uuid.UUID | None = None,
+    status: str | None = None,
+) -> list[dict[str, Any]]:
+    statement = select(ApprovalRecord).order_by(
+        ApprovalRecord.requested_at.asc(), ApprovalRecord.id.asc()
+    )
+    if session_id is not None:
+        statement = statement.where(ApprovalRecord.session_id == _as_uuid(session_id))
+    if status is not None:
+        statement = statement.where(ApprovalRecord.status == status)
+    with get_session_factory()() as session:
+        return [_approval_to_dict(row) for row in session.scalars(statement).all()]
+
+
+def find_approval(
+    *,
+    workspace_id: str | uuid.UUID,
+    kind: str,
+    target: str,
+    status: str,
+) -> dict[str, Any] | None:
+    """按「工作区 + 动作 + 目标 + 状态」找一条，最近的优先。"""
+
+    statement = (
+        select(ApprovalRecord)
+        .where(
+            ApprovalRecord.workspace_id == _as_uuid(workspace_id),
+            ApprovalRecord.kind == kind,
+            ApprovalRecord.target == target,
+            ApprovalRecord.status == status,
+        )
+        .order_by(ApprovalRecord.requested_at.desc())
+        .limit(1)
+    )
+    with get_session_factory()() as session:
+        row = session.scalars(statement).first()
+        return _approval_to_dict(row) if row else None
+
+
+def update_approval(
+    approval_id: str | uuid.UUID,
+    *,
+    status: str,
+    decided_by: str | None = None,
+) -> dict[str, Any] | None:
+    with get_session_factory()() as session:
+        row = session.get(ApprovalRecord, _as_uuid(approval_id))
+        if row is None:
+            return None
+        row.status = status
+        if decided_by is not None:
+            row.decided_by = decided_by
+        if status != "pending":
+            row.decided_at = _utcnow()
+        session.commit()
+        session.refresh(row)
+        return _approval_to_dict(row)
 
 
 def _tool_call_to_dict(row: ToolCall) -> dict[str, Any]:

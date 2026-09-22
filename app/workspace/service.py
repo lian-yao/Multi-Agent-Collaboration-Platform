@@ -20,6 +20,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from app.core import checkpoint
 from app.observability.logging import get_logger, log_event
+from app.workspace import approvals
 from app.workspace.config import WorkspaceSettings, get_workspace_settings
 from app.workspace.errors import (
     WorkspaceApprovalRequired,
@@ -505,56 +506,103 @@ class LocalWorkspaceSource:
     def write_file(
         self, path: str, text: str, *, overwrite: bool = False
     ) -> dict[str, Any]:
-        """写入一个新文件；覆盖已有文件在阶段 3（审批）之前一律拒绝。"""
+        """写入文件；覆盖已有文件需要一条**已批准**的审批（ADR-033 §6）。"""
 
         self._require_write_mode()
         base = self.root()
         target = resolve_in_workspace(base, path)
         if target.is_dir():
             raise WorkspacePathError(f"目标是目录，不能写文件：{path}")
-        if target.exists() and overwrite:
-            # 覆盖是破坏性动作：ADR-033 §6 要求人工审批，而审批在阶段 3。
-            # 在那之前宁可让模型换个文件名，也不打开一个"没有审批的覆盖"。
-            raise WorkspaceApprovalRequired(
-                f"覆盖已有文件需要人工审批（阶段 3 提供）：{path}；请改用新的文件名"
-            )
-        if target.exists():
-            raise WorkspaceExistsError(
-                f"文件已存在：{path}；覆盖需要人工审批（阶段 3），请改用新的文件名"
+        relative = relative_to_root(base, target)
+        replacing = target.exists()
+        if replacing:
+            if not overwrite:
+                raise WorkspaceExistsError(
+                    f"文件已存在：{relative}；覆盖需要人工审批，请改用新的文件名，"
+                    "或带 overwrite=true 重新调用以提交审批"
+                )
+            self._require_approval(
+                kind="overwrite",
+                target=relative,
+                reason="覆盖已有文件",
+                payload={"size_bytes": target.stat().st_size},
             )
 
         payload = text.encode("utf-8")
         if len(payload) > self._settings.max_file_bytes:
             raise WorkspaceQuotaExceeded(
-                f"内容超过单文件上限（{len(payload)} > {self._settings.max_file_bytes} 字节）：{path}"
+                f"内容超过单文件上限（{len(payload)} > {self._settings.max_file_bytes} 字节）：{relative}"
             )
         created_dirs = _missing_parents(base, target.parent)
+        # 覆盖时只有"超出的部分"占新空间；按全量算会把配额误判成超限。
+        existing_bytes = target.stat().st_size if replacing else 0
         self._ensure_quota(
-            extra_bytes=len(payload), extra_entries=1 + len(created_dirs), path=path
+            extra_bytes=max(0, len(payload) - existing_bytes),
+            extra_entries=1 + len(created_dirs),
+            path=relative,
         )
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
-            # `x` 是独占创建：并发下第二个写者拿到 FileExistsError，而不是静默覆盖。
-            # `newline=""` 关掉平台换行转换，落盘字节与入参一致。
-            with open(target, "x", encoding="utf-8", newline="") as handle:
+            # 新建用 `x`（独占创建：并发下第二个写者拿到 FileExistsError，而不是静默覆盖）；
+            # 覆盖走 `w`，但前面已经拿过审批。`newline=""` 关掉平台换行转换，
+            # 落盘字节与入参一致。
+            with open(target, "w" if replacing else "x", encoding="utf-8", newline="") as handle:
                 handle.write(text)
         except FileExistsError as exc:
             raise WorkspaceExistsError(
-                f"文件已存在：{path}（覆盖需要人工审批）"
+                f"文件已存在：{relative}（覆盖需要人工审批）"
             ) from exc
         except OSError as exc:
-            raise WorkspaceError(f"写入失败：{path}（{exc}）") from exc
+            raise WorkspaceError(f"写入失败：{relative}（{exc}）") from exc
         log_event(
             logger,
-            "workspace.write",
+            "workspace.overwrite" if replacing else "workspace.write",
             workspace_id=self._row["id"],
-            path=relative_to_root(base, target),
+            path=relative,
             bytes=len(payload),
         )
         return {
-            "path": relative_to_root(base, target),
+            "path": relative,
             "size_bytes": len(payload),
             "created_dirs": [relative_to_root(base, item) for item in created_dirs],
+            "replaced": replacing,
+        }
+
+    def delete_entry(self, path: str) -> dict[str, Any]:
+        """删除工作区内的条目：先入 `.trash/`，且必须先拿到删除审批。"""
+
+        self._require_write_mode()
+        base = self.root()
+        target = resolve_in_workspace(base, path)
+        if target == base:
+            raise WorkspacePathError("不能删除工作区根目录")
+        if not target.exists():
+            raise WorkspacePathError(f"不存在：{path}")
+        relative = relative_to_root(base, target)
+        self._require_approval(
+            kind="delete",
+            target=relative,
+            reason="删除工作区内的条目",
+            payload={"kind": "dir" if target.is_dir() else "file"},
+        )
+        trash = base / self._settings.delete_trash_dir
+        trash.mkdir(exist_ok=True)
+        destination = _unique_trash_path(trash, target.name)
+        try:
+            target.rename(destination)
+        except OSError as exc:
+            raise WorkspaceError(f"删除失败：{relative}（{exc}）") from exc
+        log_event(
+            logger,
+            "workspace.delete",
+            workspace_id=self._row["id"],
+            path=relative,
+            trashed_to=relative_to_root(base, destination),
+        )
+        return {
+            "path": relative,
+            "trashed_to": relative_to_root(base, destination),
+            "kind": "dir" if target.is_dir() else "file",
         }
 
     def make_dir(self, path: str) -> dict[str, Any]:
@@ -592,7 +640,18 @@ class LocalWorkspaceSource:
         if not src.exists():
             raise WorkspacePathError(f"源不存在：{source}")
         if dst.exists():
-            raise WorkspaceExistsError(f"目标已存在：{target}（覆盖需要人工审批）")
+            if src.is_dir() or dst.is_dir():
+                # 目录的"覆盖"语义是整棵子树被替换，破坏性太大，本轮直接不做。
+                raise WorkspacePathError(
+                    f"目标是目录，不能覆盖：{target}；请先删除或改名"
+                )
+            relative = relative_to_root(base, dst)
+            self._require_approval(
+                kind="overwrite",
+                target=relative,
+                reason="移动会覆盖目标文件",
+                payload={"operation": "move", "source": relative_to_root(base, src)},
+            )
         if src.is_dir() and dst.is_relative_to(src):
             raise WorkspacePathError(f"不能把目录移动到它自己的子路径下：{target}")
         created_dirs = _missing_parents(base, dst.parent)
@@ -601,7 +660,11 @@ class LocalWorkspaceSource:
         )
         dst.parent.mkdir(parents=True, exist_ok=True)
         try:
-            src.rename(dst)
+            if dst.exists():
+                # 已经拿到"覆盖该目标"的审批，用 replace 一步换掉。
+                os.replace(src, dst)
+            else:
+                src.rename(dst)
         except FileExistsError as exc:
             raise WorkspaceExistsError(f"目标已存在：{target}") from exc
         except OSError as exc:
@@ -617,6 +680,33 @@ class LocalWorkspaceSource:
             "source": relative_to_root(base, src),
             "target": relative_to_root(base, dst),
         }
+
+    def _require_approval(
+        self,
+        *,
+        kind: str,
+        target: str,
+        reason: str,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        """拿到可用审批就放行（并消费掉），否则登记一条 `pending` 并拒绝本次调用。"""
+
+        workspace_id = self._row["id"]
+        if approvals.consume(workspace_id=workspace_id, kind=kind, target=target):
+            return
+        request = approvals.request_or_reuse(
+            workspace_id=workspace_id,
+            session_id=self._row.get("session_id"),
+            kind=kind,
+            target=target,
+            reason=reason,
+            payload=payload,
+            settings=self._settings,
+        )
+        raise WorkspaceApprovalRequired(
+            f"{reason}需要人工审批：{target}；已提交审批 {request['id']}，"
+            "请在界面上批准后重试同一调用（不批准就不要重试）"
+        )
 
     def _ensure_quota(
         self, *, extra_bytes: int, extra_entries: int, path: str
@@ -651,6 +741,18 @@ def _missing_parents(base: Path, directory: Path) -> list[Path]:
         missing.append(current)
         current = current.parent
     return missing
+
+
+def _unique_trash_path(trash: Path, name: str) -> Path:
+    """软删除目标：`<UTC 时间戳>-<原名>`，重名时加序号——不覆盖回收站里的旧条目。"""
+
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+    candidate = trash / f"{stamp}-{name}"
+    counter = 1
+    while candidate.exists():
+        counter += 1
+        candidate = trash / f"{stamp}-{counter}-{name}"
+    return candidate
 
 
 def _open_readonly(path: Path) -> Any:

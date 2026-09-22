@@ -17,6 +17,8 @@ from fastapi.testclient import TestClient
 
 import app.api.main as api_main
 from app.workspace import service as workspace_service
+from app.workspace import approvals as workspace_approvals
+from app.workspace.approvals import ApprovalNotFoundError, ApprovalNotPendingError
 from app.workspace.errors import (
     WorkspaceApprovalRequired,
     WorkspaceDisabled,
@@ -71,6 +73,21 @@ TREE_VIEW = {
 }
 
 SESSION_ID = "3f2b8f4e-1b6d-4c3a-9c6f-2c1b7f7a1a11"
+
+APPROVAL_VIEW = {
+    "id": "ap-1",
+    "workspace_id": "w-1",
+    "session_id": SESSION_ID,
+    "run_id": None,
+    "kind": "delete",
+    "target": "reports/old.md",
+    "reason": "删除工作区内的条目",
+    "status": "pending",
+    "payload": {"kind": "file"},
+    "decided_by": None,
+    "requested_at": datetime(2026, 9, 23, tzinfo=timezone.utc),
+    "decided_at": None,
+}
 
 
 class Stub:
@@ -145,9 +162,35 @@ class WorkspaceApi:
         return self.stubs[name]
 
 
+class ApprovalApi:
+    """把 `app.workspace.approvals` 的两个入口换成替身。"""
+
+    def __init__(self, monkeypatch) -> None:
+        self.list_stub = Stub(
+            "list_session_approvals",
+            {"items": [APPROVAL_VIEW], "total": 1, "pending": 1},
+        )
+        self.decide_stub = Stub(
+            "decide", {**APPROVAL_VIEW, "status": "approved", "decided_by": "req-1"}
+        )
+        monkeypatch.setattr(
+            workspace_approvals, "list_session_approvals", self.list_stub
+        )
+        monkeypatch.setattr(workspace_approvals, "decide", self.decide_stub)
+
+
 @pytest.fixture
 def api(monkeypatch):
     return WorkspaceApi(monkeypatch), TestClient(api_main.app)
+
+
+@pytest.fixture
+def approval_api(monkeypatch):
+    # 会话存在性：审批接口同样先做 404 校验。
+    monkeypatch.setattr(
+        api_main.api_store, "get_session", lambda session_id: {"id": str(session_id)}
+    )
+    return ApprovalApi(monkeypatch), TestClient(api_main.app)
 
 
 # --------------------------------------------------------------------------- #
@@ -404,3 +447,83 @@ def test_delete_missing_workspace_is_404(api):
 
     assert response.status_code == 404
     assert response.json()["code"] == "WORKSPACE_NOT_FOUND"
+
+
+# --------------------------------------------------------------------------- #
+# §5.20 审批
+# --------------------------------------------------------------------------- #
+
+
+def test_list_approvals_returns_pending_count(approval_api):
+    stub, client = approval_api
+
+    response = client.get(f"/api/v1/sessions/{SESSION_ID}/approvals")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 1
+    assert body["pending"] == 1
+    assert body["items"][0]["kind"] == "delete"
+    assert stub.list_stub.last_call[1] == {"status": None}
+
+
+def test_list_approvals_passes_the_status_filter(approval_api):
+    stub, client = approval_api
+
+    response = client.get(f"/api/v1/sessions/{SESSION_ID}/approvals?status=pending")
+
+    assert response.status_code == 200
+    assert stub.list_stub.last_call[1] == {"status": "pending"}
+
+
+def test_list_approvals_with_unknown_session_is_404(approval_api, monkeypatch):
+    _, client = approval_api
+    monkeypatch.setattr(api_main.api_store, "get_session", lambda session_id: None)
+
+    response = client.get(f"/api/v1/sessions/{SESSION_ID}/approvals")
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "SESSION_NOT_FOUND"
+
+
+def test_decide_approval_returns_the_decided_record(approval_api):
+    stub, client = approval_api
+
+    response = client.post(
+        "/api/v1/approvals/ap-1/decision",
+        json={"decision": "approved"},
+        headers={"X-Request-ID": "req-1"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "approved"
+    assert stub.decide_stub.last_call[1] == {"decision": "approved", "actor": "req-1"}
+
+
+def test_decide_approval_rejects_an_unknown_decision(approval_api):
+    stub, client = approval_api
+
+    response = client.post("/api/v1/approvals/ap-1/decision", json={"decision": "maybe"})
+
+    assert response.status_code == 422
+    assert not stub.decide_stub.calls
+
+
+def test_decide_missing_approval_is_404(approval_api):
+    stub, client = approval_api
+    stub.decide_stub.outcome = ApprovalNotFoundError("ap-x")
+
+    response = client.post("/api/v1/approvals/ap-x/decision", json={"decision": "denied"})
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "APPROVAL_NOT_FOUND"
+
+
+def test_deciding_twice_is_409(approval_api):
+    stub, client = approval_api
+    stub.decide_stub.outcome = ApprovalNotPendingError("审批 ap-1 已经是 approved")
+
+    response = client.post("/api/v1/approvals/ap-1/decision", json={"decision": "denied"})
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "APPROVAL_NOT_PENDING"

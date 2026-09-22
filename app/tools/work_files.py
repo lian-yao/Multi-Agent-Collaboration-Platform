@@ -46,6 +46,8 @@ class WorkFileSource(Protocol):
 
     def move_entry(self, source: str, target: str) -> dict[str, Any]: ...
 
+    def delete_entry(self, path: str) -> dict[str, Any]: ...
+
 
 class ListWorkFilesArgs(BaseModel):
     path: str = Field(
@@ -101,6 +103,14 @@ class MoveWorkEntryArgs(BaseModel):
         min_length=1,
         max_length=MAX_PATH_CHARS,
         description="工作目录内的目标路径，目标已存在时会被拒绝（覆盖需要人工审批）",
+    )
+
+
+class DeleteWorkEntryArgs(BaseModel):
+    path: str = Field(
+        min_length=1,
+        max_length=MAX_PATH_CHARS,
+        description="要删除的工作目录内相对路径（文件或目录）",
     )
 
 
@@ -177,8 +187,9 @@ class WorkFileWriteTool(BuiltinTool):
     name = "write_work_file"
     description = (
         "在本次会话的工作目录里写一个 UTF-8 文本文件（父目录会自动创建）。"
-        "只能新建：目标已存在会失败，覆盖已有文件需要人工审批（尚未开放），"
-        "请改用新的文件名。受目录配额限制，超限时错误里会给出当前用量与上限。"
+        "目标已存在时默认失败；带 overwrite=true 会**提交一次人工审批**并立即返回，"
+        "用户批准后重试同一调用才会真正覆盖。受目录配额限制，超限时错误里会给出"
+        "当前用量与上限。"
     )
     args_model = WriteWorkFileArgs
 
@@ -226,7 +237,7 @@ class WorkFileMoveTool(BuiltinTool):
     name = "move_work_entry"
     description = (
         "在本次会话的工作目录内移动或重命名文件/目录。目标已存在时拒绝执行"
-        "（覆盖需要人工审批，尚未开放）；目录不能移动到它自己的子路径下。"
+        "（覆盖目标需要人工审批：会提交一次审批申请）；目录不能移动到它自己的子路径下。"
     )
     args_model = MoveWorkEntryArgs
 
@@ -242,6 +253,30 @@ class WorkFileMoveTool(BuiltinTool):
             "source": payload.get("source"),
             "target": payload.get("target"),
             "note": "已移动；内容本身没有被改写。",
+        }
+
+
+class WorkFileDeleteTool(BuiltinTool):
+    name = "delete_work_entry"
+    description = (
+        "删除本次会话工作目录里的文件或目录（**软删除**：先进工作区内的 .trash/）。"
+        "删除必须人工审批：第一次调用只会提交审批申请，用户批准后重试同一调用才真正删除。"
+    )
+    args_model = DeleteWorkEntryArgs
+
+    def __init__(self, source: WorkFileSource) -> None:
+        self._source = source
+
+    def run(self, args: DeleteWorkEntryArgs) -> dict[str, Any]:
+        try:
+            payload = self._source.delete_entry(args.path)
+        except WorkspaceError as exc:
+            raise ToolExecutionError(str(exc), retryable=False) from exc
+        return {
+            "path": payload.get("path"),
+            "trashed_to": payload.get("trashed_to"),
+            "kind": payload.get("kind"),
+            "note": "已移入工作区内的 .trash/，原件仍在工作区里。",
         }
 
 
@@ -273,6 +308,7 @@ def work_file_tools(
                 WorkFileWriteTool(resolved_source),
                 WorkFileMkdirTool(resolved_source),
                 WorkFileMoveTool(resolved_source),
+                WorkFileDeleteTool(resolved_source),
             )
         )
     return tuple(tools)
@@ -283,8 +319,10 @@ __all__ = [
     "LocalWorkspaceSource",
     "MakeWorkDirArgs",
     "MoveWorkEntryArgs",
+    "DeleteWorkEntryArgs",
     "ReadWorkFileArgs",
     "WorkFileListTool",
+    "WorkFileDeleteTool",
     "WorkFileMkdirTool",
     "WorkFileMoveTool",
     "WorkFileReadTool",

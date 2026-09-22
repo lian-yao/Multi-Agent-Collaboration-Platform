@@ -32,6 +32,7 @@ class FakeWorkspaceStore:
 
     def __init__(self) -> None:
         self.rows: dict[str, dict] = {}
+        self.approvals: dict[str, dict] = {}
 
     def install(self, monkeypatch) -> "FakeWorkspaceStore":
         for name in (
@@ -41,6 +42,10 @@ class FakeWorkspaceStore:
             "create_workspace",
             "update_workspace",
             "delete_workspace",
+            "create_approval",
+            "get_approval",
+            "find_approval",
+            "update_approval",
         ):
             monkeypatch.setattr(checkpoint, name, getattr(self, name))
         return self
@@ -102,6 +107,65 @@ class FakeWorkspaceStore:
             row["name"] = name
         row["updated_by"] = updated_by
         row["updated_at"] = datetime.now(timezone.utc)
+        return dict(row)
+
+    # -- 审批（阶段 3） ---------------------------------------------------- #
+
+    def create_approval(
+        self,
+        *,
+        approval_id,
+        kind: str,
+        target: str,
+        workspace_id=None,
+        session_id=None,
+        run_id=None,
+        reason=None,
+        payload=None,
+    ) -> dict:
+        row = {
+            "id": str(approval_id),
+            "workspace_id": str(workspace_id) if workspace_id else None,
+            "session_id": str(session_id) if session_id else None,
+            "run_id": None,
+            "kind": kind,
+            "target": target,
+            "reason": reason,
+            "payload": dict(payload or {}),
+            "status": "pending",
+            "decided_by": None,
+            "requested_at": datetime.now(timezone.utc),
+            "decided_at": None,
+        }
+        self.approvals[row["id"]] = row
+        return dict(row)
+
+    def get_approval(self, approval_id) -> dict | None:
+        row = self.approvals.get(str(approval_id))
+        return dict(row) if row else None
+
+    def find_approval(self, *, workspace_id, kind, target, status) -> dict | None:
+        matched = [
+            row
+            for row in self.approvals.values()
+            if row["workspace_id"] == str(workspace_id)
+            and row["kind"] == kind
+            and row["target"] == target
+            and row["status"] == status
+        ]
+        if not matched:
+            return None
+        return dict(max(matched, key=lambda row: row["requested_at"]))
+
+    def update_approval(self, approval_id, *, status: str, decided_by=None) -> dict | None:
+        row = self.approvals.get(str(approval_id))
+        if row is None:
+            return None
+        row["status"] = status
+        if decided_by is not None:
+            row["decided_by"] = decided_by
+        if status != "pending":
+            row["decided_at"] = datetime.now(timezone.utc)
         return dict(row)
 
 
@@ -480,7 +544,7 @@ def test_make_dir_rejects_an_existing_path(store, settings, tmp_path: Path):
         source.make_dir("reports")
 
 
-def test_move_entry_renames_and_refuses_overwrite(store, settings, tmp_path: Path):
+def test_move_entry_renames_and_gates_overwrite_behind_approval(store, settings, tmp_path: Path):
     source = _writable(store, settings, tmp_path)
     source.write_file("a.txt", "content")
     source.write_file("b.txt", "other")
@@ -491,7 +555,8 @@ def test_move_entry_renames_and_refuses_overwrite(store, settings, tmp_path: Pat
     assert not (tmp_path / "project" / "a.txt").exists()
     assert (tmp_path / "project" / "docs" / "a.txt").read_text(encoding="utf-8") == "content"
 
-    with pytest.raises(WorkspaceExistsError, match="目标已存在"):
+    # 阶段 3 起：覆盖目标改成"提交审批"，不再是一句"目标已存在"。
+    with pytest.raises(WorkspaceApprovalRequired, match="已提交审批"):
         source.move_entry("docs/a.txt", "b.txt")
 
 
@@ -516,6 +581,121 @@ def test_move_entry_rejects_escaping_targets(store, settings, tmp_path: Path):
 
     with pytest.raises(WorkspacePathError):
         source.move_entry("a.txt", "../outside.txt")
+
+
+# --------------------------------------------------------------------------- #
+# 阶段 3：破坏性动作走审批
+# --------------------------------------------------------------------------- #
+
+
+def _approve(store, *, workspace_id: str, kind: str, target: str) -> None:
+    """模拟用户在界面上批准：找到那条 pending 并决策。"""
+
+    from app.workspace import approvals as approvals_module
+
+    row = store.find_approval(workspace_id=workspace_id, kind=kind, target=target, status="pending")
+    assert row is not None, "应当先有一条待决策的审批"
+    approvals_module.decide(row["id"], decision="approved", actor="ui")
+
+
+def test_new_files_need_no_approval(store, settings, tmp_path: Path):
+    source = _writable(store, settings, tmp_path)
+
+    source.write_file("fresh.txt", "content")
+
+    assert store.approvals == {}
+
+
+def test_overwrite_requires_an_approval_then_replaces_once(store, settings, tmp_path: Path):
+    source = _writable(store, settings, tmp_path)
+    source.write_file("a.txt", "first")
+
+    with pytest.raises(WorkspaceApprovalRequired) as excinfo:
+        source.write_file("a.txt", "second", overwrite=True)
+    assert "已提交审批" in str(excinfo.value)
+    assert (tmp_path / "project" / "a.txt").read_text(encoding="utf-8") == "first"
+
+    _approve(store, workspace_id=source.workspace["id"], kind="overwrite", target="a.txt")
+
+    result = source.write_file("a.txt", "second", overwrite=True)
+    assert result["replaced"] is True
+    assert (tmp_path / "project" / "a.txt").read_text(encoding="utf-8") == "second"
+
+    # 一次授权只放行一次：再来一次又要审批
+    with pytest.raises(WorkspaceApprovalRequired):
+        source.write_file("a.txt", "third", overwrite=True)
+
+
+def test_delete_moves_the_entry_into_trash_after_approval(store, settings, tmp_path: Path):
+    source = _writable(store, settings, tmp_path)
+    source.write_file("reports/a.txt", "content")
+
+    with pytest.raises(WorkspaceApprovalRequired):
+        source.delete_entry("reports/a.txt")
+    assert (tmp_path / "project" / "reports" / "a.txt").exists()
+
+    _approve(store, workspace_id=source.workspace["id"], kind="delete", target="reports/a.txt")
+
+    result = source.delete_entry("reports/a.txt")
+    assert result["kind"] == "file"
+    assert result["trashed_to"].startswith(".trash/")
+    assert not (tmp_path / "project" / "reports" / "a.txt").exists()
+    assert (tmp_path / "project" / ".trash").is_dir()
+    assert len(list((tmp_path / "project" / ".trash").iterdir())) == 1
+
+
+def test_delete_refuses_the_workspace_root(store, settings, tmp_path: Path):
+    source = _writable(store, settings, tmp_path)
+
+    with pytest.raises(WorkspacePathError, match="不能删除工作区根目录"):
+        source.delete_entry("")
+
+
+def test_delete_rejects_escaping_paths(store, settings, tmp_path: Path):
+    source = _writable(store, settings, tmp_path)
+
+    with pytest.raises(WorkspacePathError):
+        source.delete_entry("../outside.txt")
+
+
+def test_move_over_a_file_needs_an_approval(store, settings, tmp_path: Path):
+    source = _writable(store, settings, tmp_path)
+    source.write_file("a.txt", "content")
+    source.write_file("b.txt", "other")
+
+    with pytest.raises(WorkspaceApprovalRequired):
+        source.move_entry("a.txt", "b.txt")
+
+    _approve(store, workspace_id=source.workspace["id"], kind="overwrite", target="b.txt")
+
+    result = source.move_entry("a.txt", "b.txt")
+    assert result["target"] == "b.txt"
+    assert (tmp_path / "project" / "b.txt").read_text(encoding="utf-8") == "content"
+    assert not (tmp_path / "project" / "a.txt").exists()
+
+
+def test_move_over_a_directory_is_refused_outright(store, settings, tmp_path: Path):
+    """目录的"覆盖"等于替换整棵子树，破坏性太大：本轮直接不做。"""
+
+    source = _writable(store, settings, tmp_path)
+    source.write_file("a.txt", "content")
+    source.make_dir("docs")
+
+    with pytest.raises(WorkspacePathError, match="不能覆盖"):
+        source.move_entry("a.txt", "docs")
+
+
+def test_approval_is_not_transferable_between_targets(store, settings, tmp_path: Path):
+    source = _writable(store, settings, tmp_path)
+    source.write_file("a.txt", "first")
+    source.write_file("b.txt", "first")
+
+    with pytest.raises(WorkspaceApprovalRequired):
+        source.write_file("a.txt", "second", overwrite=True)
+    _approve(store, workspace_id=source.workspace["id"], kind="overwrite", target="a.txt")
+
+    with pytest.raises(WorkspaceApprovalRequired):
+        source.write_file("b.txt", "second", overwrite=True)
 
 
 # --------------------------------------------------------------------------- #
