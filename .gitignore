@@ -1,4 +1,6 @@
 .venv/
+# 一键部署的宿主工作区（ADR-033）：挂进容器 /workspace，内容是用户数据，不入库。
+workspaces/
 __pycache__/
 *.py[cod]
 .pytest_cache/

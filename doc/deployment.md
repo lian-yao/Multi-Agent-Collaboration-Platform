@@ -283,17 +283,27 @@ npm run dev
 | `OBS_METRICS_ENABLED` | 是否采集指标，默认 `true` |
 | `OBS_METRICS_FLUSH_SIZE` | 采样批量落库阈值，默认 `50` |
 
-### 工作区与出网（**规划**，ADR-033 / ADR-034；当前代码尚未读取这些变量）
+### 工作区与出网（ADR-033 / ADR-034）
 
-| 变量 | 说明 |
-| --- | --- |
-| `WORKSPACE_ROOT` | 宿主工作根，以 bind mount 挂进 backend 与沙箱容器的 `/workspace`。**不得指向项目仓库、`deploy/` 或平台数据目录**——沙箱对它可写（ADR-033）。换根需要重建 backend |
-| `WORKSPACE_SANDBOX_MOUNT` | 沙箱挂载工作区的方式：`rw`（默认）/ `ro`（降级：沙箱只读，写入只走文件工具）/ `none` |
-| `SANDBOX_UID` / `SANDBOX_GID` | 沙箱容器运行身份。Linux 宿主上决定工作区文件的属主；Docker Desktop for Windows 的 bind mount 由虚拟文件系统接管，取值影响有限 |
-| `EGRESS_MODE` | `public_only`（默认，只放公网）或 `allowlist`（再要求域名命中白名单） |
-| `EGRESS_ALLOW_HOSTS` / `EGRESS_DENY_HOSTS` | 域名白/黑名单，**黑名单优先**；只支持精确主机名与 `*.` 前缀通配，按 label 边界匹配 |
-| `EGRESS_INTERNAL_HOSTS` | 平台内部依赖的**精确主机名**白名单（Dapr、Redis、PostgreSQL、Jaeger、`search-gateway`），豁免私网判定 |
-| `EGRESS_MODEL_EXEMPT` | 默认 `true`：模型流量豁免私网判定，Ollama（`host.docker.internal`）与内网自建网关继续可用；仍受 scheme/端口/域名黑名单约束 |
+工作区分成两个变量，别混：`WORKSPACE_HOST_ROOT` 是**宿主**上那个目录（compose 用它做
+bind mount），`WORKSPACE_ROOT` 是**容器内**的挂载点（应用读的是它）。
+
+| 变量 | 状态 | 说明 |
+| --- | --- | --- |
+| `WORKSPACE_HOST_ROOT` | 阶段 1 | 宿主工作根（compose 默认 `../workspaces`），挂进容器的 `/workspace`。**不得指向项目仓库、`deploy/` 或平台数据目录**——沙箱对它可写（ADR-033） |
+| `WORKSPACE_ROOT` | 阶段 1 | 容器内的工作区根，默认 `/workspace`；宿主机直跑后端时改成宿主绝对路径 |
+| `WORKSPACE_ENABLED` | 阶段 1 | 默认 `true`；设 `false` 时工作区接口返回 503 `WORKSPACE_DISABLED`，不静默降级 |
+| `WORKSPACE_MAX_FILE_BYTES` | 阶段 1 | 单文件读取上限，默认 5 MB |
+| `WORKSPACE_READ_MAX_CHARS` | 阶段 1 | 单次读取返回的字符上限，默认 20000 |
+| `WORKSPACE_TREE_MAX_ENTRIES` / `WORKSPACE_TREE_MAX_DEPTH` | 阶段 1 | 目录树条目与深度上限（500 / 8） |
+| `WORKSPACE_SCAN_LIMIT` | 阶段 1 | 用量扫描的条目上限（10000），超出时 `usage.truncated=true` |
+| `WORKSPACE_MAX_TOTAL_BYTES` / `WORKSPACE_MAX_ENTRIES` | 阶段 2 | 目录总字节与条目配额，写档位上线后生效 |
+| `WORKSPACE_SANDBOX_MOUNT` | 阶段 2 | 沙箱挂载工作区的方式：`rw`（默认）/ `ro` / `none`（ADR-033 §7） |
+| `SANDBOX_UID` / `SANDBOX_GID` | 阶段 2 | 沙箱容器运行身份。Linux 宿主上决定工作区文件属主；Docker Desktop for Windows 由虚拟文件系统接管，影响有限 |
+| `EGRESS_MODE` | 阶段 4 | `public_only`（默认，只放公网）或 `allowlist`（再要求域名命中白名单） |
+| `EGRESS_ALLOW_HOSTS` / `EGRESS_DENY_HOSTS` | 阶段 4 | 域名白/黑名单，**黑名单优先**；只支持精确主机名与 `*.` 前缀通配，按 label 边界匹配 |
+| `EGRESS_INTERNAL_HOSTS` | 阶段 4 | 平台内部依赖的**精确主机名**白名单（Dapr、Redis、PostgreSQL、Jaeger、`search-gateway`），豁免私网判定 |
+| `EGRESS_MODEL_EXEMPT` | 阶段 4 | 默认 `true`：模型流量豁免私网判定，Ollama（`host.docker.internal`）与内网自建网关继续可用；仍受 scheme/端口/域名黑名单约束 |
 
 两条容易误读的点：`EGRESS_INTERNAL_HOSTS` 放行的是**列出的服务**，不是"整个内网"；
 模型豁免放行的是**模型这一类调用**，不是"任何指向内网地址的请求"（ADR-034 §3）。

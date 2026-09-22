@@ -52,6 +52,10 @@ services:
       # DuckDuckGo Instant Answer 在部分网络连不通，Agent 会一直搜不到资料。要换回
       # 官方端点或自建网关，用 TOOL_SEARCH_ENDPOINT 覆盖。
       TOOL_SEARCH_ENDPOINT: ${TOOL_SEARCH_ENDPOINT:-http://search-gateway:8800/search}
+      # 工作区（ADR-033 阶段 1）：容器内根固定 /workspace，宿主目录由下面的卷挂载决定。
+      # 阶段 1 只有只读档位；写档位与沙箱挂载在阶段 2。
+      WORKSPACE_ROOT: /workspace
+      WORKSPACE_ENABLED: ${WORKSPACE_ENABLED:-true}
       # 沙箱容器建在**宿主机**守护进程上（见下面 volumes），所以沙箱镜像必须先存在于宿主机。
       # 这里指到本项目自建镜像：compose 一定会把它构建出来，离线/内网环境也能用。
       # 能拉到官方镜像的环境可以删掉这行，回落到代码默认的 python:3.12-slim（更小、无本项目代码）。
@@ -64,6 +68,9 @@ services:
       # 宿主机上该路径不存在时 Docker 会创建同名**目录**（不报错），此时用
       # SANDBOX_DOCKER_SOCKET 指向真实套接字（如 Podman 的 /run/podman/podman.sock）。
       - ${SANDBOX_DOCKER_SOCKET:-/var/run/docker.sock}:/var/run/docker.sock
+      # 工作区（ADR-033）：宿主固定根挂到容器 /workspace。**别把项目仓库或 deploy/
+      # 挂进来**——阶段 2 起沙箱对它可写，而仓库里是平台自己的源码。
+      - ${WORKSPACE_HOST_ROOT:-../workspaces}:/workspace
     ports:
       - "8000:8000"
     healthcheck:
