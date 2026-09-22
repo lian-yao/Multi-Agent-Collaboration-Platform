@@ -28,7 +28,14 @@ import select
 import socket
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
+
+# 与 `scripts/verify_ollama.py` 同一写法：脚本以文件路径运行时，cwd 不会自动进
+# `sys.path`，`import app...` 会直接失败。显式把项目根加进来。
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.security.egress import (
     EgressConfigError,

@@ -8,6 +8,10 @@ services:
     image: multi-agent-collaboration-platform-frontend:latest
     ports:
       - "5173:80"
+    # 前端是宿主唯一入口：既要在 default 网上被发布，也要在 internal 网上反代 backend。
+    networks:
+      - default
+      - internal
     healthcheck:
       test:
         - CMD
@@ -87,6 +91,11 @@ services:
       http_proxy: ${EGRESS_PROXY_URL:-http://egress-proxy:8888}
       https_proxy: ${EGRESS_PROXY_URL:-http://egress-proxy:8888}
       NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1,dapr-sidecar,redis,postgres,jaeger,search-gateway,egress-proxy,host.docker.internal}
+      # gRPC（Dapr 的 durabletask worker）**只认小写 `no_proxy`**：只给大写会让它把
+      # gRPC 连接也发给代理，然后被 403 —— 工作流直接连不上 sidecar。两种大小写都给。
+      no_proxy: ${NO_PROXY:-localhost,127.0.0.1,::1,dapr-sidecar,redis,postgres,jaeger,search-gateway,egress-proxy,host.docker.internal}
+      # 应用侧策略自己的直连名单（与上面同源；内部服务另由 EGRESS_INTERNAL_HOSTS 放行）。
+      EGRESS_NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1,dapr-sidecar,redis,postgres,jaeger,search-gateway,egress-proxy,host.docker.internal}
       # 沙箱联网时用它作为唯一出口（SANDBOX_NETWORK_ENABLED=true 才生效）。
       SANDBOX_EGRESS_PROXY_URL: ${EGRESS_PROXY_URL:-http://egress-proxy:8888}
     extra_hosts:
@@ -100,8 +109,11 @@ services:
       # 工作区（ADR-033）：宿主固定根挂到容器 /workspace。**别把项目仓库或 deploy/
       # 挂进来**——阶段 2 起沙箱对它可写，而仓库里是平台自己的源码。
       - ${WORKSPACE_HOST_ROOT:-../workspaces}:/workspace
-    ports:
-      - "8000:8000"
+    # **不再发布 8000**：internal 网络没有默认路由，端口发布也不会生效（实测宿主连不上）。
+    # 后端 API 改为经前端反代访问：http://localhost:5173/api/v1/...，健康探针 `/health` 同理。
+    # 这是「网络层强制」的代价与落点：backend 只接 internal，物理上无法绕开 egress 代理。
+    networks:
+      - internal
     healthcheck:
       test:
         - CMD
@@ -140,6 +152,10 @@ services:
       HTTP_PROXY: ${EGRESS_PROXY_URL:-http://egress-proxy:8888}
       HTTPS_PROXY: ${EGRESS_PROXY_URL:-http://egress-proxy:8888}
       NO_PROXY: ${NO_PROXY:-localhost,127.0.0.1,::1,egress-proxy}
+      no_proxy: ${NO_PROXY:-localhost,127.0.0.1,::1,egress-proxy}
+    # 只接 internal：它自己的上游出网必须经 egress-proxy（ADR-034 第 3 条）。
+    networks:
+      - internal
     healthcheck:
       # `/health` 不打上游：Bing 抖动只该影响搜索，不该把容器标成 unhealthy。
       test:
@@ -160,6 +176,11 @@ services:
       dockerfile: deploy/docker/backend.Dockerfile
     image: multi-agent-collaboration-platform-backend:latest
     command:
+      # 用 `uv run --no-sync python` 走镜像里的 venv：脚本要 import app.security，
+      # 而系统 python 没有 pydantic/prometheus 这些依赖（backend 的 CMD 同理）。
+      - uv
+      - run
+      - --no-sync
       - python
       - scripts/egress_proxy.py
       - --host
@@ -172,10 +193,17 @@ services:
       EGRESS_DENY_HOSTS: ${EGRESS_DENY_HOSTS:-}
       # 代理只服务**公网**访问：内部服务由客户端直连（NO_PROXY 已排除）。
       # 把 redis/postgres 写进来，等于把它们变成「任何能连代理的容器都能探测的目标」。
-      EGRESS_INTERNAL_HOSTS: ""
+      # 例外（按需打开）：内网模型端点（Ollama / 自建网关）在 internal 网络里不可直达，
+      # 需要经代理放行——那时把它写进 EGRESS_PROXY_INTERNAL_HOSTS，并同时：
+      # ① 从 NO_PROXY 里去掉该主机名；② 把它的端口加进 EGRESS_ALLOWED_PORTS。
+      EGRESS_INTERNAL_HOSTS: ${EGRESS_PROXY_INTERNAL_HOSTS:-}
       EGRESS_ALLOWED_PORTS: ${EGRESS_ALLOWED_PORTS:-443,8800}
       # 代理不能再配代理（会绕圈）：脚本启动时会显式拒绝。
       EGRESS_PROXY_URL: ""
+    # 双网：一条腿在 internal 上服务平台内部客户端，另一条腿在 default 上出公网。
+    networks:
+      - default
+      - internal
     healthcheck:
       test:
         - CMD
@@ -209,6 +237,11 @@ services:
       - ./dapr/components:/components
     ports:
       - "3500:3500"
+    # sidecar 要以 `--app-channel-address backend` 回调应用（工作流活动），
+    # 所以它必须和 backend 同在 internal 网上；同时又要被宿主发布 3500。
+    networks:
+      - default
+      - internal
     depends_on:
       backend:
         condition: service_healthy
@@ -239,6 +272,9 @@ services:
     image: docker.m.daocloud.io/library/redis:7-alpine
     ports:
       - "6380:6379"
+    networks:
+      - default
+      - internal
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -253,6 +289,9 @@ services:
       POSTGRES_DB: multi_agent
     ports:
       - "5433:5432"
+    networks:
+      - default
+      - internal
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -269,6 +308,9 @@ services:
       - "16686:16686"
       - "4317:4317"
       - "4318:4318"
+    networks:
+      - default
+      - internal
 
   prometheus:
     image: docker.m.daocloud.io/prom/prometheus:latest
@@ -278,6 +320,17 @@ services:
       - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
     ports:
       - "9090:9090"
+    # 抓取 backend 的 /metrics 也要走 internal 网。
+    networks:
+      - default
+      - internal
+
+networks:
+  internal:
+    # 平台内部网络：`internal: true` 没有默认路由——容器无法直接出网（实测连外部 DNS 都不通），
+    # 唯一出口是双网的 `egress-proxy`。backend 与 search-gateway **只**接这张网，
+    # 这是 ADR-034 §4「网络层强制」的落点。
+    internal: true
 
 volumes:
   postgres-data:

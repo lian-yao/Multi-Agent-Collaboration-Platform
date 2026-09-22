@@ -41,7 +41,15 @@ cd deploy
 启动后访问：
 
 - Web UI：http://localhost:5173
-- 后端 API：http://localhost:8000
+- 后端 API：http://localhost:5173/api/v1（**经前端反代**）
+- 后端健康探针：http://localhost:5173/health
+
+> **backend 不再发布宿主端口（ADR-034 §4）**。它只接 compose 的 `internal` 网络
+> （`internal: true`：没有默认路由，容器连外部 DNS 都解析不了），唯一出口是同网络上的
+> `egress-proxy`——这是「出网策略在网络层强制」的落点。代价就是宿主不能再直连 8000：
+> 前端 nginx 反代 `/api/` 与 `/health`，`start.ps1` 的健康检查也走这条。
+> 需要直连时用 `docker compose exec backend ...`，或把 backend 临时接回 `default` 网
+> （那就同时放开了直连出网，等于放弃这层强制）。
 
 > **模型前置条件（ADR-014）**：默认提供方是 OpenAI 兼容 API（`AGENT_LLM_PROVIDER=openai`），
 > 所以**部署本身不需要 Ollama**，但要先配好模型名与凭据，否则部署会成功、提交任务后
@@ -86,7 +94,7 @@ cd deploy
 | 检查 | 地址 |
 | --- | --- |
 | Frontend | http://localhost:5173/ |
-| Backend | http://localhost:8000/health |
+| Backend | http://localhost:5173/health（经前端反代；backend 只接 internal 网络） |
 | Dapr Sidecar | http://localhost:3500/v1.0/metadata |
 
 最后会打印 7 行访问地址（Web UI / Backend / Dapr / Jaeger / Prometheus / Redis /
@@ -312,7 +320,15 @@ bind mount），`WORKSPACE_ROOT` 是**容器内**的挂载点（应用读的是�
 | `EGRESS_PROXY_URL` | 已实现 | 强制出网代理（compose 默认 `http://egress-proxy:8888`）。设置后应用侧不再本地解析/判私网（交给代理），但仍执行 scheme/端口/域名规则 |
 | `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` | 已实现 | 给 MCP 与模型这类**自建连接的 SDK** 用（httpx `trust_env`）。`NO_PROXY` 必须排除内部服务与内网模型端点（compose 默认已含 Dapr/Redis/PG/Jaeger/search-gateway/egress-proxy 与 `host.docker.internal`） |
 | `SANDBOX_EGRESS_PROXY_URL` | 已实现 | 沙箱联网时注入给沙箱的代理地址；配合 `SANDBOX_NETWORK_ENABLED=true` |
-| `SANDBOX_EGRESS_NETWORK` | 已实现 | 沙箱联网时接入的**内部**网络名（compose 里 `internal: true`）。为空时沙箱会用默认网络直连，日志会告警 |
+| `SANDBOX_EGRESS_NETWORK` | 已实现 | 沙箱联网时接入的**内部**网络名（compose 里 `internal: true`，即 `<项目名>_internal`）。为空时沙箱会用默认网络直连，日志会告警 |
+| `EGRESS_NO_PROXY` | 已实现 | 应用侧策略自己的直连名单（内部服务与它同源）。**只表示不走代理，不表示放行** |
+| `EGRESS_PROXY_INTERNAL_HOSTS` | 已实现 | 代理侧的私网放行名单，默认空。用于内网模型端点（Ollama / 自建网关）：它们在 internal 网络里不可直达，只能经代理 |
+
+> **用 Ollama / 内网自建模型网关时要注意**（ADR-034 §3「甲」的口径在新拓扑下的落地）：
+> `host.docker.internal` 在 internal 网络里**不可达**（实测 `Network is unreachable`），
+> 所以内网模型端点必须经代理放行：把它的主机名写进 `EGRESS_PROXY_INTERNAL_HOSTS`、
+> 从 `NO_PROXY` 里去掉它、并把它的端口加进 `EGRESS_ALLOWED_PORTS`（Ollama 是 11434）。
+> 公网模型服务（默认路线）不受影响，直接经代理出去。
 
 两条容易误读的点：`EGRESS_INTERNAL_HOSTS` 放行的是**列出的服务**，不是"整个内网"；
 模型豁免放行的是**模型这一类调用**，不是"任何指向内网地址的请求"（ADR-034 §3）。

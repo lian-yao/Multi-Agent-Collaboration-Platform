@@ -66,6 +66,14 @@ class EgressSettings(BaseSettings):
     （ADR-034 §2 的默认路径）。
     """
 
+    no_proxy: str = "localhost,127.0.0.1,::1"
+    """不经代理的精确主机名（逗号分隔）。
+
+    内部服务本来就是直连的（它们同时也在 `internal_hosts` 里，那条规则已经放行），
+    这里主要给"公网但要走直连"的例外用。**注意**：列在这里只表示"不走代理"，
+    不表示"放行"——该做的一套判定（scheme / 端口 / 域名 / 私网）照做。
+    """
+
 
 @lru_cache
 def get_egress_settings() -> EgressSettings:

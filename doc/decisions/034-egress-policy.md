@@ -185,16 +185,29 @@
    `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`。于是"允许沙箱联网"等于"允许它经代理访问公网"，
    而不是把它直接接到公网。默认仍然是关的。
 
-**还没做完的最后一步**（需要可用的 Docker 引擎才能验）：
+**最后一步已落地并实测**（2026-09-23，引擎恢复后）：backend 与 search-gateway 改为
+**internal-only**，前端 / Dapr sidecar / Redis / PostgreSQL / Jaeger / Prometheus 双网
+（既服务宿主发布，又能访问 internal 上的 backend），`egress-proxy` 双网。
+实测到的三条关键事实，逐条影响着实现：
 
-- **把 backend 与 search-gateway 从默认网络挪到 internal-only**，从物理上断掉直连。
-  现在的状态是：代理已就绪、四类客户端的代理变量都已接上、应用层判定仍在兜底，
-  但 backend 仍在默认网络上，**理论上**仍可绕过代理直连。这一步必须实测（端口发布、
-  DNS、前端 `/api` 反代、prometheus 抓取都在同一拓扑里），所以先在文档里写明变更点，
-  等引擎恢复后按 §4 的验证清单逐条过；
-- 代理侧**无法**校验 CONNECT 隧道的目标证书（这是隧道代理的固有性质）：证书校验由
-  客户端完成。所以"钉扎"在这里的含义是"连接钉在解析出的公网 IP 上 + 私网一律拒绝"，
-  不是"代理替客户端做 TLS 校验"。
+1. **internal 容器的端口发布无效**（宿主连不上）→ backend 因此**不再发布 8000**，
+   宿主侧入口统一走前端：nginx 反代 `/api/` 与新增的 `location = /health`，
+   `start.ps1` 的「Backend is healthy」也改走 `http://localhost:5173/health`；
+2. **internal 网络里外部 DNS 也不通**（`gaierror`）→ 这正好印证了代理模式的设计：
+   客户端只解析代理主机（compose 服务名），目标域名与地址判定全在代理侧；
+3. **gRPC 只认小写 `no_proxy`** → 只给大写时，Dapr 的 durabletask worker 会把 gRPC
+   连接发给代理、拿到 403、然后无限重试（实测 `UNAVAILABLE ... HTTP proxy returned
+   response code 403`）。compose 因此**两种大小写都给**，并在应用侧加了
+   `EGRESS_NO_PROXY`（内部服务直连，不走代理）。
+
+另一个如实记录的后果：**`host.docker.internal` 在 internal 网络里不可达**
+（`192.168.65.254` 没有路由，实测 `Network is unreachable`）。所以内网模型端点
+（Ollama、自建网关）必须**经代理放行**：`EGRESS_PROXY_INTERNAL_HOSTS` 写主机名、
+从 `NO_PROXY` 去掉它、端口加进 `EGRESS_ALLOWED_PORTS`。公网模型服务（默认路线）不受影响。
+
+还有一条代理的固有性质：**`CONNECT` 隧道里代理看不到也不能校验目标证书**，
+证书校验由客户端完成。所以这里的"钉扎"含义是"连接钉在解析出的公网 IP 上 + 私网一律
+拒绝"，不是"代理替客户端做 TLS 校验"。
 
 另外补了一条实现细节：**端口白名单与私网豁免是两件事**。search-gateway 是内网服务，
 但它在 8800 端口，所以部署侧要同时配 `EGRESS_INTERNAL_HOSTS=…search-gateway…` 与

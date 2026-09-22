@@ -159,6 +159,9 @@ def test_client_fetches_through_the_proxy(server, proxy_server):
             allowed_ports=f"443,{port}",
             internal_hosts="",  # 客户端不认识这个地址，全靠代理放行
             proxy_url=f"http://127.0.0.1:{proxy_server}",
+            # 目标刚好在回环上，而 `no_proxy` 默认含回环 → 显式清空，本用例要验的
+            # 就是"经代理"这条路径（直连语义在 test_egress_policy 里单独覆盖）。
+            no_proxy="",
         )
     )
 
@@ -184,6 +187,7 @@ def test_proxy_denies_what_the_client_cannot_judge(server, proxy_server):
                 _env_file=None,
                 allowed_ports=f"443,{port}",
                 proxy_url=f"http://127.0.0.1:{httpd.server_address[1]}",
+                no_proxy="",
             )
         )
         with pytest.raises(EgressDenied) as excinfo:

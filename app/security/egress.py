@@ -166,6 +166,7 @@ class EgressPolicy:
         self._allow = parse_host_patterns(self.settings.allow_hosts)
         self._deny = parse_host_patterns(self.settings.deny_hosts)
         self._internal = parse_internal_hosts(self.settings.internal_hosts)
+        self._no_proxy = parse_internal_hosts(self.settings.no_proxy)
         self._ports = parse_ports(self.settings.allowed_ports)
         self._resolver = resolver or _default_resolver
         self.blocked: dict[str, int] = {}
@@ -201,12 +202,15 @@ class EgressPolicy:
                 "not_allowlisted", f"域名不在白名单里（allowlist 模式）：{host}", host=host
             )
 
-        via_proxy = bool(self.settings.proxy_url)
+        exempt = host in self._internal or raw_host in self._internal
+        # 内部服务与 NO_PROXY 列表里的主机**直连**：它们本来就在同一张内网里，
+        # 让它们绕代理既没意义、代理也会（按设计）把它们拦下。
+        direct = exempt or host in self._no_proxy or raw_host in self._no_proxy
+        via_proxy = bool(self.settings.proxy_url) and not direct
         # 有代理时**不在本地解析**：代理才是硬边界，而且容器可能处在一个外网 DNS
         # 不通的 internal 网络里（客户端只需解析代理本身）。域名与端口规则仍然在本地跑，
         # 好处是拒绝能给出准确原因、不必等一次代理往返。
         addresses = () if via_proxy else self._addresses(host)
-        exempt = host in self._internal or raw_host in self._internal
         if not exempt and purpose == "model" and self.settings.model_exempt:
             exempt = True
         if not exempt and not via_proxy:

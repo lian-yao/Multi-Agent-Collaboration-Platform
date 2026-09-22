@@ -116,7 +116,8 @@ cd deploy
 启动后访问：
 
 - Web UI：http://localhost:5173
-- 后端 API：http://localhost:8000
+- 后端 API：http://localhost:5173/api/v1（经前端反代；backend 只接 internal 网络，
+  不再发布宿主端口，见 ADR-034 §4）
 - Dapr API：http://localhost:3500
 - Jaeger：http://localhost:16686
 - Prometheus：http://localhost:9090

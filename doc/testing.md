@@ -1898,11 +1898,19 @@ headless Chrome 打开离线预览页 `file://.../ui-preview.html`，点到「�
 - **出网策略的四项已补齐，但最后一步未实测**：新增 `egress-proxy`（明文 HTTP 绝对 URI +
   HTTPS `CONNECT`，两种形态共用同一套「解析 → 私网判定 → 钉扎」），MCP/模型 SDK 靠
   `HTTP_PROXY`/`HTTPS_PROXY` 整段落到代理上（不再需要 SDK 内部钉扎），search-gateway 脚本
-  显式构造 `ProxyHandler` 接入，沙箱联网时只接内部网络并注入代理变量。**仍未做**：
-  把 backend 与 search-gateway 挪到 internal-only 网络、从物理上断掉直连——这一步要在
-  可用引擎上验证（端口发布、DNS、前端 `/api` 反代、prometheus 抓取都在同一拓扑里），
-  本轮 Docker Desktop 引擎卡死（`/networks/create` 与 `/_ping` 返回 500），已如实记录、
-  未强行提交未验证的拓扑改动；
+  显式构造 `ProxyHandler` 接入，沙箱联网时只接内部网络并注入代理变量。
+  **最后一步（internal-only 网络）已实测**：backend 与 search-gateway 只接
+  `internal: true` 的网络，物理上无法直连出网；宿主侧入口改为前端反代
+  （`/api/` 与新增的 `/health`，`start.ps1` 随之改）。实测结论：
+  **internal 网络里端口发布无效、外部 DNS 也不通**（正好印证代理模式的设计），
+  backend 里 `socket.gethostbyname('www.baidu.com')` → `gaierror`，而同一进程走代理的
+  `urlopen('https://www.baidu.com')` → **200**；`http://10.0.0.5/` 与
+  `http://169.254.169.254/` 由**代理侧**回 403；联网沙箱里同样"代理 200 / 私网 403"。
+  过程中踩到两个真问题并修掉：**gRPC 只认小写 `no_proxy`**（只给大写会让 Dapr 的
+  durabletask worker 把 gRPC 发给代理拿 403 后无限重试）、以及**应用侧把"有代理"错当成
+  "所有目标都走代理"**（内部服务应直连，`NO_PROXY` 语义要在 `EgressPolicy` 里实现）；
+  另外 `host.docker.internal` 在 internal 网络里不可达，内网模型端点必须经代理放行，
+  已写进部署文档；
 - **前端还没做**：工作区选择器、档位与目录树、审批卡片、egress 只读面板都属下一批；
   接口已就绪（§5.19–§5.21），但界面尚未接；
 - **`doc/15` 只加了两条**：模块 3 的工作区与出网边界、第五节的三层边界表；该文件是事实源，
