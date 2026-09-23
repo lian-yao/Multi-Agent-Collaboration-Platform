@@ -32,7 +32,7 @@ from app.memory import SessionMessage
 from app.observability.instrumentation import observed_stage
 from app.observability.logging import get_logger, log_event
 from app.orchestration.llm import build_chat_model
-from app.orchestration.pipeline_graph import content_with_tools
+from app.orchestration.pipeline_graph import content_with_tools, usage_tokens
 from app.orchestration.rewrite import (
     MAX_REWRITE_CHARS,
     REWRITE_SOURCE_MODEL,
@@ -221,6 +221,7 @@ def _fallback(original: str, *, reason: str, workflow_id: str | None = None) -> 
         "task_chars": len(original),
         "intent": None,
         "intent_source": INTENT_SOURCE_FALLBACK,
+        "tokens": 0,
     }
 
 
@@ -277,6 +278,7 @@ def intake_task(
 
     rewritten, source = parse_rewritten(text, original)
     intent = parse_intent(text)
+    tokens = usage_tokens(response)
     log_event(
         logger,
         "run.intake.done",
@@ -295,6 +297,7 @@ def intake_task(
         "task_chars": len(rewritten),
         "intent": intent.model_dump(mode="json") if intent else None,
         "intent_source": INTENT_SOURCE_MODEL if intent else INTENT_SOURCE_FALLBACK,
+        "tokens": tokens,
     }
 
 

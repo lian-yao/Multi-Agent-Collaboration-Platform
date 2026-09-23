@@ -90,6 +90,13 @@ class AgentSettings(BaseSettings):
     max_plan_rounds: int = 1
     """校验不达标时允许的重编排轮数上限；硬上限 1（再多就是烧钱循环）。"""
 
+    token_budget: int = 0
+    """单次执行的**累计 Token 预算**上限；`0`（默认）= 不限制。
+
+    口径是**下限**：模型没回用量时按 0 计（不按字数估算）。预算用尽时不再派发剩余
+    子任务、也不再开新一轮重编排，但**会**继续合成并如实告知「哪部分没做」——
+    成本闸门不该把已经拿到的结果一起作废。"""
+
 
 @lru_cache
 def get_settings() -> AgentSettings:

@@ -68,6 +68,8 @@ from app.orchestration.pipeline import PipelineStatus
 from app.orchestration.pipeline_graph import (
     content_with_tools,
     invoke_role_messages,
+    invoke_role_messages_with_usage,
+    usage_tokens,
 )
 from app.orchestration.synthesis import (
     SYNTHESIZE_NODE_ID,
@@ -231,6 +233,8 @@ class DynamicPlan(BaseModel):
     source: Literal["llm", "fallback"] = PLAN_SOURCE_FALLBACK
     rationale: str = ""
     """规划理由；回退时说明回退原因，便于前端与日志区分「真的规划过」与「降级了」。"""
+    tokens: int = 0
+    """这次规划调用消耗的 Token（累计预算要算进去；取不到用量时为 0）。"""
 
 
 class StepOutcome(BaseModel):
@@ -244,6 +248,12 @@ class StepOutcome(BaseModel):
     tool_calls: list[dict[str, Any]] = Field(default_factory=list)
     error: str | None = None
     duration_ms: float = 0.0
+    attempts: int = 1
+    """**实际**尝试次数（含首次）。与计划里的 `retry`（配置的重试次数）分开记：
+    「配了 2 次重试」和「真的重试了 2 次」是两件事，审计要的是后者。"""
+
+    tokens: int = 0
+    """这一步（含所有重试尝试）消耗的 Token 总数；取不到用量时为 0。"""
 
 
 class DynamicPipelineState(BaseModel):
@@ -288,6 +298,21 @@ class DynamicPipelineState(BaseModel):
 
     partial: bool = False
     """是否存在失败/被跳过的子任务：终态仍是 completed，但结果是**部分**的。"""
+
+    tokens_used_prior: int = 0
+    """本轮之前已经花掉的 Token（重编排时由上一轮带入），让预算跨轮次连续。"""
+
+    platform_tokens: int = 0
+    """平台节点（intake / 规划 / 校验）消耗的 Token：它们不在 `results` 里。"""
+
+    synthesis_tokens: int = 0
+    """合成器消耗的 Token。"""
+
+    token_budget: int = 0
+    """本次执行的累计 Token 预算上限；0 表示不限制（默认）。"""
+
+    budget_exceeded: bool = False
+    """是否因为达到 Token 预算而提前停止派发剩余子任务。"""
 
     final_output: str | None = None
     error: str | None = None
@@ -542,6 +567,7 @@ def generate_plan(
             ]
         )
         text = content_with_tools(response.content)
+        plan_tokens = usage_tokens(response)
     except Exception as exc:  # 规划失败不能拖垮整次执行
         plan = fallback_plan(f"规划模型调用失败（{type(exc).__name__}），回退到固定三步流水线。")
         log_event(
@@ -557,6 +583,7 @@ def generate_plan(
     plan = parse_plan(text, max_steps) or fallback_plan(
         "规划模型返回的内容不是可用计划，回退到固定三步流水线。"
     )
+    plan = plan.model_copy(update={"tokens": plan_tokens})
     log_event(
         logger,
         "dynamic.plan.finish",
@@ -736,6 +763,63 @@ def resolve_max_plan_rounds(settings: AgentSettings | None = None) -> int:
     return min(max(value, 0), 1)
 
 
+def resolve_token_budget(settings: AgentSettings | None = None) -> int:
+    """本次执行的累计 Token 预算上限；非正数表示不限制（默认）。"""
+
+    value = (settings or get_settings()).token_budget
+    return value if value > 0 else 0
+
+
+def tokens_used(state: DynamicPipelineState) -> int:
+    """本次执行**已消耗**的 Token 累计：平台节点 + 子任务（含重试）+ 合成 + 之前轮次。
+
+    口径是**下限**：模型没回用量时按 0 计（不按字数估算）。因此预算是「花到就停」的
+    软闸门，不是硬计费——这条写在 `doc/orchestration.md` 与 ADR-038 里。
+    """
+
+    step_tokens = sum(outcome.tokens for outcome in state.results.values())
+    return (
+        state.tokens_used_prior
+        + state.platform_tokens
+        + step_tokens
+        + state.synthesis_tokens
+    )
+
+
+def budget_exhausted(state: DynamicPipelineState) -> bool:
+    """预算是否已经用尽（未配置预算时永远为 False）。"""
+
+    if state.token_budget <= 0:
+        return False
+    return tokens_used(state) >= state.token_budget
+
+
+def apply_budget_stop(state: DynamicPipelineState) -> dict[str, StepOutcome]:
+    """预算用尽时，把还没跑的子任务标成 `skipped` 并写明原因。
+
+    与「连坐跳过」共用一个状态词（`skipped`），但原因不同：一个是上游失败，
+    一个是成本闸门。原因写进 `error`，合成器与画布都会把它带给使用者——
+    预算用尽时最不该发生的事，是把「少做的部分」悄悄瞒下来。
+    """
+
+    if not budget_exhausted(state):
+        return {}
+    return {
+        step.id: StepOutcome(
+            step_id=step.id,
+            role=step.role,
+            instruction=step.instruction,
+            status=PlanStepStatus.SKIPPED,
+            error=BUDGET_SKIP_REASON,
+        )
+        for step in state.plan
+        if step.id not in state.results
+    }
+
+
+BUDGET_SKIP_REASON = "本次执行的 Token 预算已用尽，该子任务未执行。"
+
+
 def step_input(
     task: str,
     step: PlanStep,
@@ -822,7 +906,7 @@ def run_plan_step(
             stage=f"dyn:{step.id}",
             role=step.role.value,
         ):
-            content = invoke_role_messages(
+            content, tokens = invoke_role_messages_with_usage(
                 messages, model, caller, stage=f"dyn:{step.id}", role=step.role
             )
     except Exception as exc:
@@ -854,6 +938,7 @@ def run_plan_step(
         content=content,
         tool_calls=[record.model_dump(mode="json") for record in records],
         duration_ms=round((time.perf_counter() - started) * 1000, 1),
+        tokens=tokens,
     )
     log_event(
         logger,
@@ -1098,6 +1183,11 @@ def finalize_state(state: DynamicPipelineState, workflow_id: str | None = None) 
         and state.plan
     ):
         problems.append("合成器没有产出交付物，已退回最后一个成功子任务的产出。")
+    if state.budget_exceeded:
+        problems.append(
+            f"本次执行达到 Token 预算上限（已用 {tokens_used(state)} / 上限 "
+            f"{state.token_budget}），剩余子任务未执行，报告只覆盖已完成的部分。"
+        )
     if not output and not problems:
         problems.append("计划中没有任何步骤产出内容。")
 
@@ -1182,6 +1272,7 @@ def _node_intake(
             "intent": intent,
             "intent_source": payload.get("intent_source"),
             "route": ROUTE_MULTI,
+            "platform_tokens": state.platform_tokens + int(payload.get("tokens") or 0),
             "status": PipelineStatus.RUNNING,
             "updated_at": _now(),
         }
@@ -1224,6 +1315,7 @@ def _node_planner(
             "plan": plan.steps,
             "plan_source": plan.source,
             "plan_rationale": plan.rationale,
+            "platform_tokens": state.platform_tokens + plan.tokens,
             "status": PipelineStatus.RUNNING,
             "updated_at": _now(),
         }
@@ -1282,8 +1374,15 @@ def _node_worker(
 
 def _node_join():
     def join(state: DynamicPipelineState) -> dict[str, Any]:
-        # 波次结束后先做连坐判定：依赖失败的步骤从此不会再进入下一批。
-        return {"results": apply_skips(state), "updated_at": _now()}
+        # 波次结束后两件事：先看成本闸门（预算用尽就不再开新批），再做连坐判定
+        # （依赖失败的步骤从此不会再进入下一批）。顺序有讲究——预算拦下的步骤要留下
+        # 「预算用尽」这个原因，而不是被连坐逻辑改写成「上游未成功」。
+        budget_skips = apply_budget_stop(state)
+        return {
+            "results": {**budget_skips, **apply_skips(state)},
+            "budget_exceeded": budget_exhausted(state),
+            "updated_at": _now(),
+        }
 
     return join
 
@@ -1319,6 +1418,7 @@ def _node_synthesize(
         return {
             "final_output": outcome.content or None,
             "synthesis_attempted": True,
+            "synthesis_tokens": state.synthesis_tokens + outcome.tokens,
             "updated_at": _now(),
         }
 
@@ -1339,7 +1439,11 @@ def _node_validate(
             failed=failed,
             workflow_id=workflow_id,
         )
-        return {"validation": result, "updated_at": _now()}
+        return {
+            "validation": result,
+            "platform_tokens": state.platform_tokens + result.tokens,
+            "updated_at": _now(),
+        }
 
     return validate
 
@@ -1503,7 +1607,7 @@ def run_dynamic_pipeline(
         attachments=attachments,
     )
 
-    state = DynamicPipelineState(task=task)
+    state = DynamicPipelineState(task=task, token_budget=resolve_token_budget(resolved))
     for round_index in range(1, max_rounds + 2):
         output = graph.invoke(
             state,
@@ -1515,6 +1619,9 @@ def run_dynamic_pipeline(
             or settled.validation is None
             or settled.validation.satisfied
             or round_index > max_rounds
+            # 预算已经用尽的执行不再开第二轮：重编排是**新的一轮完整执行**，
+            # 按定义就会再花一份钱——成本闸门必须在它之前生效。
+            or budget_exhausted(settled)
         ):
             return settled
         log_event(
@@ -1535,6 +1642,8 @@ def run_dynamic_pipeline(
             round=round_index + 1,
             defects=[*settled.validation.defects, *settled.validation.missing],
             validation_rounds=round_index,
+            tokens_used_prior=tokens_used(settled),
+            token_budget=settled.token_budget,
             final_output=None,
         )
     return settled
@@ -1567,6 +1676,11 @@ def dynamic_checkpoint_summary(state: DynamicPipelineState) -> dict[str, Any]:
         "validation_rounds": state.validation_rounds,
         "current_step": None,
         "current_wave": current_wave(state),
+        # 成本闸门（ADR-038 §9）：用量是**下限口径**（取不到模型用量时按 0 计），
+        # 预算为 0 表示不限制——两种取值都如实带出来，界面不必猜。
+        "tokens_used": tokens_used(state),
+        "token_budget": state.token_budget,
+        "budget_exceeded": state.budget_exceeded,
         "completed_steps": [outcome.step_id for outcome in ordered_outcomes(state)],
         "failed_steps": [step_id for step_id, _role, _error in failed],
         "skipped_steps": [step_id for step_id, _role, _error in skipped],
@@ -1583,6 +1697,12 @@ def dynamic_checkpoint_summary(state: DynamicPipelineState) -> dict[str, Any]:
                 "expected_output": step.expected_output,
                 "retry": step.retry,
                 "timeout_seconds": step.timeout_seconds,
+                "attempts": (
+                    state.results[step.id].attempts if step.id in state.results else None
+                ),
+                "tokens": (
+                    state.results[step.id].tokens if step.id in state.results else None
+                ),
                 "status": (
                     state.results[step.id].status.value
                     if step.id in state.results

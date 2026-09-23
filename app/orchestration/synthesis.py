@@ -36,7 +36,11 @@ from app.observability.logging import get_logger, log_event
 from app.orchestration.context import conversation_block
 from app.orchestration.intake import IntentResult, intent_block
 from app.orchestration.llm import build_chat_model
-from app.orchestration.pipeline_graph import content_with_tools, invoke_role_messages
+from app.orchestration.pipeline_graph import (
+    content_with_tools,
+    invoke_role_messages_with_usage,
+    usage_tokens,
+)
 from app.orchestration.rewrite import resolve_platform_settings
 from app.orchestration.tools import ToolCaller, ToolCallRecord, ToolRegistry
 
@@ -67,6 +71,9 @@ class ValidationResult(BaseModel):
     source: str = VALIDATION_SOURCE_MODEL
     """`model` / `fallback`；`fallback` 表示校验器不可用，按「通过」处理。"""
 
+    tokens: int = 0
+    """这次校验消耗的 Token（累计预算要算进去）；取不到用量时为 0。"""
+
 
 class SynthesisOutcome(BaseModel):
     """合成结果。形状与 `StepOutcome` 接近，便于落盘与展示复用。"""
@@ -76,6 +83,8 @@ class SynthesisOutcome(BaseModel):
     tool_calls: list[dict[str, Any]] = Field(default_factory=list)
     error: str | None = None
     duration_ms: float = 0.0
+    tokens: int = 0
+    """合成消耗的 Token（累计预算要算进去）；取不到用量时为 0。"""
 
 
 SYNTHESIS_ADDENDUM = """
@@ -194,7 +203,7 @@ def run_synthesis(
     try:
         model = llm or build_chat_model(settings or resolve_platform_settings())
         with observed_stage(workflow_id=workflow_id, stage=stage, role=RoleId.REPORTER.value):
-            text = invoke_role_messages(
+            text, tokens = invoke_role_messages_with_usage(
                 messages, model, call, stage=stage, role=RoleId.REPORTER
             )
     except Exception as exc:
@@ -218,6 +227,7 @@ def run_synthesis(
         content=text,
         tool_calls=[record.model_dump(mode="json") for record in records],
         duration_ms=round((time.perf_counter() - started) * 1000, 1),
+        tokens=tokens,
     )
     log_event(
         logger,
@@ -337,6 +347,7 @@ def run_validation(
         with observed_stage(workflow_id=workflow_id, stage=stage, role="validator"):
             response = model.invoke(messages)
         text = content_with_tools(response.content)
+        tokens = usage_tokens(response)
     except Exception as exc:
         log_event(
             logger,
@@ -356,7 +367,10 @@ def run_validation(
             workflow_id=workflow_id,
             chars=len(text or ""),
         )
-        return ValidationResult(satisfied=True, source=VALIDATION_SOURCE_FALLBACK)
+        return ValidationResult(
+            satisfied=True, source=VALIDATION_SOURCE_FALLBACK, tokens=tokens
+        )
+    result = result.model_copy(update={"tokens": tokens})
     log_event(
         logger,
         "dynamic.validate.finish",
