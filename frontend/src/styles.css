@@ -750,7 +750,7 @@ svg {
   border:1px solid var(--t-bd-e3eaed);
   border-radius:13px;
   background:var(--t-bg-ffffff);
-  color:inherit; /* 不落到 UA 的 buttontext：那颜色主题管不到，见 ADR-038 */
+  color:inherit; /* 不落到 UA 的 buttontext：那颜色主题管不到，见 ADR-040 */
   text-align:center
 }
 
@@ -5528,7 +5528,7 @@ body {
   line-height:1.78
 }
 
-/* 外观切换（ADR-038）：页脚那个位置原来是 Settings2 图标，它不通向任何设置。
+/* 外观切换（ADR-040）：页脚那个位置原来是 Settings2 图标，它不通向任何设置。
    控件复用既有令牌，不引入新色值；悬停那一对直接沿用 .icon-button 的取值，
    免得同一个页脚里出现两套"悬停色"。
    高度钉死 15px 不是凑数：页脚一旦被撑高，侧栏底部的"运行时"卡片会被整体顶

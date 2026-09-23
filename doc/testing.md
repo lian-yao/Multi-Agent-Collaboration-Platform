@@ -3093,7 +3093,7 @@ CDP 实证（headless Chrome 打 `http://localhost:5173`、点真交互，**17/1
 （`styles.css` 519、`config.css` 180、`workspace.css` 66、`records.css` 44、两个组件 css 17）。
 直接写第二份暗色样式表，等于让人的注意力去兜完备性 —— 漏一处就是一块死色，且没有可跑的判据。
 
-**2. 做法（全部 D 线，细节见 ADR-038）**
+**2. 做法（全部 D 线，细节见 ADR-040）**
 
 先收敛再变色：
 

@@ -200,7 +200,7 @@ export function App() {
   const [mobileNav, setMobileNav] = useState(false);
   const [dockOpen, setDockOpen] = useState(true);
   const [inspectorOpen, setInspectorOpen] = useState(false);
-  // 外观主题：偏好（跟随系统/浅色/深色）与当下生效的外观分两层，见 ADR-038。
+  // 外观主题：偏好（跟随系统/浅色/深色）与当下生效的外观分两层，见 ADR-040。
   const {
     preference: themePreference,
     resolved: themeResolved,
@@ -661,7 +661,7 @@ export function App() {
         <div className="sidebar-footer">
           <span>v0.1.0</span>
           {/*
-            外观切换（ADR-038）：原来这里是 `Settings2` 图标——它不通向任何设置，
+            外观切换（ADR-040）：原来这里是 `Settings2` 图标——它不通向任何设置，
             只是一个装饰，占着页脚最顺手的那个位置。换成三态循环开关后，
             「跟随系统」是**默认值**而不是隐藏项：不写存储、跟着系统走，
             点一次切深色、再点切浅色、第三下收回跟随系统（`title` 里写明下一击去哪）。

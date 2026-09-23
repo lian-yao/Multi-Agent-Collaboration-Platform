@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """把前端样式表里的颜色字面量令牌化，并为暗色主题生成取值。
 
-为什么要有这个脚本（背景见 `doc/decisions/038-dark-mode-token-layer.md`）：
+为什么要有这个脚本（背景见 `doc/decisions/040-dark-mode-token-layer.md`）：
 
 - 四个样式表里散着 700 多个颜色字面量、430 多种颜色。暗色主题不是"再加一份样式"，
   而是把这些字面量收进一层令牌，然后按主题给令牌取不同的值。
@@ -366,7 +366,7 @@ def tokens_from_theme() -> dict:
 # theme.css
 # --------------------------------------------------------------------------------------
 
-HEADER = """/* theme.css — 颜色令牌层（暗色模式，ADR-038）
+HEADER = """/* theme.css — 颜色令牌层（暗色模式，ADR-040）
  *
  * 由 `frontend/rendercheck/theme-tokens.py` 生成，不要手改颜色值：
  * 改令牌值请改脚本里的暗色映射规则再重跑，否则下一次重跑会把手改冲掉。

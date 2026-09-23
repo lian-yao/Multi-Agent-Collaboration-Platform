@@ -583,7 +583,7 @@
   border:1px solid var(--t-bd-cfdde1);
   border-radius:999px;
   background:var(--t-bg-eef2f4);
-  color:inherit; /* 不落到 UA 的 buttontext：那颜色主题管不到，见 ADR-038 */
+  color:inherit; /* 不落到 UA 的 buttontext：那颜色主题管不到，见 ADR-040 */
   transition:background .16s,border-color .16s
 }
 
@@ -717,7 +717,7 @@
   border-left:2px solid transparent;
   border-radius:var(--cfg-radius-sm);
   background:transparent;
-  color:inherit; /* 不落到 UA 的 buttontext：那颜色主题管不到，见 ADR-038 */
+  color:inherit; /* 不落到 UA 的 buttontext：那颜色主题管不到，见 ADR-040 */
   text-align:left;
   transition:background-color var(--cfg-ease),border-color var(--cfg-ease)
 }

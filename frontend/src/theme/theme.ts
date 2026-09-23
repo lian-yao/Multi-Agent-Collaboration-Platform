@@ -1,6 +1,6 @@
 /**
  * 外观主题（明/暗）的解析与应用 —— 决策与取舍见
- * `doc/decisions/038-dark-mode-token-layer.md`。
+ * `doc/decisions/040-dark-mode-token-layer.md`。
  *
  * 三句话讲完这套设计：
  *
