@@ -11,6 +11,7 @@
 """
 
 import json
+import time
 
 import pytest
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -25,26 +26,31 @@ from app.memory import MessageRole, SessionMessage
 from app.orchestration.dynamic_graph import (
     DEFAULT_MAX_PLAN_STEPS,
     DynamicPipelineState,
+    FlowKind,
     PlanStep,
     PlanStepStatus,
     StepOutcome,
     blocked_steps,
     build_dynamic_pipeline,
     dynamic_checkpoint_summary,
+    effective_attempts,
+    effective_timeout,
     fallback_plan,
     finalize_state,
     generate_plan,
     ordered_outcomes,
     parse_plan,
+    pending_batch,
     planner_prompt,
-    resolve_step_prompt,
     ready_steps,
     recursion_limit,
     resolve_max_plan_steps,
     resolve_orchestration_mode,
     run_dynamic_pipeline,
     run_plan_step,
+    single_agent_plan,
     step_input,
+    waves,
 )
 from app.orchestration.pipeline import PipelineStatus
 from app.orchestration.pipeline_graph import (
@@ -88,6 +94,32 @@ def plan_json(*steps: dict) -> str:
     return json.dumps({"rationale": "测试计划", "steps": list(steps)})
 
 
+def intake_json(*, need_multi: bool = True, rewritten: str = "改写后的任务") -> str:
+    """intake 节点的模型输出（改写 + 意图，一次调用，ADR-038 §1）。"""
+
+    return json.dumps(
+        {
+            "rewritten_task": rewritten,
+            "intent": {
+                "intent_type": "report" if need_multi else "question",
+                "user_goal": "完成用户任务",
+                "constraints": [],
+                "need_multi_subtask": need_multi,
+            },
+        }
+    )
+
+
+def validation_json(*, satisfied: bool = True, defects: list[str] | None = None) -> str:
+    return json.dumps(
+        {
+            "satisfied": satisfied,
+            "defects": defects or [],
+            "missing": [],
+        }
+    )
+
+
 COLLECT_STEP = {
     "id": "s1",
     "role": "collector",
@@ -118,7 +150,7 @@ def test_parse_plan_accepts_plain_json():
 
     assert plan is not None
     assert plan.source == "llm"
-    assert [(step.id, step.role, step.depends_on) for step in plan.steps] == [
+    assert [(step.id, step.role.value, step.depends_on) for step in plan.steps] == [
         ("s1", "collector", []),
         ("s2", "analyst", ["s1"]),
         ("s3", "reporter", ["s2"]),
@@ -509,12 +541,45 @@ def test_checkpoint_summary_lists_plan_with_statuses():
     summary = dynamic_checkpoint_summary(finalize_state(state))
 
     assert summary["mode"] == "dynamic"
+    assert summary["route"] == "multi"
+    assert summary["round"] == 1
     assert summary["completed_steps"] == ["s1"]
-    assert "plan_rationale" in summary  # 计划理由一并进 checkpoint，供前端展示分配依据
+    assert summary["failed_steps"] == []
+    assert summary["skipped_steps"] == []
+    assert summary["partial"] is False
     assert summary["plan"] == [
-        {"id": "s1", "role": "collector", "instruction": "收集信息", "depends_on": [], "status": "completed"},
-        {"id": "s2", "role": "analyst", "instruction": "分析信息", "depends_on": ["s1"], "status": "pending"},
+        {
+            "id": "s1",
+            "role": "collector",
+            "depends_on": [],
+            "expected_output": "",
+            "retry": None,
+            "timeout_seconds": None,
+            "attempts": 1,
+            "tokens": 0,
+            "status": "completed",
+        },
+        {
+            "id": "s2",
+            "role": "analyst",
+            "depends_on": ["s1"],
+            "expected_output": "",
+            "retry": None,
+            "timeout_seconds": None,
+            "attempts": None,
+            "tokens": None,
+            "status": "pending",
+        },
     ]
+    # 成本闸门（ADR-038 §9）：用量是下限口径，预算 0 = 不限制。
+    assert summary["tokens_used"] == 0
+    assert summary["token_budget"] == 0
+    assert summary["budget_exceeded"] is False
+    # flow 是给人看的整条流程：编排、合成节点在（校验没跑就不画）。
+    kinds = [node["kind"] for node in summary["flow"]]
+    assert kinds[:3] == ["intent", "plan", "worker"]
+    assert "synthesize" in kinds
+    assert "validate" not in kinds
 
 
 # --------------------------------------------------------------------------------------
@@ -525,10 +590,13 @@ def test_checkpoint_summary_lists_plan_with_statuses():
 def test_dynamic_graph_executes_plan_in_order():
     model = ScriptedChatModel(
         replies=[
+            intake_json(),
             plan_json(COLLECT_STEP, ANALYST_STEP, REPORTER_STEP),
             "收集到的要点",
             "分析结论",
-            "最终报告",
+            "报告草稿",
+            "合成后的最终报告",
+            validation_json(),
         ]
     )
 
@@ -536,11 +604,11 @@ def test_dynamic_graph_executes_plan_in_order():
 
     assert state.status is PipelineStatus.COMPLETED
     assert state.plan_source == "llm"
-    assert state.final_output == "最终报告"
+    assert state.final_output == "合成后的最终报告"
     assert [outcome.step_id for outcome in ordered_outcomes(state)] == ["s1", "s2", "s3"]
     assert state.results["s1"].content == "收集到的要点"
     # 报告步骤的输入必须带上分析结论，而不是只带上游一步的原始任务。
-    assert "分析结论" in model.calls[3][1].content
+    assert "分析结论" in model.calls[4][1].content
 
 
 def test_dynamic_graph_runs_unrelated_branch_after_a_failure():
@@ -567,13 +635,23 @@ def test_dynamic_graph_runs_unrelated_branch_after_a_failure():
 
 
 def test_dynamic_graph_falls_back_and_still_completes():
-    model = ScriptedChatModel(replies=["不是 JSON", "收集", "分析", "报告"])
+    model = ScriptedChatModel(
+        replies=[
+            "我理解你想让我分析这个任务。",
+            "不是 JSON",
+            "收集",
+            "分析",
+            "报告",
+            "合成报告",
+            validation_json(),
+        ]
+    )
 
     state = run_dynamic_pipeline("任务", llm=model)
 
     assert state.plan_source == "fallback"
     assert state.status is PipelineStatus.COMPLETED
-    assert state.final_output == "报告"
+    assert state.final_output == "合成报告"
     assert len(state.plan) == 3
 
 
@@ -719,52 +797,455 @@ def test_static_collect_stage_receives_attachments():
     assert content[1]["type"] == "image_url"
 
 
-# —— ADR-036：候选集与人设由角色目录驱动 ——
-
-def test_planner_prompt_lists_registry_candidates():
-    """候选集来自目录：planner 只看到目录给的角色，自定义条目同样可选。"""
-
-    prompt = planner_prompt(
-        4,
-        candidates=[
-            {"id": "summarizer", "name": "摘要 Agent", "description": "把上游内容压缩成三句话。"},
-        ],
-    )
-
-    assert "summarizer（摘要 Agent）" in prompt
-    assert "把上游内容压缩成三句话。" in prompt
-    # 提示词尾部固定话术提到 reporter（「通常用 reporter」），只断言角色清单。
-    assert "- collector" not in prompt
+# --------------------------------------------------------------------------------------
+# ADR-038：波次并行、路由、合成、校验与重编排
+# --------------------------------------------------------------------------------------
 
 
-def test_parse_plan_rejects_role_outside_candidates():
-    """allowed 候选集是「模型编造角色」的唯一防线：候选之外的角色整份丢弃。"""
+class SleepyScriptedChatModel(BaseChatModel):
+    """按序返回固定回复，但每次调用会睡一会儿——用来观测**是否真的并行**。"""
 
-    text = json.dumps(
-        {
-            "rationale": "测试计划",
-            "steps": [{"id": "s1", "role": "collector", "instruction": "收集"}],
-        },
-        ensure_ascii=False,
-    )
-    assert parse_plan(text, allowed={"summarizer"}) is None
-    assert parse_plan(text, allowed={"collector"}) is not None
-    # 不传候选集（目录功能之前的调用方式）仍按内置三角色校验。
-    assert parse_plan(text) is not None
+    replies: list[str] = None  # type: ignore[assignment]
+    delay: float = 0.25
+    calls: list[list[BaseMessage]] = Field(default_factory=list, exclude=True)
+    windows: list[tuple[float, float]] = Field(default_factory=list, exclude=True)
+
+    @property
+    def _llm_type(self) -> str:
+        return "sleepy-scripted-chat-model"
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        started = time.perf_counter()
+        self.calls.append(list(messages))
+        content = self.replies.pop(0) if self.replies else "done"
+        time.sleep(self.delay)
+        self.windows.append((started, time.perf_counter()))
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content=content))])
 
 
-def test_resolve_step_prompt_prefers_registry_prompt():
-    """人设三级回退：目录条目 > 内置角色定义 > 通用兜底。"""
+class FailsOnPromptModel(ScriptedChatModel):
+    """提示词里包含标记就抛错：用来制造「某一步失败、别的步照常」的场景。"""
 
-    assert (
-        resolve_step_prompt(
-            "summarizer",
-            {"summarizer": {"system_prompt": "你是摘要助手。"}},
+    fail_marker: str = "分析信息"
+
+    @property
+    def _llm_type(self) -> str:
+        return "fails-on-prompt-chat-model"
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        self.calls.append(list(messages))
+        content = self.replies.pop(0) if self.replies else "done"
+        text = str(messages[-1].content)
+        if self.fail_marker and self.fail_marker in text:
+            raise RuntimeError("provider exploded")
+        return ChatResult(generations=[ChatGeneration(message=AIMessage(content=content))])
+
+
+def _max_concurrency(windows: list[tuple[float, float]]) -> int:
+    """同一时刻最多有几个调用在跑（区间扫描）。"""
+
+    events = [(start, 1) for start, _ in windows] + [(end, -1) for _, end in windows]
+    events.sort()
+    current = best = 0
+    for _, delta in events:
+        current += delta
+        best = max(best, current)
+    return best
+
+
+def test_waves_group_independent_steps_and_chain_dependents():
+    plan = parse_plan(
+        plan_json(
+            COLLECT_STEP,
+            {"id": "s2", "role": "collector", "instruction": "另一路", "depends_on": []},
+            {"id": "s3", "role": "analyst", "instruction": "对比", "depends_on": ["s1", "s2"]},
+            {"id": "s4", "role": "reporter", "instruction": "成稿", "depends_on": ["s3"]},
         )
-        == "你是摘要助手。"
     )
-    # 内置角色：目录里没写 prompt 就回退 ROLE_DEFINITIONS。
-    assert resolve_step_prompt("analyst", {}) == get_role(RoleId.ANALYST).system_prompt
-    # 自定义角色且没有 prompt：通用兜底，不编一份假人设。
-    generic = resolve_step_prompt("summarizer", {"summarizer": {"system_prompt": None}})
-    assert "协作角色" in generic
+
+    assert [[step.id for step in wave] for wave in waves(plan.steps)] == [
+        ["s1", "s2"],
+        ["s3"],
+        ["s4"],
+    ]
+
+
+def test_pending_batch_respects_the_parallel_cap():
+    plan = parse_plan(
+        plan_json(
+            COLLECT_STEP,
+            {"id": "s2", "role": "collector", "instruction": "另一路", "depends_on": []},
+            {"id": "s3", "role": "collector", "instruction": "第三路", "depends_on": []},
+        )
+    )
+
+    state = _state(plan)
+    assert [step.id for step in pending_batch(state, plan.steps, 2)] == ["s1", "s2"]
+
+    state = _state(
+        plan,
+        {
+            "s1": _outcome("s1", RoleId.COLLECTOR, PlanStepStatus.COMPLETED),
+            "s2": _outcome("s2", RoleId.COLLECTOR, PlanStepStatus.COMPLETED),
+        },
+    )
+    assert [step.id for step in pending_batch(state, plan.steps, 2)] == ["s3"]
+
+
+def test_pending_batch_never_dispatches_blocked_steps():
+    plan = parse_plan(plan_json(COLLECT_STEP, ANALYST_STEP))
+    state = _state(plan, {"s1": _outcome("s1", RoleId.COLLECTOR, PlanStepStatus.FAILED)})
+
+    assert pending_batch(state, plan.steps, 3) == []
+    assert [step.id for step in blocked_steps(state)] == ["s2"]
+
+
+def test_parse_plan_accepts_optional_step_fields():
+    plan = parse_plan(
+        plan_json(
+            {
+                **COLLECT_STEP,
+                "expected_output": "结构化信息清单",
+                "retry": 2,
+                "timeout_seconds": 120,
+            }
+        )
+    )
+
+    step = plan.steps[0]
+    assert step.expected_output == "结构化信息清单"
+    assert step.retry == 2
+    assert step.timeout_seconds == 120
+
+
+def test_parse_plan_defaults_optional_step_fields():
+    step = parse_plan(plan_json(COLLECT_STEP)).steps[0]
+
+    assert step.expected_output == ""
+    assert step.retry is None
+    assert step.timeout_seconds is None
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("retry", 9),
+        ("retry", -1),
+        ("retry", True),
+        ("timeout_seconds", 5),
+        ("timeout_seconds", 99999),
+        ("timeout_seconds", "很久"),
+    ],
+)
+def test_parse_plan_rejects_out_of_range_optional_fields(field, value):
+    """越界同样整份丢弃：不修补半份计划是刻意的（ADR-019 §2）。"""
+
+    assert parse_plan(plan_json({**COLLECT_STEP, field: value})) is None
+
+
+def test_expected_output_is_carried_into_the_step_input():
+    plan = parse_plan(
+        plan_json({**COLLECT_STEP, "expected_output": "只输出要点清单"})
+    )
+
+    text = step_input("任务", plan.steps[0], {})
+
+    assert "这一步期望的输出形态" in text
+    assert "只输出要点清单" in text
+
+
+def test_effective_attempts_and_timeout_follow_plan_then_settings():
+    overridden = PlanStep(
+        id="s1",
+        role=RoleId.COLLECTOR,
+        instruction="收集",
+        retry=1,
+        timeout_seconds=60,
+    )
+    assert effective_attempts(overridden, AgentSettings(subtask_max_attempts=5)) == 2
+    assert effective_timeout(overridden, AgentSettings(subtask_timeout_seconds=99)) == 60.0
+
+    plain = PlanStep(id="s1", role=RoleId.COLLECTOR, instruction="收集")
+    assert effective_attempts(plain, AgentSettings(subtask_max_attempts=5)) == 5
+    assert effective_timeout(plain, AgentSettings(subtask_timeout_seconds=42)) == 42.0
+
+
+def test_single_agent_plan_is_one_step_and_keeps_constraints():
+    from app.orchestration.intake import IntentResult
+
+    intent = IntentResult(
+        intent_type="question",
+        user_goal="解释幂等",
+        constraints=["中文", "三句话以内"],
+        need_multi_subtask=False,
+    )
+
+    plan = single_agent_plan("解释一下什么是幂等", intent)
+
+    assert len(plan.steps) == 1
+    assert plan.steps[0].role is RoleId.REPORTER
+    assert "单 Agent 直答" in plan.steps[0].instruction
+    assert "中文" in plan.steps[0].instruction
+    assert plan.steps[0].expected_output == "中文；三句话以内"
+
+
+def test_simple_task_routes_to_single_agent_without_planner_call():
+    model = ScriptedChatModel(
+        replies=[intake_json(need_multi=False, rewritten="解释一下什么是幂等"), "幂等就是……"]
+    )
+
+    state = run_dynamic_pipeline("什么是幂等", llm=model)
+
+    assert state.route == "single"
+    assert state.status is PipelineStatus.COMPLETED
+    assert state.final_output == "幂等就是……"
+    assert len(state.plan) == 1
+    assert state.plan[0].role is RoleId.REPORTER
+    # 只花 intake + 一次直答：不调规划、不合成、不校验——这就是「简单任务提性能」。
+    assert len(model.calls) == 2
+    assert [node.kind for node in state.flow] == [FlowKind.INTENT, FlowKind.WORKER]
+    assert dynamic_checkpoint_summary(state)["route"] == "single"
+
+
+def test_unparseable_intent_keeps_the_multi_agent_route():
+    """意图解析不出来（模型只吐了任务文本）→ 按多 Agent 处理，这是安全默认。"""
+
+    model = ScriptedChatModel(
+        replies=[
+            json.dumps({"rewritten_task": "对比 A 与 B"}),
+            plan_json(COLLECT_STEP),
+            "收集结果",
+            "合成报告",
+            validation_json(),
+        ]
+    )
+
+    state = run_dynamic_pipeline("对比一下", llm=model)
+
+    assert state.route == "multi"
+    assert state.intent is None
+    assert state.intent_source == "fallback"
+    assert state.status is PipelineStatus.COMPLETED
+    assert [node.kind for node in state.flow][:2] == [FlowKind.INTENT, FlowKind.PLAN]
+
+
+def test_parallel_wave_runs_workers_concurrently():
+    model = SleepyScriptedChatModel(
+        replies=[
+            intake_json(),
+            plan_json(
+                COLLECT_STEP,
+                {"id": "s2", "role": "collector", "instruction": "另一路", "depends_on": []},
+            ),
+            "A 产出",
+            "B 产出",
+            "合成报告",
+            validation_json(),
+        ],
+        delay=0.25,
+    )
+
+    state = run_dynamic_pipeline("两路并行", llm=model)
+
+    assert state.status is PipelineStatus.COMPLETED
+    assert _max_concurrency(model.windows) >= 2, "同波无依赖的步骤必须真的并行"
+
+
+def test_partial_failure_is_marked_and_synthesis_is_told_about_it():
+    model = FailsOnPromptModel(
+        replies=[
+            intake_json(),
+            plan_json(COLLECT_STEP, ANALYST_STEP, REPORTER_STEP),
+            "收集要点",
+            "这条回复被失败吞掉",  # s2：分析步
+            "合成报告（含失败说明）",
+            validation_json(),
+        ]
+    )
+
+    state = run_dynamic_pipeline("分析并出报告", llm=model)
+
+    assert state.status is PipelineStatus.COMPLETED, "有可用交付物就不算整次失败"
+    assert state.partial is True
+    assert state.results["s2"].status is PlanStepStatus.FAILED
+    assert state.results["s3"].status is PlanStepStatus.SKIPPED
+    assert state.final_output == "合成报告（含失败说明）"
+    assert "失败步骤：s2" in (state.error or "")
+
+    synthesis_prompt = str(model.calls[4][1].content)
+    assert "【失败与未执行的子任务】" in synthesis_prompt
+    assert "s2" in synthesis_prompt and "s3" in synthesis_prompt
+
+    summary = dynamic_checkpoint_summary(state)
+    assert summary["partial"] is True
+    assert summary["failed_steps"] == ["s2"]
+    assert summary["skipped_steps"] == ["s3"]
+    statuses = {node["id"]: node["status"] for node in summary["flow"]}
+    assert statuses["s2"] == "failed" and statuses["s3"] == "skipped"
+
+
+def test_validation_defects_trigger_exactly_one_replan_round():
+    model = ScriptedChatModel(
+        replies=[
+            intake_json(),
+            plan_json(COLLECT_STEP),
+            "第一轮收集",
+            "第一轮报告",
+            validation_json(satisfied=False, defects=["缺少来源标注"]),
+            plan_json(COLLECT_STEP),
+            "第二轮收集",
+            "第二轮报告",
+            validation_json(satisfied=False, defects=["还是缺少来源"]),
+        ]
+    )
+
+    state = run_dynamic_pipeline("写一份带来源的报告", llm=model)
+
+    assert state.round == 2
+    assert state.validation_rounds == 1
+    assert state.status is PipelineStatus.COMPLETED
+    assert state.final_output == "第二轮报告"
+    assert state.validation is not None and state.validation.satisfied is False
+    # 第二轮规划必须带上缺陷清单，否则「重编排」只是把上一轮原样再跑一遍。
+    second_plan_prompt = str(model.calls[5][1].content)
+    assert "上一轮交付物的问题" in second_plan_prompt
+    assert "缺少来源标注" in second_plan_prompt
+    # 最多两轮：第三轮不存在。
+    assert len(model.calls) == 9
+
+
+def test_validation_disabled_skips_the_validator():
+    model = ScriptedChatModel(
+        replies=[intake_json(), plan_json(COLLECT_STEP), "收集", "合成报告"]
+    )
+
+    state = run_dynamic_pipeline(
+        "任务", llm=model, settings=AgentSettings(validation_enabled=False)
+    )
+
+    assert state.status is PipelineStatus.COMPLETED
+    assert state.validation is None
+    assert len(model.calls) == 4
+    assert "validate" not in [node.kind for node in state.flow]
+
+
+def test_checkpoint_summary_tolerates_legacy_state_without_new_fields():
+    """升级瞬间在途的旧状态/旧计划不能被新字段噎住（ADR-038 §7）。"""
+
+    state = DynamicPipelineState(
+        task="旧任务",
+        plan=[PlanStep(id="s1", role=RoleId.COLLECTOR, instruction="收集")],
+        results={
+            "s1": _outcome("s1", RoleId.COLLECTOR, PlanStepStatus.COMPLETED, "旧产出")
+        },
+        status=PipelineStatus.RUNNING,
+    )
+
+    summary = dynamic_checkpoint_summary(finalize_state(state))
+
+    assert summary["route"] == "multi"
+    assert summary["round"] == 1
+    assert summary["intent"] is None
+    assert summary["plan"][0]["retry"] is None
+    assert summary["completed_steps"] == ["s1"]
+    assert summary["partial"] is False
+
+
+# --------------------------------------------------------------------------------------
+# ADR-038 §8/§9：实际尝试次数与累计 Token 预算
+# --------------------------------------------------------------------------------------
+
+
+class CountingChatModel(ScriptedChatModel):
+    """带**用量元数据**的假模型：用来验证预算按实际用量累计。"""
+
+    tokens_per_call: int = 100
+
+    @property
+    def _llm_type(self) -> str:
+        return "counting-chat-model"
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        result = super()._generate(messages, stop, run_manager, **kwargs)
+        message = result.generations[0].message
+        message.usage_metadata = {
+            "input_tokens": self.tokens_per_call - 20,
+            "output_tokens": 20,
+            "total_tokens": self.tokens_per_call,
+        }
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+def test_tokens_are_accumulated_from_actual_usage():
+    model = CountingChatModel(
+        replies=[intake_json(), plan_json(COLLECT_STEP), "收集", "合成报告", validation_json()]
+    )
+
+    state = run_dynamic_pipeline("任务", llm=model)
+
+    # intake + 规划 + 1 个子任务 + 合成 + 校验，每次都报 100。
+    assert state.results["s1"].tokens == 100
+    summary = dynamic_checkpoint_summary(state)
+    assert summary["tokens_used"] == 500
+    assert summary["token_budget"] == 0, "默认不限制"
+    assert summary["budget_exceeded"] is False
+
+
+def test_token_budget_stops_new_waves_and_says_so():
+    """预算用尽：不再派发后续步骤，但**照常交付**已完成的部分并写明缺口。"""
+
+    model = CountingChatModel(
+        replies=[
+            intake_json(),
+            plan_json(
+                COLLECT_STEP,
+                {"id": "s2", "role": "analyst", "instruction": "分析", "depends_on": ["s1"]},
+            ),
+            "第一波产出",
+            "合成报告（只有部分）",
+            validation_json(),
+        ],
+        tokens_per_call=1000,
+    )
+
+    state = run_dynamic_pipeline(
+        "任务", llm=model, settings=AgentSettings(token_budget=2500)
+    )
+
+    assert state.budget_exceeded is True
+    assert state.results["s1"].status is PlanStepStatus.COMPLETED
+    assert state.results["s2"].status is PlanStepStatus.SKIPPED
+    assert "Token 预算" in (state.results["s2"].error or ""), "缺口原因要写成预算，不是上游失败"
+    assert state.status is PipelineStatus.COMPLETED, "已有产出照样交付"
+    assert state.partial is True
+    assert state.final_output == "合成报告（只有部分）"
+    assert "Token 预算上限" in (state.error or "")
+
+    summary = dynamic_checkpoint_summary(state)
+    assert summary["budget_exceeded"] is True
+    assert summary["token_budget"] == 2500
+    assert summary["skipped_steps"] == ["s2"]
+
+
+def test_token_budget_blocks_the_replan_round():
+    """校验不达标但预算已用尽 → 不再开第二轮（重编排按定义要再花一份钱）。"""
+
+    model = CountingChatModel(
+        replies=[
+            intake_json(),
+            plan_json(COLLECT_STEP),
+            "第一轮收集",
+            "第一轮报告",
+            validation_json(satisfied=False, defects=["缺少来源"]),
+        ],
+        tokens_per_call=1000,
+    )
+
+    state = run_dynamic_pipeline(
+        "写一份带来源的报告", llm=model, settings=AgentSettings(token_budget=1000)
+    )
+
+    assert state.round == 1, "预算用尽就不该重编排"
+    assert state.validation is not None and state.validation.satisfied is False
+    assert state.budget_exceeded is True
+    assert state.status is PipelineStatus.COMPLETED, "第一轮的交付物仍然给用户"

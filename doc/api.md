@@ -107,7 +107,22 @@
 把用户这一轮的话结合会话上下文补成完整任务，`rewrite_source` 取 `model`（模型改写成功）或
 `original`（退回原文——模型没配好、调用失败、输出没实质改动都会走这条）。**它只是增强**：
 退回原文时执行照常进行，因此界面在 `original` 时不该把它渲染成错误。
-动态模式的 `checkpoint` 带 `"mode": "dynamic"`，这两个字段同样存在。
+动态模式的 `checkpoint` 带 `"mode": "dynamic"`，这两个字段同样存在（改写与意图识别合并成一次
+调用产出，见 §4.4）。
+
+**动态编排（ADR-038）额外的 checkpoint 字段**——都是可选的，缺省即「旧执行 / 没走到那一步」：
+
+| 字段 | 含义 |
+| --- | --- |
+| `route` | `single` = 单 Agent 直答（跳过编排、并行、合成、校验）；`multi` = 波次协作 |
+| `intent` / `intent_source` | 结构化意图（`intent_type` / `user_goal` / `constraints` / `need_multi_subtask`）与来源（`model` / `fallback`）；`fallback` 表示按多 Agent 处理 |
+| `round` / `validation_rounds` | 当前轮次（校验不达标才会到 2）与已发生的重编排次数 |
+| `current_wave` | 还差哪一波没跑完（运行时可见）；全部有结果时为 `null` |
+| `partial` / `failed_steps` / `skipped_steps` | 存在失败/被跳过的子任务：终态可能仍是 `completed`，但结果是**部分的** |
+| `validation` | 校验结论 `{satisfied, defects[], missing[], source}`；`source=fallback` 表示校验器不可用（按通过处理） |
+| `tokens_used` / `token_budget` / `budget_exceeded` | 累计 Token 用量（**下限口径**：模型没回用量时按 0 计）、预算上限（0 = 不限制）与是否因预算提前收口。用量来自活动结果，不是可观测采样（ADR-038 §8.2） |
+| `flow[]` | 整条流程的节点清单：`{id, kind, label, role, depends_on, status, wave}`，`kind ∈ intent / plan / worker / synthesize / validate`。**画布优先读它** |
+| `plan[]` | 仍然**只装子任务**（`worker`），额外带该步的 `expected_output` / `retry`（配置） / `timeout_seconds` / `attempts`（**实际**尝试次数） / `tokens`（该步含重试的用量） |
 
 ### Agent
 
@@ -213,12 +228,26 @@
 非法 `orchestration_mode`（如 `"autonomous"`）由 `Literal` 校验拦成 `422`，**不静默退回 `static`**——
 「选了动态却悄悄变成固定流程」比直接报错更难排查。
 
-**口径（ADR-037）**：本字段选的是「这次执行的计划从哪来」，不是「用哪种编排架构」。执行侧目前
-仍是两条 Dapr workflow（`static` → `agent_pipeline`，`dynamic` → `agent_dynamic`），但对外只暴露
-一个概念：`dynamic` 的计划由规划节点产出，`static` 的计划恒为固定链。所以「固定链」不再被当作
-与自动编排对等的第二种策略——前端入口是单按钮 + 浮层，固定链排在「兜底」分组。
-把两条链路彻底合并需要先补齐动态侧的逐阶段轨迹读侧（否则静态运行的详情会变空），
-属未落地部分，见 ADR-037「决策 4」。
+`dynamic` 的语义（ADR-038）：**改写 + 意图识别（一次平台调用）→ 按意图路由 → 编排器出波次
+DAG → 波内并行执行 → 合成器汇总 → 校验器核对**。
+
+- 意图判定「不需要多 Agent」时**直接路由到单 Agent**（1 步、跳过编排与并行），这是「简单任务
+  不该走三步」的性能落点；判不准、解析不出来、调用失败一律按多 Agent 处理（安全默认）。
+- 同波无依赖的子任务**并行执行**，并发上限 `AGENT_MAX_PARALLEL_WORKERS`（默认 3）。
+  子任务失败按该步的 `retry`（缺省 `AGENT_SUBTASK_MAX_ATTEMPTS`）重试，重试耗尽只连坐
+  依赖它的步骤。
+- **部分失败不会伪装成完整结果**：只要还有交付物，终态仍是 `completed`，但 checkpoint 的
+  `partial=true` 且 `failed_steps` / `skipped_steps` 写明缺了什么，合成器也会在正文开头点名。
+- 校验不达标且还有轮次预算（`AGENT_MAX_PLAN_ROUNDS`，硬上限 1）时带缺陷清单重编排一轮。
+- **重试次数可配置、实际次数可审计**：计划里的 `retry` 是每个子任务允许的重试次数
+  （缺省 `AGENT_SUBTASK_MAX_ATTEMPTS`，默认 3 次尝试含首次）；checkpoint 的
+  `plan[].attempts` 记的是**实际**用了几次（例如「配了 2 次、第 2 次才成功」）。
+- **成本闸门**：`AGENT_TOKEN_BUDGET`（默认 0 = 不限制）是单次执行的累计 Token 上限；
+  用尽后不再派发剩余子任务、不再重编排，但**照常交付**已完成的部分，并在 checkpoint 的
+  `budget_exceeded` / `tokens_used` 与报告正文里写明缺口。用量是**下限口径**
+  （模型没回 usage 时按 0 计）。
+- 编排决策（要不要拆、并行几路）**不暴露给调用方**：这些参数是服务端配置，不是请求字段
+  （ADR-019 §3 的教训）。
 
 **执行期间 Agent 拿到的工具比 §5.3 的静态目录多两个**：`list_session_files` / `read_session_file`
 （ADR-025）按本次会话临时绑定，让 Agent 能按需读回这条会话里的附件正文。它们**不在**
@@ -1294,7 +1323,10 @@ latin-1 编码报错）。
 }
 ```
 
-- `items` 按阶段固定顺序返回 `collect` / `analyze` / `report`（当前静态链路的三个阶段）。
+- `items` 按阶段固定顺序返回 `collect` / `analyze` / `report`（静态链路的三个阶段）；
+  动态链路（`mode=dynamic`）按 `checkpoint.flow` 的节点顺序返回，`stage` 是节点 id
+  （`intent` / `plan` / 子任务 id / `synthesize` / `validate`），`role` 在平台节点上是节点类型
+  （`intent` / `plan` / `synthesize` / `validate`），子任务上仍是角色 id。
 - `input` 是本阶段**实际读到的上游正文**，`input_from` 标明它来自哪一步；根阶段两者都是 `null`
   （它收到的就是原始任务 `task`，不重复回传一份）。
 - `tool_calls` 的元素结构与 §5.4 的 `tool_calls` 表同形。上限定为**单段正文 8000 字符、
@@ -1304,10 +1336,13 @@ latin-1 编码报错）。
 - `reason` 与「有轨迹」互斥，写的是**为什么没有**：还没轮到 / 正在执行（轨迹在阶段完成后才落盘）/
   阶段已完成但状态已被清理 / 载荷无法解析。四种原因指向四种不同的下一步动作，前端必须原样显示，
   不得改写为「暂无数据」。
-- `mode` 为 `dynamic` 时，`items` 按计划步骤顺序返回（`s1` / `s2` / …），`stage` 即计划步骤 id，
-  `role` 为该步骤分配到的角色；每个步骤的 `input` 是它按 `depends_on` 收到的上游正文
-  （根步骤为 `null`，原始任务就是 `task`）。`availability=available`；仅当编排层从未写入过
-  任何步骤载荷时才降级为 `not_integrated` 并给出 `reason`。
+- `mode` 为 `dynamic` 且 checkpoint 带 `flow` 时 `availability=available`：每个节点的输入/产出/
+  工具调用都从**该节点自己的状态键**读回（`…:workflow:{workflow_id}:dyn:r{round}:{node_id}`，
+  见 `doc/data-model.md` §3）。失败节点把错误原因放进 `reason`；被跳过的节点说明「上游未成功完成」；
+  已跑完但状态被清理的节点同样单独说明——四种「没有轨迹」的原因继续分开。
+- `mode` 为 `dynamic` 但 checkpoint **没有** `flow`（升级前发起的执行）时仍是
+  `availability=not_integrated`、`items=[]`、`reason` 说明当时的动态链路不落盘逐节点轨迹；
+  界面原样显示这句原因。重新发起一次执行即可看到完整轨迹。
 
 | 状态 | 码 | 情况 |
 | --- | --- | --- |

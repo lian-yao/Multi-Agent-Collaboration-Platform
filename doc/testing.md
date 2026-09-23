@@ -3359,3 +3359,60 @@ node node_modules/vite/bin/vite.js build         # 通过，无 500 kB 告警
 - 任一用例失败：先复现，再定位，修复后将失败模式固化为新的测试或本文档约束；
 - 对 Dapr/编排等共享行为，先写测试或同步补测试，不允许“看起来正确”代替；
 - 每次里程碑结束时在报告记录：运行命令、通过数/失败数、失败原因。
+
+## 6. 自动编排升级（ADR-038）的测试口径
+
+新链路（intake → 路由 → 波次并行 → 合成 → 校验）把「谁执行、什么时候并行、失败怎么表达」
+都变成了可断言的行为，因此每一层都有对应用例；**这些都是行为断言，不是实现快照**——
+改实现但保住行为时它们应当继续绿。
+
+| 行为 | 用例（文件） | 断言要点 |
+| --- | --- | --- |
+| intake 分段降级 | `tests/unit/test_dynamic_pipeline.py`（`test_unparseable_intent_keeps_the_multi_agent_route` 等）、`tests/unit/test_workflow_dynamic.py` | 只吐任务文本 → 文本照用 + 意图置空 + 走多 Agent；模型抛错 → 退回原文仍能跑完 |
+| 简单任务直答 | 同上 `test_simple_task_routes_to_single_agent_without_planner_call`、工作流层 `…single_agent_route_skips_planner_and_synthesis` | 计划固定 1 步、角色 `reporter`；模型调用数 = 2；**不调规划、不合成、不校验** |
+| 波次并行 | 单测 `test_waves_group_independent_steps_and_chain_dependents` / `test_pending_batch_respects_the_parallel_cap` / `test_parallel_wave_runs_workers_concurrently`；工作流层 `…runs_a_parallel_wave_then_synthesizes` | 同波步骤算在同一层级；并发上限切批；**实测同时刻最多有 2 个模型调用在跑**；Dapr 侧一次 `when_all` 里两个子工作流 |
+| 依赖与连坐 | `test_pending_batch_never_dispatches_blocked_steps`、`test_failed_step_marks_partial_and_skips_downstream` | 依赖失败的步骤不再派发；连坐含传递闭包；已失败之后不再为下游创建子工作流 |
+| 重试与超时 | `test_effective_attempts_and_timeout_follow_plan_then_settings`、`test_step_activity_raises_so_retry_policy_can_work`、`test_subtask_retry_policy_counts_attempts` | 计划的 `retry`（重试次数）→ 尝试次数；活动**抛错**才会触发重试；超时落到模型客户端 |
+| 重试与**实际**次数 | `test_retry_backoff_follows_the_documented_curve`、`test_subtask_workflow_retries_then_succeeds_and_counts_attempts`、`test_subtask_workflow_converts_exhausted_retries_into_failed_outcome` | 退避曲线（1/2/4…10s 封顶）；第一次失败→退避→第二次成功时 `attempts=2`；耗尽时 `attempts=最大次数` 且不抛给父工作流 |
+| 累计 Token 预算 | `test_tokens_are_accumulated_from_actual_usage`、`test_token_budget_stops_new_waves_and_says_so`、`test_token_budget_blocks_the_replan_round`、工作流层 `test_token_budget_stops_remaining_waves_and_reports_the_gap` | 用量按模型 usage 累计（含重试）；预算用尽→剩余步骤 `skipped`（原因写"预算"而非"上游失败"）、仍交付、`budget_exceeded` 落 checkpoint；预算用尽不开重编排轮 |
+| 部分失败 | `test_partial_failure_is_marked_and_synthesis_is_told_about_it`、`test_synthesize_activity_tells_the_synthesizer_which_subtasks_failed` | 终态 `completed` + `partial=true` + `failed_steps`/`skipped_steps`；合成器输入里必须出现失败清单 |
+| 合成与校验 | `test_validation_defects_trigger_exactly_one_replan_round`、`test_validation_disabled_skips_the_validator`、工作流层 `…trigger_one_replan_round` | 不达标带缺陷重编排**一轮**（第二轮实例 ID 走 `r2`）；第二轮仍不达标不再循环；关掉校验即不调校验器 |
+| 逐步轨迹 | `tests/unit/test_stage_trace.py`（`test_dynamic_trace_reads_every_flow_node_by_round` 等） | 按 `flow` 节点逐个读状态；失败/跳过/已清理给三种不同原因；没有 `flow` 的旧执行仍返回 `not_integrated` |
+| 旧计划容忍 | `test_checkpoint_summary_tolerates_legacy_state_without_new_fields`、`test_parse_plan_defaults_optional_step_fields` | 缺 `retry`/`timeout_seconds`/`flow`/`intent` 时不报错，按默认值执行 |
+| 画布呈现 | `frontend/rendercheck/workspace-smoke.tsx`（ADR-038 段，12 条） | flow 优先与三级回落、平台节点不显示模型参数、波次串成「意图→编排→并行→合成→校验」、部分失败黄标、单 Agent 形态 |
+
+端到端（无容器回归网）：`tests/e2e/test_pipeline_e2e.py::test_dynamic_chain_routes_waves_synthesizes_and_exposes_traces`
+在**进程内回归网**里跑完整新链路——API（`orchestration_mode=dynamic`）→ 真实
+`agent_dynamic_workflow` 生成器 → 真实活动与子工作流 → checkpoint 的 `route` / `flow` /
+波次 / 校验，以及 `/stages` 的逐节点轨迹。回归网的 `when_all` 按顺序驱动同一批子工作流
+（真实 Dapr 是并发），因此它验证的是**分批与结果合并语义**，不验证并发时序；
+并发的真实证据在单测（`test_parallel_wave_runs_workers_concurrently` 用带延迟的假模型
+量同一时刻的并发调用数）与 Dapr 侧「一次 `when_all` 里两个子工作流」的断言。
+
+端到端（**真实运行时**）：`tests/e2e/test_live_e2e.py::test_live_dynamic_orchestration_shape_and_traces`
+（E-06，`MACP_E2E_LIVE=1` 启用）在真实 Dapr sidecar + 真实 PostgreSQL/Redis + 真实模型上验收
+动态链路。2026-09-24 实测（宿主形态，模型 `deepseek-flash`）：
+
+```powershell
+MACP_E2E_LIVE=1 pytest tests/e2e/test_live_e2e.py -q -k dynamic -s
+# [E-06] status=completed 耗时=261.0s
+# [E-06] route=multi flow=[intent, plan, worker ×5, synthesize, validate] budget=0 used=531980
+# [E-06] 报告消息长度=4505 字符
+```
+
+同一次验证里静态链路也回归通过（`-k three_stage_pipeline`：90.3s、`completed`、报告 6029 字符）。
+**这条用例的价值在这次就兑现了**：它第一次运行就抓到 `ctx.when_all(...)` 的
+`AttributeError`——`when_all` 是 `dapr.ext.workflow` 的**模块级函数**，而当时的单测/回归网替身
+自己造了一个同名**方法**，于是两类测试全绿、真机必崩（ADR-038 §8.3）。教训已固化：替身只替
+数据与环境，不替 API 形状。
+
+角色提示词的口径（位置 = 「本次执行里的一个步骤」+ 并行互不可见 + 产出由合成器收口）由
+`test_agent_roles.py::test_role_prompts_match_the_automatic_orchestration_mode` 钉住；
+改提示词时留意回归网里的**判别方式**：`ScriptedE2EModel` 按**系统提示词**判别节点类型
+（早期版本按整段提示词匹配关键词，角色提示词里补上「合成器」三个字之后，静态用例集体走错
+分支——判别词必须选平台节点独有的句子，且只看 system 消息）。
+
+运行命令与结果：`uv run pytest` → **1247 passed / 8 skipped**（跳过的是需要真实部署的
+live 用例）；`cd frontend && npm run build` 通过；`workspace-smoke` → **244/244**。
+**仍未覆盖**：「同一波多个子任务真的同时在 `tool_calls` 表里并发」的库侧证据
+（并发时序现在由单测的并发计数与 Dapr 侧的一次 `when_all` 分批断言共同覆盖）。

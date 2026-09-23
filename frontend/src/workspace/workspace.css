@@ -150,6 +150,43 @@
 
 .cv-node.kind-agent { color: var(--t-ink-2563eb); }
 
+/* 平台节点（意图 / 编排 / 合成 / 校验，ADR-038）：不是使用者配置的 Agent，
+   用青灰一档与角色节点区分，但不抢状态的视觉优先级。 */
+.cv-node.variant-platform {
+  border-style: dashed;
+  color: #0f766e;
+}
+
+.cv-node.variant-platform.visited { border-color: #9ad3cb; }
+
+.cv-node.variant-platform.running {
+  border-style: solid;
+  background: #14b8a6;
+  color: #fff;
+}
+
+/* 「部分子任务未完成」横幅：浮在画布左上角，不占布局高度（画布高度是算出来的）。 */
+.cv-partial {
+  position: absolute;
+  z-index: 20;
+  left: 8px;
+  top: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: calc(100% - 16px);
+  padding: 3px 8px;
+  border: 1px solid #f0d5a8;
+  border-radius: 999px;
+  background: #fffaf0;
+  color: #8a5b12;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.cv-partial b { font-weight: 600; }
+.cv-partial span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
 .cv-node.visited { border-color: var(--t-bd-a8c9f0); }
 
 .cv-node.running {

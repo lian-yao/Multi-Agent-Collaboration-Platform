@@ -30,6 +30,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 from collections.abc import Iterator
@@ -183,6 +184,9 @@ class InlineWorkflowDriver:
         if pending.kind == "activity":
             self.activities.append(_callable_name(pending.target))
             return pending.target(_ActivityContext(context.instance_id), pending.payload)
+        if pending.kind == "when_all":
+            # 顺序驱动同一批子工作流：结果顺序与真实实现一致（`WhenAllTask` 按入参顺序出结果）。
+            return [self._resolve(task, context) for task in pending.payload]
         if pending.kind == "child_workflow":
             instance_id = pending.instance_id or (
                 f"{context.instance_id}:{_callable_name(pending.target)}"
@@ -229,8 +233,21 @@ class InlineWorkflowService:
 
     def _run(self, task: Any) -> None:
         try:
+            # 按生效的编排模式选工作流：与 `WorkflowService.schedule` 同一判断
+            # （`resolve_workflow_name`），否则「单次请求选动态」在回归网里会被静默忽略。
+            from app.workflows import dynamic as workflow_dynamic
+            from app.workflows.service import resolve_workflow_name
+
+            dynamic_mode = (
+                resolve_workflow_name(task.orchestration_mode)
+                == workflow_dynamic.DYNAMIC_WORKFLOW_NAME
+            )
             self._driver.run(
-                workflow_pipeline.agent_pipeline_workflow,
+                (
+                    workflow_dynamic.agent_dynamic_workflow
+                    if dynamic_mode
+                    else workflow_pipeline.agent_pipeline_workflow
+                ),
                 task.asdict(),
                 instance_id=str(task.workflow_id),
             )
@@ -429,6 +446,105 @@ class ScriptedStageModel(BaseChatModel):
         return ChatResult(generations=[ChatGeneration(message=message)])
 
 
+def _prompt_text(messages: Any) -> str:
+    """把消息列表拼成一段文本。
+
+    **只用于失败信息与调试**：按提示词判别节点类型请用 `_system_text`——角色提示词里也会出现
+    「合成器」「上游」「并行」这些词，用整段文本判别会把 worker 认成合成器（2026-09-24 实测：
+    给角色提示词补上「产出会被合成器合并」之后，静态用例集体走错分支）。
+    """
+
+    parts: list[str] = []
+    for message in messages:
+        content = getattr(message, "content", "")
+        if isinstance(content, str):
+            parts.append(content)
+        elif isinstance(content, list):
+            parts.extend(
+                str(block.get("text", "")) for block in content if isinstance(block, dict)
+            )
+    return "\n".join(parts)
+
+
+def _system_text(messages: Any) -> str:
+    """只取 system 消息（messages[0]）：平台节点的提示词是**各自独有**的，判别不会串。"""
+
+    if not messages:
+        return ""
+    content = getattr(messages[0], "content", "")
+    return content if isinstance(content, str) else _prompt_text([messages[0]])
+
+
+def _json_message(payload: dict[str, Any]) -> ChatResult:
+    return ChatResult(
+        generations=[
+            ChatGeneration(message=AIMessage(content=json.dumps(payload, ensure_ascii=False)))
+        ]
+    )
+
+
+DYNAMIC_PLAN_STEPS: list[dict[str, Any]] = [
+    {
+        "id": "s1",
+        "role": "collector",
+        "instruction": "收集 A 口径",
+        "depends_on": [],
+        "expected_output": "要点清单",
+    },
+    {"id": "s2", "role": "collector", "instruction": "收集 B 口径", "depends_on": []},
+    {
+        "id": "s3",
+        "role": "analyst",
+        "instruction": "对比两路口径",
+        "depends_on": ["s1", "s2"],
+    },
+]
+
+
+class ScriptedE2EModel(ScriptedStageModel):
+    """回归网的统一假模型：动态链路的**平台节点**按提示词返回结构化 JSON，
+    其余（静态阶段、动态 worker）沿用 `ScriptedStageModel` 的脚本行为。
+
+    按提示词判别而不是按"第几次调用"判别是刻意的：并行波次下的调用顺序不确定，
+    按序号发回复会让用例在并行开启后变得随机。真实链路也是这么区分的——
+    每个节点有自己的 system prompt。
+    """
+
+    @property
+    def _llm_type(self) -> str:
+        return "scripted-e2e-model"
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):  # noqa: ANN001
+        text = _system_text(messages)
+        if "问题理解 Agent" in text:
+            self.calls.append(list(messages))
+            return _json_message(
+                {
+                    "rewritten_task": "对比 A 与 B 的实测口径并出报告",
+                    "intent": {
+                        "intent_type": "report",
+                        "user_goal": "出一份对比报告",
+                        "constraints": ["中文"],
+                        "need_multi_subtask": True,
+                    },
+                }
+            )
+        if "任务规划 Agent" in text:
+            self.calls.append(list(messages))
+            return _json_message({"rationale": "两路并行收集再对比", "steps": DYNAMIC_PLAN_STEPS})
+        if "结果校验 Agent" in text:
+            self.calls.append(list(messages))
+            return _json_message({"satisfied": True, "defects": [], "missing": []})
+        # 合成器的系统提示词 = reporter 角色 + 合成职责段；用职责段里的独有句判别，
+        # 不要用「合成器」两个字——角色提示词自己也提到了它。
+        if "本次是「合成器」节点" in text:
+            self.calls.append(list(messages))
+            return ChatResult(
+                generations=[ChatGeneration(message=AIMessage(content="合成后的对比报告"))]
+            )
+        return super()._generate(messages, stop, run_manager, **kwargs)
+
+
 class MemoryMetricSink:
     """把采样留在内存里：默认 `PostgresMetricSink` 会连接 `metrics` 表（成员 B 建）。"""
 
@@ -572,7 +688,7 @@ def e2e_env(
     service = InlineWorkflowService(driver)
     memory_checkpoint = MemoryCheckpoint(store)
     audit = MemoryToolAudit()
-    model = ScriptedStageModel()
+    model = ScriptedE2EModel()
 
     monkeypatch.setattr(api_main, "api_store", store)
     monkeypatch.setattr(api_main, "get_workflow_service", lambda: service)
@@ -589,6 +705,52 @@ def e2e_env(
         )
     monkeypatch.setattr(
         workflow_pipeline, "save_step_result", memory_checkpoint.save_step_result
+    )
+
+    # 动态链路（ADR-038）自己绑定了这两个名字，否则它会写真实 Dapr 状态库与真实数据库：
+    # 前者让回归网不再自足，后者在无 PostgreSQL 的环境里直接炸。
+    from app.api import stage_trace as stage_trace_module
+    from app.orchestration import dynamic_graph as dynamic_graph_module
+    from app.orchestration import intake as intake_module
+    from app.orchestration import synthesis as synthesis_module
+    from app.workflows import dynamic as workflow_dynamic
+
+    monkeypatch.setattr(
+        workflow_dynamic, "save_step_result", memory_checkpoint.save_step_result
+    )
+    monkeypatch.setattr(
+        workflow_dynamic, "update_workflow_run", memory_checkpoint.update_workflow_run
+    )
+    # `when_all` 是 `dapr.ext.workflow` 的**模块级函数**（真实上下文没有这个方法）：
+    # 回归网把它换成"这一批子工作流"的标记，由驱动按顺序执行同一批。
+    monkeypatch.setattr(
+        workflow_dynamic,
+        "when_all",
+        lambda tasks: _PendingCall("when_all", payload=tasks),
+    )
+    # 每个模块都从 `app.orchestration.llm` 绑了自己的 `build_chat_model` 名字，
+    # 只补一处会漏——动态链路的 intake / 规划 / 步骤 / 合成 / 校验各走一个模块。
+    for module in (
+        workflow_dynamic,
+        dynamic_graph_module,
+        intake_module,
+        synthesis_module,
+    ):
+        monkeypatch.setattr(module, "build_chat_model", lambda *a, **k: model)
+    # 动态节点载荷都进内存 checkpoint，`/stages` 的读取侧同样指向它——
+    # 这样读接口跑的是真实分支逻辑（按 flow 逐节点取载荷），数据来源换成内存。
+    monkeypatch.setattr(
+        stage_trace_module,
+        "read_step_result",
+        lambda workflow_id, step: (
+            {
+                "workflow_id": workflow_id,
+                "step": step,
+                "result": memory_checkpoint.step_results[f"{workflow_id}:{step}"],
+            }
+            if f"{workflow_id}:{step}" in memory_checkpoint.step_results
+            else None
+        ),
     )
 
     for name in (

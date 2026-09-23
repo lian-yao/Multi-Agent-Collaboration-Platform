@@ -8,10 +8,13 @@ from app.workflows.dynamic import (
     DYNAMIC_SUBTASK_WORKFLOW_NAME,
     DYNAMIC_WORKFLOW_NAME,
     agent_dynamic_workflow,
+    dynamic_checkpoint_activity,
     dynamic_plan_activity,
-    dynamic_progress_activity,
     dynamic_step_activity,
     dynamic_subtask_workflow,
+    dynamic_synthesize_activity,
+    dynamic_validate_activity,
+    intake_activity,
 )
 from app.workflows.pipeline import (
     SUBTASK_WORKFLOW_NAME,
@@ -75,7 +78,12 @@ class WorkflowService:
         self._runtime.register_activity(rewrite_activity)
         self._runtime.register_activity(dynamic_plan_activity)
         self._runtime.register_activity(dynamic_step_activity)
-        self._runtime.register_activity(dynamic_progress_activity)
+        # ADR-038：动态链路新增的三个活动——intake（改写+意图）、合成、校验，
+        # 以及父工作流刷 checkpoint 摘要用的轻量活动。
+        self._runtime.register_activity(intake_activity)
+        self._runtime.register_activity(dynamic_synthesize_activity)
+        self._runtime.register_activity(dynamic_validate_activity)
+        self._runtime.register_activity(dynamic_checkpoint_activity)
         self._registered = True
 
     def start(self) -> None:

@@ -777,6 +777,54 @@ search-gateway 脚本显式接入代理，沙箱联网时只接内部网络并�
 详情见 `doc/testing.md` §4.16。
 
 
+### 自动编排升级：意图 → 波次并行 → 合成 → 校验（2026-09-24，成员 D 主提）
+
+需求是把「自动编排」从「规划一次、按依赖串行执行」升级为
+**意图识别 → 编排器（拆分 + 分配）→ 多工作节点并行执行 → 合成器汇总输出**，并补齐四件事：
+简单任务直答、子任务重试与部分失败告知、断点恢复、依赖分阶段（波次）。
+
+设计先落 [ADR-038](decisions/038-dynamic-wave-orchestration.md)（含与 ADR-019/020 的关系），
+再按四层实现：
+
+| 层 | 内容 | 关键取舍 |
+| --- | --- | --- |
+| 编排层 | `intake`（改写 + 意图**一次调用**）、路由护栏、计划新字段（`expected_output` / `retry` / `timeout_seconds`）、`waves()` / `pending_batch()`、合成器、校验器、`flow[]` 与 `partial` | 简单任务 = 1 步、只花 2 次调用；判不准一律按多 Agent（安全默认） |
+| LangGraph 镜像 | `Send` 波内并行 + `results` 按键合并 reducer + 图外重编排轮次 | 拓扑与波次判定与 Dapr 路径**共用同一份纯函数**，不各写一套 |
+| Dapr 持久化 | 父工作流按波 `when_all`，实例 ID `{wf}:dyn:r{round}:{step}`；重试挂在活动调用上、失败收敛在子工作流里 | 不引入 LangGraph Checkpointer：Dapr 已是持久化事实源（ADR-020） |
+| API/前端 | `/stages` 动态链路可用（按 `flow` 节点读状态），画布 flow 优先 + 平台节点区分 + 部分失败黄标 | 旧执行（无 `flow`）保持 `not_integrated`，不碎 |
+
+**本轮交付**：`app/orchestration/{intake,synthesis}.py`、重建的 `dynamic_graph.py` 与
+`app/workflows/dynamic.py`、`app/api/stage_trace.py` 动态分支、前端 `collaboration.ts` /
+`GraphCanvas.tsx` / `types/api.ts`，`AgentSettings` 增 5 个开关（并发 3 / 尝试 3 /
+超时 300s / 校验开 / 重编排 1 轮）。
+
+**同日补齐三件收尾**（都是原记录的"未做"）：
+
+- **实际重试次数**：重试改成子工作流里的显式循环（每次尝试一个持久化活动调用、退避走
+  `create_timer`），因此 `attempts` 记的是**真的用了几次**，不是配置值；
+- **累计 Token 预算**：`AGENT_TOKEN_BUDGET`（默认 0 = 不限制）；用尽即停止派发后续子任务、
+  不再重编排，但**照常交付**已完成的部分并写明缺口（checkpoint 的
+  `tokens_used` / `budget_exceeded` + 报告正文 + 画布黄标）；
+- **真实运行时端到端**：`tests/e2e/test_live_e2e.py` 新增 E-06（`MACP_E2E_LIVE=1`）。
+  实测（真实 Dapr + PostgreSQL + `deepseek-flash`）：`route=multi`、flow 为
+  `intent / plan / 5×worker / synthesize / validate`、`tokens_used=531980`、报告 4505 字符、
+  `/stages` 逐节点可取（261s）；同一次验证里静态链路 90.3s 回归通过。
+  **它第一次运行就抓到 `ctx.when_all(...)` 的 AttributeError**——`when_all` 是模块级函数，
+  而替身自造了一个同名方法，单测全绿、真机必崩（ADR-038 §8.3）。
+
+**验证边界**：`uv run pytest` → **1247 passed / 8 skipped**（跳过的是需要真实部署的
+live 用例，已用上面这次实测单独验收）；新增/改写 100 余例：波次并发实测、部分失败、
+校验重编排一轮、实际尝试次数、Token 预算收口、旧计划容忍、动态 `/stages`，并修掉一条
+ADR-037 之后就陈旧的 e2e 断言；`frontend` 的 `npm run build` 通过，
+`workspace-smoke` **244/244**（+15 条 ADR-038 断言：flow 优先、平台节点、单 Agent 形态、
+旧执行回落、部分失败与预算黄标）。
+
+**同日再补**：三个角色的 system prompt 按当前工作模式改写（ADR-006 修订）——位置从「固定三步的
+第 N 步」改成「**本次执行里的一个步骤**」，显式说明同波并行子任务**互不可见**、产出会被
+**合成器**收口；reporter 由输入判断自己是「子任务成稿」还是「单 Agent 直答」。规划 Agent 的
+角色摘要与最后一步口径同步（去掉「最后一个步骤必须产出面向用户的最终交付物」这句与合成器
+自相矛盾的话）。`test_agent_roles.py` 新增一条用例钉住「不再出现第一步/第二步/最后一步」。
+
 ### 后续演进：调用参数快照——「本次调用」目前只有模型是执行时事实（2026-09-24，成员 D）
 
 协作画布与执行台的「调用信息参数」已改为只把**执行时真的记下来的**说成本次用的

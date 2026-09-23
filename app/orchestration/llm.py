@@ -13,7 +13,11 @@ LangChain 集成包，因此**显式报错**而不是退化成 OpenAI 兼容请�
 """
 
 
-def build_chat_model(settings: AgentSettings) -> BaseChatModel:
+def build_chat_model(
+    settings: AgentSettings,
+    *,
+    timeout_seconds: float | None = None,
+) -> BaseChatModel:
     """按生效配置创建聊天模型。
 
     模型接入属于成员 C 的职责（`分工.md` §2「多模型接入」），因此这里同时挂上
@@ -28,6 +32,10 @@ def build_chat_model(settings: AgentSettings) -> BaseChatModel:
     特化调参（ADR-017）：`temperature` / `top_p` / `max_tokens` 与
     `custom_headers` 只在有取值时才传，避免把「未设置」变成「显式设为默认值」
     而覆盖服务端行为。
+
+    ``timeout_seconds`` 是**单次执行级**的请求超时（ADR-038：计划的
+    `timeout_seconds` 与 `AGENT_SUBTASK_TIMEOUT_SECONDS` 落到这里）。为 None 时
+    不显式设置，保持客户端默认行为——不给没要求超时的调用凭空加一个上限。
     """
 
     callbacks = [ObservabilityCallbackHandler()]
@@ -51,6 +59,10 @@ def build_chat_model(settings: AgentSettings) -> BaseChatModel:
             kwargs["top_p"] = settings.top_p
         if settings.custom_headers:
             kwargs["client_kwargs"] = {"headers": dict(settings.custom_headers)}
+        if timeout_seconds is not None:
+            client_kwargs = dict(kwargs.get("client_kwargs") or {})  # type: ignore[arg-type]
+            client_kwargs["timeout"] = timeout_seconds
+            kwargs["client_kwargs"] = client_kwargs
         return ChatOllama(**kwargs)
 
     if settings.llm_provider == "openai":
@@ -89,6 +101,8 @@ def build_chat_model(settings: AgentSettings) -> BaseChatModel:
             kwargs["max_tokens"] = settings.max_tokens
         if settings.custom_headers:
             kwargs["default_headers"] = dict(settings.custom_headers)
+        if timeout_seconds is not None:
+            kwargs["timeout"] = timeout_seconds
         return ChatOpenAI(**kwargs)
 
     raise ValueError(f"不支持的模型提供方: {settings.llm_provider}")

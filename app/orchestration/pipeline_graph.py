@@ -34,6 +34,7 @@ from app.config import AgentSettings, get_settings
 from app.memory import SessionMessage
 from app.observability.instrumentation import observed_stage
 from app.observability.logging import get_logger, log_event
+from app.observability.metrics import usage_from_message
 from app.orchestration.llm import build_chat_model
 from app.orchestration.context import conversation_block
 from app.orchestration.pipeline import (
@@ -203,25 +204,34 @@ def _invoke_role(
     caller: ToolCaller | None,
     *,
     stage: PipelineStage | str,
-    role: RoleId | str,
-) -> Any:
-    """执行角色节点：接入注册表时按模型请求调用工具，否则单次调用模型。"""
+    role: RoleId,
+) -> tuple[Any, int]:
+    """执行角色节点：接入注册表时按模型请求调用工具，否则单次调用模型。
+
+    返回 `(最终响应, 本次节点消耗的 Token 总数)`。**Token 必须由这一层带出来**：
+    累计预算要在编排层按「已经花掉多少」决定要不要继续开新波次，而按可观测采样去读
+    是进程内的、重放时会变——那让控制流依赖了非确定性输入。工具回填循环里的每一轮
+    都计入总量，否则「工具轮得多」的步骤在预算里会被少算。
+    """
 
     stage_label = _stage_label(stage)
     if caller is None or not caller.has_tools():
-        return _ensure_text_response(
+        response = _ensure_text_response(
             llm, messages, llm.invoke(messages), stage=stage_label, role=role
         )
+        return response, usage_tokens(response)
 
     try:
         model = llm.bind_tools(caller.openai_tools())
     except (AttributeError, NotImplementedError):
         # 模型不支持工具调用时退回普通对话，不阻断流水线。
-        return _ensure_text_response(
+        response = _ensure_text_response(
             llm, messages, llm.invoke(messages), stage=stage_label, role=role
         )
+        return response, usage_tokens(response)
 
     response = model.invoke(messages)
+    tokens = usage_tokens(response)
     for _ in range(TOOL_CALL_MAX_ITERATIONS):
         requested = list(getattr(response, "tool_calls", None) or [])
         if not requested:
@@ -240,6 +250,7 @@ def _invoke_role(
                 )
             )
         response = model.invoke(messages)
+        tokens += usage_tokens(response)
     pending = list(getattr(response, "tool_calls", None) or [])
     if pending:
         # 模型撞到工具轮次上限仍在要工具：不会再执行这些调用，值得单独告警
@@ -249,11 +260,15 @@ def _invoke_role(
             "stage.tool_iteration_limit",
             level=logging.WARNING,
             stage=stage_label,
-            role=_role_key(role),
+            role=role.value,
             iterations=TOOL_CALL_MAX_ITERATIONS,
             pending_tool_calls=len(pending),
         )
-    return _ensure_text_response(model, messages, response, stage=stage_label, role=role)
+    final = _ensure_text_response(model, messages, response, stage=stage_label, role=role)
+    if final is not response:
+        # 空输出兜底又补了一次调用：它的用量同样属于这一步。
+        tokens += usage_tokens(final)
+    return final, tokens
 
 
 def _ensure_text_response(
@@ -262,7 +277,7 @@ def _ensure_text_response(
     response: Any,
     *,
     stage: str,
-    role: RoleId | str,
+    role: RoleId,
 ) -> Any:
     """保证阶段有文字产出：空输出补一次文字提示，仍为空则告警并继续（F-07）。
 
@@ -280,7 +295,7 @@ def _ensure_text_response(
             "stage.empty_content",
             level=logging.WARNING,
             stage=stage,
-            role=_role_key(role),
+            role=role.value,
             attempt=attempt,
             action="retry",
         )
@@ -293,7 +308,7 @@ def _ensure_text_response(
         "stage.empty_content",
         level=logging.WARNING,
         stage=stage,
-        role=_role_key(role),
+        role=role.value,
         attempt=MAX_EMPTY_CONTENT_RETRIES,
         action="continue_with_empty",
     )
@@ -338,7 +353,7 @@ def _run_role_stage(
         with observed_stage(
             workflow_id=workflow_id, stage=stage.value, role=role.value
         ):
-            response = _invoke_role(messages, llm, caller, stage=stage, role=role)
+            response, _tokens = _invoke_role(messages, llm, caller, stage=stage, role=role)
     except Exception as exc:
         log_event(
             logger,
@@ -433,14 +448,17 @@ def content_with_tools(content: str | list[Any]) -> str:
     return _content_text(content)
 
 
-def _role_key(role: RoleId | str) -> str:
-    """角色的日志/观测键：枚举取值，普通字符串原样返回。
+def usage_tokens(message: Any) -> int:
+    """一条模型响应的 Token 总数（取不到就是 0，不猜、不按字数估算）。
 
-    ADR-036 之后动态图传的是角色目录 id（``PlanStep.role`` 已是自由文本），
-    静态图仍传 ``RoleId``。两处日志字段都要的是字符串值，收拢到这一个辅助里。
+    公开给它是因为「累计预算」要在编排层按实际用量收口：拿不到用量时记 0，
+    预算是**下限口径**——宁可在极端情况下少算，也不要凭字数编一个数字进审计。
     """
 
-    return role.value if isinstance(role, RoleId) else role
+    usage = usage_from_message(message)
+    if not usage:
+        return 0
+    return int(usage.get("total") or 0)
 
 
 def invoke_role_messages(
@@ -449,7 +467,7 @@ def invoke_role_messages(
     caller: ToolCaller | None = None,
     *,
     stage: PipelineStage | str = PipelineStage.COLLECT,
-    role: RoleId | str = RoleId.COLLECTOR,
+    role: RoleId = RoleId.COLLECTOR,
 ) -> str:
     """公开的单次角色调用入口：执行 ReAct 工具回填循环并返回正文。
 
@@ -460,7 +478,25 @@ def invoke_role_messages(
     （如 ``s1``）与角色即可，默认值只在无观测诉求的调用里使用。
     """
 
-    return _content_text(_invoke_role(messages, llm, caller, stage=stage, role=role).content)
+    response, _tokens = _invoke_role(messages, llm, caller, stage=stage, role=role)
+    return _content_text(response.content)
+
+
+def invoke_role_messages_with_usage(
+    messages: list[Any],
+    llm: BaseChatModel,
+    caller: ToolCaller | None = None,
+    *,
+    stage: PipelineStage | str = PipelineStage.COLLECT,
+    role: RoleId = RoleId.COLLECTOR,
+) -> tuple[str, int]:
+    """`invoke_role_messages` 的带用量版本：返回 `(正文, Token 总数)`。
+
+    动态链路的步骤活动与合成器都用它——它们的用量要进「本次执行累计预算」。
+    """
+
+    response, tokens = _invoke_role(messages, llm, caller, stage=stage, role=role)
+    return _content_text(response.content), tokens
 
 
 def _state_update(state: PipelineState) -> dict[str, Any]:

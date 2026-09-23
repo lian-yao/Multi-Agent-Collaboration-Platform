@@ -23,7 +23,17 @@
  * 能拖只会让人以为拖动能改变什么，而它什么都不会改变。
  */
 import { useEffect, useRef, useState, type CSSProperties } from "react";
-import { CircleAlert, LoaderCircle, Maximize2, Pause, Wrench } from "lucide-react";
+import {
+  CircleAlert,
+  GitMerge,
+  ListTree,
+  LoaderCircle,
+  Maximize2,
+  Pause,
+  ShieldCheck,
+  Target,
+  Wrench,
+} from "lucide-react";
 import { Status } from "../components/Status";
 import { AgentGlyph } from "../components/AgentGlyph";
 import { modelLabelOf } from "./collaboration";
@@ -63,6 +73,8 @@ const WIDE: Geometry = { size: 42, gap: 96, padX: 96, padY: 44, padBottom: 74, i
 export type PlacedNode = {
   id: string;
   kind: "agent" | "start" | "end" | "planner";
+  /** 子任务节点还是平台节点（意图 / 编排 / 合成 / 校验）：只影响视觉区分。 */
+  variant: "worker" | "platform";
   /** 圆心（画布坐标系）。 */
   x: number;
   y: number;
@@ -224,6 +236,7 @@ export function layoutCollaboration(
   const start: PlacedNode = {
     id: START_ID,
     kind: "start",
+    variant: "platform",
     x: w / 2,
     y: yOf(0),
     size: m.size,
@@ -237,6 +250,7 @@ export function layoutCollaboration(
   const end: PlacedNode = {
     id: END_ID,
     kind: "end",
+    variant: "platform",
     x: w / 2,
     y: yOf(rows - 1),
     size: m.size,
@@ -254,6 +268,8 @@ export function layoutCollaboration(
     nodes.push({
       id: PLANNER_ID,
       kind: "planner",
+      // 规划节点是「角色侧」的决策节点（走 AgentGlyph），不吃平台节点的虚线青灰样式。
+      variant: "worker",
       x: w / 2,
       y: yOf(1),
       size: m.size,
@@ -272,6 +288,7 @@ export function layoutCollaboration(
       nodes.push({
         id: node.id,
         kind: "agent",
+        variant: node.kind === "worker" ? "worker" : "platform",
         x: xOf(index, wave.length),
         y,
         size: m.size,
@@ -406,6 +423,9 @@ function NodeGlyph({ node, size }: { node: PlacedNode; size: number }) {
   if (node.status === "failed") return <CircleAlert size={size} />;
   if (node.status === "paused") return <Pause size={size} />;
   if (node.status === "running") return <LoaderCircle size={size} className="spin" />;
+  // 平台节点（意图 / 编排 / 合成 / 校验）不是 Agent：不套角色图标，
+  // 否则画布会给出「这里是一个它在跑的角色」这种错误暗示。
+  if (node.node && node.node.kind !== "worker") return <PlatformGlyph kind={node.node.kind} size={size} />;
   return <AgentGlyph role={node.node?.agentId ?? ""} name={node.label} size={size} />;
 }
 
@@ -445,6 +465,39 @@ function configNote(node: CollabNode): string {
     return "其余参数没有在运行时记录：这里是角色「当前」配置，可能与本次执行不同。";
   }
   return "本次执行没有可用的采样：无法确认当时生效的是哪份配置，这里是角色「当前」配置。";
+}
+
+/**
+ * 平台节点的图标：意图（靶心）、编排（树）、合成（归并）、校验（盾）。
+ *
+ * 与 Agent 角色图标分开是刻意的：这四个节点**不是**使用者在「团队」里配置的 Agent，
+ * 给它们套角色图标会让人以为「平台又派了一个角色来干活」。
+ */
+function PlatformGlyph({ kind, size }: { kind: string; size: number }) {
+  if (kind === "intent") return <Target size={size} />;
+  if (kind === "plan") return <ListTree size={size} />;
+  if (kind === "synthesize") return <GitMerge size={size} />;
+  if (kind === "validate") return <ShieldCheck size={size} />;
+  return <span className="cv-dot" />;
+}
+
+/**
+ * 「部分完成 / 预算用尽」横幅的正文。
+ *
+ * 三件事各自独立，谁都可能单独出现（只有失败、只有跳过、只有预算），因此用列表拼而不是
+ * 一串嵌套三元——嵌套三元在"只有跳过"那一支会吐出一句空话，而这条横幅存在的意义正是
+ * **把缺口说清楚**。用量写「已用 / 上限」两个数：只说"超预算"没法判断还剩多少空间。
+ */
+function partialDetail(graph: CollabGraph): string {
+  const parts: string[] = [];
+  if (graph.budgetExceeded) {
+    parts.push(
+      `已用 ${graph.tokensUsed.toLocaleString()} / 上限 ${graph.tokenBudget.toLocaleString()}`,
+    );
+  }
+  if (graph.failedSteps.length) parts.push(`失败：${graph.failedSteps.join("、")}`);
+  if (graph.skippedSteps.length) parts.push(`跳过：${graph.skippedSteps.join("、")}`);
+  return parts.length ? parts.join("；") : "有子任务被跳过";
 }
 
 /**
@@ -672,6 +725,17 @@ export function CollaborationCanvas({
 
   return (
     <div className={`cv-canvas ${dense ? "dense" : "wide"}`} ref={ref} style={{ height: h }}>
+      {/*
+        「部分完成」必须在画布上说出来（ADR-038 §4）：终态可能仍是 completed，
+        但结果是部分的。只在正文里写一句、画布上不体现，会让「已完成的绿点」误导人。
+      */}
+      {(graph.partial || graph.budgetExceeded) && (
+        <div className="cv-partial" role="status">
+          <CircleAlert size={dense ? 11 : 13} />
+          <b>{graph.budgetExceeded ? "Token 预算用尽" : "部分子任务未完成"}</b>
+          <span>{partialDetail(graph)}</span>
+        </div>
+      )}
       <svg className="cv-svg cv-svg-base" viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" aria-hidden="true">
         <defs>
           <marker
@@ -761,7 +825,9 @@ export function CollaborationCanvas({
       {nodes.map((node) => (
         <div
           key={node.id}
-          className={`cv-node kind-${node.kind} ${node.status}${node.visited ? " visited" : ""}`}
+          className={`cv-node kind-${node.kind} variant-${node.variant} ${node.status}${
+            node.visited ? " visited" : ""
+          }`}
           style={{
             left: node.x,
             top: node.y,
