@@ -9,8 +9,18 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Literal
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+SearchProvider = Literal["duckduckgo", "volcengine"]
+
+DUCKDUCKGO_SEARCH_ENDPOINT = "https://api.duckduckgo.com/"
+"""DuckDuckGo Instant Answer 端点；ADR-032 的本地网关返回同一 JSON 契约。"""
+
+DOUBAO_SEARCH_ENDPOINT = "https://open.feedcoopapi.com/search_api/web_search"
+"""火山引擎豆包搜索（Custom）端点（ADR-037）：POST + Bearer key，按量付费。"""
 
 
 class ToolSettings(BaseSettings):
@@ -22,8 +32,21 @@ class ToolSettings(BaseSettings):
         extra="ignore",
     )
 
-    search_endpoint: str = "https://api.duckduckgo.com/"
-    """公开搜索 API 基址；已实现解析的是 DuckDuckGo Instant Answer 的 JSON 响应。"""
+    search_provider: SearchProvider = "duckduckgo"
+    """搜索出口的实现（ADR-037）：
+
+    - `duckduckgo`（默认）：DuckDuckGo Instant Answer 的 JSON 契约，ADR-032 的本地网关同样适用；
+    - `volcengine`：火山引擎豆包搜索 Custom（POST + PascalCase 字段 + Bearer key）。
+    """
+
+    search_endpoint: str = DUCKDUCKGO_SEARCH_ENDPOINT
+    """搜索 API 端点；解析契约由 `search_provider` 决定，不显式给就按 provider 取默认。"""
+
+    search_api_key: str = ""
+    """豆包搜索的按量付费 API key；只从环境 / `.env` 读，**不进仓库、不进日志**（ADR-037 §2）。
+
+    provider=volcengine 且这里为空时直接报配置错（非 retryable），不发出无鉴权请求。
+    """
 
     search_timeout_seconds: float = 8.0
     search_max_results: int = 5
@@ -53,6 +76,17 @@ class ToolSettings(BaseSettings):
 
     session_file_list_limit: int = 50
     """`list_session_files` 返回的条数上限，避免异常会话把清单本身变成大载荷。"""
+
+    @model_validator(mode="after")
+    def _default_endpoint_follows_provider(self) -> "ToolSettings":
+        """端点默认值跟随 provider；显式给过 `TOOL_SEARCH_ENDPOINT` 就尊重显式值。"""
+
+        if (
+            self.search_provider == "volcengine"
+            and "search_endpoint" not in self.model_fields_set
+        ):
+            self.search_endpoint = DOUBAO_SEARCH_ENDPOINT
+        return self
 
 
 @lru_cache

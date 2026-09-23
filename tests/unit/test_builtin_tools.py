@@ -29,6 +29,7 @@ from app.tools import (
     assert_read_only_statement,
     builtin_tools,
 )
+from app.tools.config import ToolSettings
 
 EXPECTED_TOOL_NAMES = ["calculator", "code_execution", "sql_query", "web_search"]
 
@@ -330,6 +331,18 @@ def test_builtin_registry_reports_unknown_tool():
 
 # --- web_search：注入 fetcher，不发起真实网络请求 -----------------------------
 
+def _duckduckgo_tool(**kwargs) -> WebSearchTool:
+    """钉住 provider=duckduckgo：
+
+    下面几个用例验的是 **DuckDuckGo 契约**，必须显式选出口——否则本机 `.env` 把
+    `TOOL_SEARCH_PROVIDER` 设成 `volcengine` 时，注入的 `fetch_json` 会被绕过，
+    单测就变成了打真实网络（ADR-037 引入 provider 开关时暴露的确定性缺口）。
+    """
+
+    settings = ToolSettings(_env_file=None, search_provider="duckduckgo")
+    return WebSearchTool(settings=settings, **kwargs)
+
+
 SEARCH_PAYLOAD = {
     "Heading": "多智能体系统",
     "AbstractText": "多智能体系统由多个协作的智能体组成。",
@@ -349,7 +362,7 @@ def test_web_search_parses_instant_answer_and_related_topics():
         calls.append((endpoint, params, timeout))
         return SEARCH_PAYLOAD
 
-    result = WebSearchTool(fetch_json=fetcher).invoke({"query": "多智能体"})
+    result = _duckduckgo_tool(fetch_json=fetcher).invoke({"query": "多智能体"})
 
     assert result["query"] == "多智能体"
     assert [item["url"] for item in result["results"]] == [
@@ -363,7 +376,7 @@ def test_web_search_parses_instant_answer_and_related_topics():
 
 
 def test_web_search_deduplicates_urls_and_applies_limit():
-    tool = WebSearchTool(fetch_json=lambda *_: SEARCH_PAYLOAD)
+    tool = _duckduckgo_tool(fetch_json=lambda *_: SEARCH_PAYLOAD)
 
     limited = tool.invoke({"query": "x", "max_results": 1})
     assert [item["url"] for item in limited["results"]] == ["https://example.com/mas"]
@@ -377,7 +390,7 @@ def test_web_search_deduplicates_urls_and_applies_limit():
 
 
 def test_web_search_rejects_non_object_payload():
-    tool = WebSearchTool(fetch_json=lambda *_: ["not", "an", "object"])
+    tool = _duckduckgo_tool(fetch_json=lambda *_: ["not", "an", "object"])
 
     with pytest.raises(ToolExecutionError):
         tool.invoke({"query": "x"})
@@ -388,6 +401,6 @@ def test_web_search_propagates_transport_failure():
         raise ToolExecutionError("搜索服务不可达: connection refused")
 
     with pytest.raises(ToolExecutionError) as failure:
-        WebSearchTool(fetch_json=failing_fetcher).invoke({"query": "x"})
+        _duckduckgo_tool(fetch_json=failing_fetcher).invoke({"query": "x"})
 
     assert "不可达" in str(failure.value)

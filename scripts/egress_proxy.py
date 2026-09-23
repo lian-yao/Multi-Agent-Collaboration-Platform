@@ -43,6 +43,7 @@ from app.security.egress import (
     EgressPolicy,
     get_egress_policy,
     http_get,
+    http_post,
 )
 
 logger = logging.getLogger("egress_proxy")
@@ -50,6 +51,13 @@ logger = logging.getLogger("egress_proxy")
 RELAY_CHUNK_BYTES = 65536
 DENIED_STATUS = 403
 UPSTREAM_ERROR_STATUS = 502
+
+_STRIPPED_REQUEST_HEADERS = frozenset(
+    {"host", "content-length", "connection", "proxy-connection", "transfer-encoding", "expect"}
+)
+"""转发时丢掉的头：`Host` 与 `Content-Length` 由出网层按目标与真实字节数重写，
+其余是逐跳头。`Authorization` / `Content-Type` 等**照原样透传**——豆包搜索的口令就在
+`Authorization` 里（ADR-037 §4）。"""
 
 
 class EgressProxyHandler(BaseHTTPRequestHandler):
@@ -137,6 +145,55 @@ class EgressProxyHandler(BaseHTTPRequestHandler):
         except EgressDenied as exc:
             logger.warning("request_denied url=%s reason=%s", self.path, exc.reason)
             self._send_error(DENIED_STATUS, f"被出网策略拒绝（{exc.reason}）：{exc.detail}")
+            return
+
+        self.send_response(response.status)
+        for key, value in response.headers.items():
+            if key in {"connection", "transfer-encoding", "content-length"}:
+                continue
+            self.send_header(key, value)
+        self.send_header("Content-Length", str(len(response.body)))
+        self.end_headers()
+        self.wfile.write(response.body)
+
+    def do_POST(self) -> None:  # noqa: N802
+        """明文 HTTP 的 POST 转发（ADR-037 §4）：豆包搜索这类出口是 POST + 自定义头。
+
+        出网判定完全走 `http_post`——与 GET 同一套（scheme / 端口 / 域名 / 私网 / 钉扎 /
+        重定向上限 / 响应体上限）；这里只负责把请求体和**除逐跳头以外**的请求头搬过去。
+        """
+
+        if not self.path.lower().startswith(("http://", "https://")):
+            self._send_error(400, "代理只接受绝对 URI 的请求")
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            self._send_error(400, "Content-Length 不是整数")
+            return
+        body = self.rfile.read(length) if length > 0 else b""
+        forwarded = {
+            key: value
+            for key, value in self.headers.items()
+            if key.lower() not in _STRIPPED_REQUEST_HEADERS
+        }
+        try:
+            response = http_post(
+                self.path,
+                payload=body,
+                headers=forwarded,
+                purpose="proxy",
+                policy=type(self).policy,
+                timeout=type(self).timeout,
+                max_bytes=type(self).max_bytes,
+            )
+        except EgressDenied as exc:
+            logger.warning("request_denied url=%s reason=%s", self.path, exc.reason)
+            self._send_error(DENIED_STATUS, f"被出网策略拒绝（{exc.reason}）：{exc.detail}")
+            return
+        except EgressConfigError as exc:
+            logger.warning("request_invalid url=%s error=%s", self.path, exc)
+            self._send_error(400, str(exc))
             return
 
         self.send_response(response.status)
