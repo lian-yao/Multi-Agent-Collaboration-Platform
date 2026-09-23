@@ -1300,7 +1300,14 @@ latin-1 编码报错）。
 { "session_id": "3f2b…", "path": "sessions/3f2b…", "mode": "read_only", "name": null }
 ```
 
-- `path` 省略或为空时默认绑到 `sessions/<session_id>/`；目录不存在时由**平台**创建。
+- `path` 的含义取决于 `WORKSPACE_SOURCE`（ADR-035）：
+  - **`host`（默认）**：`path` 是用户当场选定的**宿主绝对路径**（如 `D:\项目\2026`），
+    该文件夹内可读写、文件夹之外一律拒绝。省略或为空时，系统按会话建一个默认目录
+    （`<家目录>/MacpWorkspace/sessions/<session_id>/`）。
+  - **`container`**：`path` 是**根内**的相对子路径，省略或为空时默认绑到
+    `sessions/<session_id>/`。
+- 用户选定的目录必须**已存在**（选择动作本身就是选一个已有文件夹）；平台只为默认路径
+  创建目录。
 - `mode` 取 `read_only` / `workspace_write`；创建时即可选写档位，也可用下面的 `PATCH` 改。
   **档位只能由人调整**（ADR-033 §3），Agent 没有提权通道：它不会成为工具。
 
@@ -1379,6 +1386,31 @@ latin-1 编码报错）。
 - 为什么不用 `GET /workspaces/root/tree`：它与 `GET /workspaces/{workspace_id}/tree` 形状
   相同，谁能命中只取决于**路由注册顺序**——以后调一下顺序就会静默换成另一个语义。
   单独一条路径把这个歧义从接口面上消掉。
+
+`GET /api/v1/host/tree?path=<绝对路径>&depth=1`（**宿主形态专用**，ADR-035）：
+
+```json
+{
+  "path": "C:\\Users\\zq",
+  "parent": "C:\\Users",
+  "roots": [{ "name": "C:", "path": "C:\\" }, { "name": "D:", "path": "D:\\" }],
+  "home": "C:\\Users\\zq",
+  "depth": 1,
+  "entries": [
+    { "name": "项目", "path": "C:\\Users\\zq\\项目", "kind": "dir", "outside": false, "size_bytes": null, "modified_at": null }
+  ],
+  "truncated": false,
+  "limit": 500
+}
+```
+
+- 这是「用户当场选一个本地文件夹」的那一步（ADR-035 §3）：`WORKSPACE_SOURCE=host` 时可用，
+  **只读、只列目录**（不返回文件正文），浏览器只经这条 HTTP 拿结果，不直连磁盘。
+- `path` 省略时从**家目录**开始；`roots` 给盘符（POSIX 下是 `/`）入口，`parent` 供「上一级」。
+- `WORKSPACE_SOURCE=container` 时返回 **503 `WORKSPACE_HOST_BROWSE_DISABLED`**：容器里
+  `/workspace` 之外的宿主路径既不存在也无从挂载，开了就是一个"能选、不能用"的假入口。
+- 选中的文件夹通过 `POST /workspaces` 的 **`path`**（宿主形态下就是绝对路径）落库；
+  根内路径约束不因此放松，「只能在这个文件夹下面」仍由 §5.19 的路径守卫保证。
 
 `DELETE /api/v1/workspaces/{workspace_id}` 返回 204：只解除登记，**不删宿主文件**。
 

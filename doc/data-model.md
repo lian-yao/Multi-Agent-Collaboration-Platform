@@ -376,8 +376,16 @@ Prompt 时需同步 roles.py 与 `BUILTIN_AGENT_SEED`，避免目录与 Prompt �
 
 ### 3.3 工作区与审批（**规划**，ADR-033；实现后以模型代码为准）
 
-工作区描述的是「宿主固定根下的一个子目录 + 它的档位与配额」。表里**只存相对路径**：
-宿主绝对路径由部署层的 `WORKSPACE_ROOT` 决定，不进库——否则一次部署改根就会让所有历史行失效。
+工作区描述的是「一个被授权的目录 + 它的档位与配额」。**`path` 的含义取决于形态**
+（ADR-035），表结构不为此加列：
+
+- **宿主形态（默认）**：`path` 就是用户当场选定的**宿主绝对路径**（如 `D:\项目\2026`），
+  该文件夹内可读写、文件夹之外一律拒绝；
+- **容器形态**：`path` 是**相对**部署层 `WORKSPACE_ROOT` 的子目录（如 `sessions/3f2b…`）
+  ——容器里看到的只是挂载点，绝对路径不会进库。
+
+两种形态的 `path` 不可混用：切形态会让旧登记解析失败（宿主形态要求绝对路径、容器形态
+拒绝绝对路径），两边都**显式报错**，不静默按另一层含义解释。
 
 #### workspaces（工作区）
 
@@ -385,17 +393,19 @@ Prompt 时需同步 roles.py 与 `BUILTIN_AGENT_SEED`，避免目录与 Prompt �
 | --- | --- | --- | --- |
 | id | UUID | PK | |
 | session_id | UUID | FK → sessions，可空 | 绑定的会话；共享工作区为空 |
-| path | VARCHAR(500) | NOT NULL | **相对**工作区根的路径，如 `sessions/3f2b…` |
-| mode | VARCHAR(20) | NOT NULL | `read_only`（默认）/ `workspace_write`；无「根之外」档位 |
+| path | VARCHAR(500) | NOT NULL | **宿主形态**：授权目录的宿主绝对路径；**容器形态**：根内相对子路径（空串＝根本身） |
+| mode | VARCHAR(20) | NOT NULL | `read_only` / `workspace_write`（宿主形态登记时默认可写，ADR-035 §4）；无「根之外」档位 |
 | name | VARCHAR(100) | NULL | 展示名 |
 | quota | JSONB | NOT NULL | `{max_file_bytes, max_total_bytes, max_entries}` |
 | created_by | VARCHAR(100) | NULL | 操作者标识（沿用注册表的 `updated_by` 口径） |
 | updated_by | VARCHAR(100) | NULL | **谁提的档**（阶段 2 起写入；提权是审计事件） |
 | created_at / updated_at | TIMESTAMPTZ | NOT NULL | |
 
-索引：`idx_workspaces_session (session_id)`、`ux_workspaces_path (path)`。
+索引：`idx_workspaces_session (session_id)`、`ux_workspaces_path (path)`——宿主形态下这条
+唯一约束的含义是「同一个文件夹同时只由一个工作区绑定」，这是有意的。
 
-不变量：`path` 必须是根内的相对路径且不含 `..`；`mode` 只允许两个取值；档位调整只改本表，
+不变量：所有**根内子路径**必须是相对路径且不含 `..`；宿主形态的授权目录必须是**绝对路径**、
+存在、是目录、且不是平台自身源码目录；`mode` 只允许两个取值；档位调整只改本表，
 **Agent 无法写入本表**（提权只由人在 API/UI 上做）。
 
 `usage`（当前用量）**不落库**：每次按需扫描工作区目录得到，避免多写者下的计数漂移；
