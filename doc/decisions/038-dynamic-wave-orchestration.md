@@ -95,6 +95,46 @@ Dapr 终态一致」在 `completed` 下仍然成立。
 不引入 checkpoint 版本号、不排空在途任务。代价是「重试次数」在旧计划上只能取默认值——
 这比让一次升级把在途任务全部判废要好。
 
+### 8.1 重试改由子工作流显式循环，`attempts` 记**实际**次数
+
+原先的重试挂在 `call_child_workflow(retry_policy=…)` / 活动调用上，但两个问题：
+Dapr **不把「第几次尝试」告诉工作流代码**，而且父工作流的 `when_all` 会在任一分支抛错时
+提前结束（同波其它分支的产出一起丢）。现在改成**子工作流里的一层显式循环**：
+
+- 每次尝试都是一个独立的、持久化的活动调用，退避走 `ctx.create_timer`（首次 1s、系数 2、
+  上限 10s——与原先 `RetryPolicy` 的参数同口径），因此重放语义不变；
+- 循环由子工作流掌握，于是它知道「这是第几次」：成功时把 `attempts` 盖在结果上，
+  耗尽时返回 `failed` 业务结果（带上真实次数）而不是把异常抛给父工作流；
+- `StepOutcome.attempts` 随 checkpoint 的 `plan[].attempts` 落库，状态载荷里另记
+  `attempt`（本次是第几次）与 `attempts`（一共用了几次）。
+
+**「配了 2 次重试」与「真的重试了 1 次才成功」是两件事**：审计要看的是后者。
+
+### 8.2 累计 Token 预算（成本闸门）
+
+`AGENT_TOKEN_BUDGET`（默认 0 = 不限制）给单次执行设一条累计上限，口径是
+**intake + 规划 + 子任务（含重试）+ 合成 + 校验**的模型用量之和（重编排时第二轮把第一轮
+已用的量带过去，`tokens_used_prior`）。
+
+- 用量的来源是**活动/节点结果**里的 `tokens`（从模型响应的 usage 元数据读），
+  不是可观测采样：控制流必须只依赖确定性输入，否则重放会得到不同的停止点；
+- 预算是**下限口径**：模型没回用量时按 0 计（不按字数估算）——宁可少算，也不编一个数字进审计；
+- 用尽后的行为是**收口而不是作废**：不再派发剩余子任务、不再开新一轮重编排，
+  但**照常合成**已完成的部分。剩余步骤记 `skipped`，原因写成「Token 预算已用尽」，
+  合成器在正文开头点名缺席项，checkpoint 记 `tokens_used` / `token_budget` /
+  `budget_exceeded`，画布顶上一条「Token 预算用尽（已用 X / 上限 Y）」。
+
+### 8.3 一条只有真机才会暴露的教训：`when_all` 是模块级函数
+
+`when_all` 属于 `dapr.ext.workflow` 的**模块级函数**，不是工作流上下文的方法
+（真实运行时给工作流的是 `_RuntimeOrchestrationContext`，它没有这个属性）。首版把它写成
+`ctx.when_all(tasks)`，单测与进程内回归网全绿——因为**替身自己造了一个同名方法**；
+在真实 sidecar 上第一次运行就 `AttributeError: '_RuntimeOrchestrationContext' object has no
+attribute 'when_all'`（2026-09-24 实测）。
+
+两处教训都写进了用例与替身：替身只替**数据与环境**，不替 API 形状；而「真实部署上跑一次」
+是这类错误唯一的出口——这也是 `tests/e2e/test_live_e2e.py` 补 E-06 的直接原因。
+
 ## 备选方案
 
 - **每波完成后回编排器重算下一批**（真自适应）。否决：计划每次重算都要解决「重放时计划变动」，
@@ -122,6 +162,11 @@ Dapr 终态一致」在 `completed` 下仍然成立。
   「flow → plan → 静态阶段」三级回落，画布区分平台节点并显示部分失败黄标；
 - `static` 固定三步链路（含其阶段活动、`/stages` 静态分支、默认
   `AGENT_ORCHESTRATION_MODE=static`）**行为不变**。
-- 已知缺口（诚实记录）：**没有累计 token 预算**（只有并发、步数与轮次上限）；
-  Dapr 不向工作流代码暴露重试的实际尝试次数，checkpoint 只记配置值；`doc/15` 未改
-  （其 line 76 的「LLM 分析、任务分解、自动选择编排模式」正是本 ADR 实现的形态）。
+- **真机验收（2026-09-24，宿主形态 + 真实 Dapr sidecar + 真实 PostgreSQL/Redis + 真实
+  `deepseek-flash`）**：`MACP_E2E_LIVE=1` 下 `test_live_e2e.py::test_live_dynamic_orchestration_shape_and_traces`
+  通过——`route=multi`、flow 为 `intent / plan / 5×worker / synthesize / validate`、
+  `tokens_used=531980`、报告 4505 字符落库、`/stages` 对每个节点都读得到轨迹（耗时 261s）；
+  静态链路在同一次会话里回归通过（三轮 90.3s / 报告 6029 字符）。
+- `doc/15` 未改（其 line 76 的「LLM 分析、任务分解、自动选择编排模式」正是本 ADR 实现的形态）。
+- 若继续往前做，仍待办的是：每波回编排器重算的自适应重编、HITL、共享黑板
+  （见 `doc/orchestration.md` §3.2）。

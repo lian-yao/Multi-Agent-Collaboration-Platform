@@ -137,6 +137,8 @@ erDiagram
 | `current_wave` | 动态 | 还差哪一波没跑完（运行时可见） |
 | `partial` / `failed_steps` / `skipped_steps` | 动态 | 部分完成的显式标记：终态可能仍是 `completed` |
 | `validation` | 动态 | 校验结论；`source=fallback` 表示校验器不可用（按通过处理） |
+| `tokens_used` / `token_budget` / `budget_exceeded` | 动态 | 累计 Token 用量（下限口径）、预算上限（0 = 不限制）与是否因预算提前收口 |
+| `plan[].attempts` / `plan[].tokens` | 动态 | 该子任务**实际**尝试次数（区别于 `retry` 配置值）与含重试的用量 |
 
 **`checkpoint` 只写摘要**：完整状态在 Dapr State Store 里（键见 §4），且**不作为恢复依据**——
 恢复由 Dapr 自己的编排历史保证。
@@ -481,13 +483,16 @@ Prompt 时需同步 roles.py 与 `BUILTIN_AGENT_SEED`，避免目录与 Prompt �
 | 键形状 | 写入方 | 载荷 |
 | --- | --- | --- |
 | `…:workflow:{workflow_id}:{stage}` | 静态链路的阶段活动 | 该阶段完成后的完整 `PipelineState` |
-| `…:workflow:{workflow_id}:dyn:r{round}:{node_id}` | 动态链路的节点活动（ADR-038） | 该节点的 `{step, status, content, previous, tool_calls, error}` |
+| `…:workflow:{workflow_id}:dyn:r{round}:{node_id}` | 动态链路的节点活动（ADR-038） | 该节点的 `{step, status, content, previous, tool_calls, error}`；子任务节点另带 `attempt`（本次第几次）/ `attempts`（一共几次）/ `tokens`（本次用量） |
 
 两条口径：
 
 1. **动态链路的键带轮次**：重编排的第二轮会有同名的 `s1`，不带轮次会把上一轮的轨迹覆盖掉；
 2. **`/stages` 只读这两类键**（`app/api/stage_trace.py`），不新增写入方、不改 Workflow 数据。
    状态被清理时接口如实返回「已清理」，不伪装成「还没来得及跑」。
+3. **动态节点载荷里的 `attempt` / `attempts` / `tokens` 只在子任务出现**：平台节点
+   （意图 / 编排 / 合成 / 校验）各是一次调用，没有重试语义；它们的用量进 checkpoint 的
+   `tokens_used`，但不单独落状态键字段。
 
 ### 4.1 记忆结构明细（角色 C 定义，2026-09-08）
 

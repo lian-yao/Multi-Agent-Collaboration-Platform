@@ -798,10 +798,23 @@ search-gateway 脚本显式接入代理，沙箱联网时只接内部网络并�
 `GraphCanvas.tsx` / `types/api.ts`，`AgentSettings` 增 5 个开关（并发 3 / 尝试 3 /
 超时 300s / 校验开 / 重编排 1 轮）。
 
-**验证边界**：`uv run pytest` → **1241 passed / 7 skipped**（新增/改写 90 余例：波次并发实测、
-部分失败、校验重编排一轮、旧计划容忍、动态 `/stages`，并修掉一条 ADR-037 之后就陈旧的
-e2e 断言）；`tests/e2e/test_pipeline_e2e.py` 新增**进程内跑完整新链路**的用例
-（API → Dapr 生成器 → 活动/子工作流 → checkpoint → `/stages`）；`frontend` 的
-`npm run build` 通过，`workspace-smoke` **241/241**（+12 条 ADR-038 断言：flow 优先、
-平台节点、单 Agent 形态、旧执行回落、部分失败黄标）。
-**未做**：真实部署（compose + 真实 Dapr/模型）下的动态链路端到端，与累计 token 预算。
+**同日补齐三件收尾**（都是原记录的"未做"）：
+
+- **实际重试次数**：重试改成子工作流里的显式循环（每次尝试一个持久化活动调用、退避走
+  `create_timer`），因此 `attempts` 记的是**真的用了几次**，不是配置值；
+- **累计 Token 预算**：`AGENT_TOKEN_BUDGET`（默认 0 = 不限制）；用尽即停止派发后续子任务、
+  不再重编排，但**照常交付**已完成的部分并写明缺口（checkpoint 的
+  `tokens_used` / `budget_exceeded` + 报告正文 + 画布黄标）；
+- **真实运行时端到端**：`tests/e2e/test_live_e2e.py` 新增 E-06（`MACP_E2E_LIVE=1`）。
+  实测（真实 Dapr + PostgreSQL + `deepseek-flash`）：`route=multi`、flow 为
+  `intent / plan / 5×worker / synthesize / validate`、`tokens_used=531980`、报告 4505 字符、
+  `/stages` 逐节点可取（261s）；同一次验证里静态链路 90.3s 回归通过。
+  **它第一次运行就抓到 `ctx.when_all(...)` 的 AttributeError**——`when_all` 是模块级函数，
+  而替身自造了一个同名方法，单测全绿、真机必崩（ADR-038 §8.3）。
+
+**验证边界**：`uv run pytest` → **1241 passed / 7 skipped**（跳过的 7 条是需要真实部署的
+live 用例，已用上面这次实测单独验收）；新增/改写 100 余例：波次并发实测、部分失败、
+校验重编排一轮、实际尝试次数、Token 预算收口、旧计划容忍、动态 `/stages`，并修掉一条
+ADR-037 之后就陈旧的 e2e 断言；`frontend` 的 `npm run build` 通过，
+`workspace-smoke` **244/244**（+15 条 ADR-038 断言：flow 优先、平台节点、单 Agent 形态、
+旧执行回落、部分失败与预算黄标）。

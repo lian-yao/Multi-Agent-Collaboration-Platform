@@ -120,8 +120,9 @@
 | `current_wave` | 还差哪一波没跑完（运行时可见）；全部有结果时为 `null` |
 | `partial` / `failed_steps` / `skipped_steps` | 存在失败/被跳过的子任务：终态可能仍是 `completed`，但结果是**部分的** |
 | `validation` | 校验结论 `{satisfied, defects[], missing[], source}`；`source=fallback` 表示校验器不可用（按通过处理） |
+| `tokens_used` / `token_budget` / `budget_exceeded` | 累计 Token 用量（**下限口径**：模型没回用量时按 0 计）、预算上限（0 = 不限制）与是否因预算提前收口。用量来自活动结果，不是可观测采样（ADR-038 §8.2） |
 | `flow[]` | 整条流程的节点清单：`{id, kind, label, role, depends_on, status, wave}`，`kind ∈ intent / plan / worker / synthesize / validate`。**画布优先读它** |
-| `plan[]` | 仍然**只装子任务**（`worker`），额外带该步的 `expected_output` / `retry` / `timeout_seconds` |
+| `plan[]` | 仍然**只装子任务**（`worker`），额外带该步的 `expected_output` / `retry`（配置） / `timeout_seconds` / `attempts`（**实际**尝试次数） / `tokens`（该步含重试的用量） |
 
 ### Agent
 
@@ -238,6 +239,13 @@ DAG → 波内并行执行 → 合成器汇总 → 校验器核对**。
 - **部分失败不会伪装成完整结果**：只要还有交付物，终态仍是 `completed`，但 checkpoint 的
   `partial=true` 且 `failed_steps` / `skipped_steps` 写明缺了什么，合成器也会在正文开头点名。
 - 校验不达标且还有轮次预算（`AGENT_MAX_PLAN_ROUNDS`，硬上限 1）时带缺陷清单重编排一轮。
+- **重试次数可配置、实际次数可审计**：计划里的 `retry` 是每个子任务允许的重试次数
+  （缺省 `AGENT_SUBTASK_MAX_ATTEMPTS`，默认 3 次尝试含首次）；checkpoint 的
+  `plan[].attempts` 记的是**实际**用了几次（例如「配了 2 次、第 2 次才成功」）。
+- **成本闸门**：`AGENT_TOKEN_BUDGET`（默认 0 = 不限制）是单次执行的累计 Token 上限；
+  用尽后不再派发剩余子任务、不再重编排，但**照常交付**已完成的部分，并在 checkpoint 的
+  `budget_exceeded` / `tokens_used` 与报告正文里写明缺口。用量是**下限口径**
+  （模型没回 usage 时按 0 计）。
 - 编排决策（要不要拆、并行几路）**不暴露给调用方**：这些参数是服务端配置，不是请求字段
   （ADR-019 §3 的教训）。
 

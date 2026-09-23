@@ -158,8 +158,11 @@ flowchart TB
   `AGENT_MAX_PARALLEL_WORKERS`（默认 3）：同波超过上限时按计划顺序切批，批间串行——
   闸门不会被绕过。
 - **重试**：每步按 `retry`（缺省 `AGENT_SUBTASK_MAX_ATTEMPTS`）由 Dapr 重试**整个步骤活动**；
-  重试耗尽后子工作流把异常收敛成 `failed` 业务结果返回，**不抛给父工作流**——否则
-  `when_all` 会在第一个分支失败时提前结束，同波其它分支的产出一起丢掉。
+  重试是**子工作流里的一层显式循环**（每次尝试都是一个持久化活动调用，退避走
+  `ctx.create_timer`）：Dapr 的重试策略不把「第几次」告诉工作流代码，而审计要的是
+  **实际**尝试次数。重试耗尽后子工作流把失败收敛成 `failed` 业务结果返回，**不抛给父工作流**
+  ——否则 `when_all` 会在第一个分支失败时提前结束，同波其它分支的产出一起丢掉。
+  checkpoint 的 `plan[].attempts` 记实际次数，`retry` 记配置值，两列并排看。
 - **失败**：该步记 `failed`，依赖它的步骤（含传递闭包）记 `skipped`，其余照常执行。
   只对**直接**依赖标 skipped 是不够的——`s3 → s2 → s1` 里 `s1` 失败时 `s3` 会一直停在
   `pending`，前端看起来像「还在排队」而不是「已经放弃」。
@@ -173,6 +176,12 @@ flowchart TB
 - **终态**：有交付物即 `completed`（`final_output`），否则 `failed`；存在失败/跳过的子任务时
   终态仍是 `completed`，但 `partial=true` 且 `failed_steps` / `skipped_steps` 写明缺了什么，
   失败与跳过原因合并进 `error`。单 Agent 直答路径的交付物就是那一步的产出（没有合成步骤）。
+- **成本闸门**：`AGENT_TOKEN_BUDGET`（默认 0 = 不限制）是单次执行的**累计 Token 上限**，
+  口径为 intake + 规划 + 子任务（含重试）+ 合成 + 校验之和（重编排时第一轮的量带到第二轮）。
+  用尽的处理是**收口而不是作废**：不再派发剩余子任务、不再开新一轮，但照常合成已完成的部分；
+  剩余步骤记 `skipped` 并写明「Token 预算已用尽」，checkpoint 记
+  `tokens_used` / `token_budget` / `budget_exceeded`。用量是**下限口径**
+  （模型没回 usage 时按 0 计），且只来自活动结果——控制流不能依赖可观测采样那种进程内数据。
 - **工具**：与静态链路同一套注册表与 ReAct 循环，观测标签用 `stage=dyn:{step_id}`、
   `role={角色}`——`stage` 用步骤 id 而不是阶段名，因为动态模式下一次执行可以有多个同角色步骤，
   按阶段名聚合会把它们混成一条。
@@ -211,6 +220,7 @@ AGENT_SUBTASK_MAX_ATTEMPTS=3          # 单步默认最大尝试次数（含首�
 AGENT_SUBTASK_TIMEOUT_SECONDS=300     # 单步模型调用超时
 AGENT_VALIDATION_ENABLED=true         # 合成后是否跑校验（关掉即直接交付）
 AGENT_MAX_PLAN_ROUNDS=1               # 校验不达标允许的重编排轮数（硬上限 1）
+AGENT_TOKEN_BUDGET=0                  # 单次执行累计 Token 上限；0 = 不限制（默认）
 
 # 方式二：单次请求覆盖（不改服务端配置）
 curl -X POST .../sessions/{id}/messages \
@@ -294,13 +304,13 @@ flowchart TB
 | `results` 合并语义 | `Annotated[dict, merge_results]` 按键合并——并行分支只返回自己那一步的增量 |
 | 结果聚合 | 合成器节点：冲突消解 + 去重 + 按约束成稿 + **失败子任务显式告知** |
 | 反思循环 | 校验节点 + **最多一轮**带缺陷重编排（`AGENT_MAX_PLAN_ROUNDS`，硬上限 1） |
+| 成本闸门 | 并发上限 + 步数上限 + 轮次上限 + **累计 Token 预算**（`AGENT_TOKEN_BUDGET`，用尽即收口并如实告知缺口） |
+| 重试可审计 | 子工作流显式循环重试，`plan[].attempts` 记**实际**尝试次数（不是配置值） |
 | 记忆接入 | 会话历史与长期偏好在 ADR-019/036 之后已进提示词；intake / 规划 / 步骤 / 合成共用同一份口径 |
 | 波次可视化 | 画布优先读 `checkpoint.flow`，平台节点与子任务分开画（视图本体沿用，只加 kind 与 `partial` 两种呈现） |
 
 ### 3.2 仍未做（各有前置条件）
 
-- **累计 token 预算**。本期只有并发、步数与轮次三种上限，没有「单次执行累计 token 超限即降级」。
-  要先在 `metrics` 采样上做一次按执行的汇总读数，否则「超预算」无从判定。
 - **每波回编排器重算下一批**（真自适应）。ADR-038 的选择是「一次出全 DAG、按波调度」，
   只在**校验不达标**这一个明确信号上重编排一轮；更频繁的重算要先解决
   「执行中改变计划如何与 Dapr 重放共存」。
