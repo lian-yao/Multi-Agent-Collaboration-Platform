@@ -2439,6 +2439,36 @@ Agent 的回答里写着「**本会话工具列表中不存在文件类工具**�
 - **`doc/15` 只加了两条**：模块 3 的工作区与出网边界、第五节的三层边界表；该文件是事实源，
   其余表述未动。
 
+**第十七轮（同日）：`web_search` 接火山引擎豆包搜索（按量付费 key）——本地形态搜不通的根因**。
+使用者反馈「`web_search` 老是失败」。查证结论：默认端点 `https://api.duckduckgo.com/` 在本机
+TCP 443 直接超时（原生 `curl` 20s 超时、工具 8s × 4 次重试才失败）；ADR-032 正是为这件事做的
+退路，但它只接在 **compose 形态**——`scripts/start_local.ps1` 既不起搜索网关、也没设
+`TOOL_SEARCH_ENDPOINT`，本地服务形态因此一直回落默认端点。改法见 ADR-037：新增
+`TOOL_SEARCH_PROVIDER=volcengine`（豆包搜索 Custom，POST + Bearer key），
+本地形态不再需要额外进程与内网白名单。
+
+| 证据 | 结果 |
+| --- | --- |
+| 豆包端点契约（真机） | `POST /search_api/web_search`，体 `{"Query","SearchType":"web","Count":N}` → 200 + `Result.WebResults[]`；中文查询同有结果；`Count` 生效；`SearchType=custom` → 10402 |
+| 工具层（真机，读 `.env`） | `WebSearchTool().invoke({"query":"多智能体协作平台","max_results":3})` → 3 条真实结果（标题 / 链接 / 摘要齐全），英文查询同样 |
+| 出网层 | 豆包是 POST，`app/security/egress.py` 新增 `http_post`——判定 / 钉扎 / 私网 / 重定向上限 / 体积上限与 GET 同一套；`scripts/egress_proxy.py` 补 `do_POST` |
+| 失败语义 | 缺 key / 401-403 / 上游业务错误码 → `retryable=False`（不再白等重试）；超时、429、5xx → 仍可重试 |
+
+单测：新增 `test_search_tool_volcengine.py`（15 例：解析 / Count / 错误分层 / 端点默认值）、
+`test_egress_post.py`（5 例：POST 透传、307 保留请求体、303 降级 GET、私网仍拦、禁改关键请求头）；
+`test_builtin_tools.py` 的 4 个 DuckDuckGo 用例**显式钉住 provider**——否则本机 `.env` 一旦开
+`volcengine`，注入的 `fetch_json` 会被绕过，单测就变成打真实网络。全量
+`pytest tests/unit tests/integration/test_api.py tests/integration/test_workspace_api.py`
+→ **1060 passed / 0 failed**。
+
+**同日追加：compose 形态一起切过去**。`deploy/compose.yaml` 的 backend 默认
+`TOOL_SEARCH_PROVIDER=volcengine`、`TOOL_SEARCH_API_KEY` 从 compose 同级 `.env`（`deploy/.env`）
+传入、`TOOL_SEARCH_ENDPOINT` 传空（＝按 provider 取默认）——于是带出一个必须处理的细节：
+**空串必须按「没给」处理**，否则 provider 默认端点会被空值覆盖掉（`app/tools/config.py`
+的 validator 同时看 `model_fields_set` 与 `strip()`；这条被 `test_blank_endpoint_falls_back_to_the_provider_default` 钉住，改错会立刻红）。
+ADR-032 的 `search-gateway` 保留为可选回退。代理侧补了 `do_POST`，并在 `test_egress_proxy.py`
+加了「POST 带着请求体与 `Authorization` 被原样转发」与「POST 打私网同样在代理侧被拦」两例。
+
 ### 4.17 运行期实时进度的两处连带缺陷：dynamic 不写 `current_step`、画布没有规划节点（2026-09-22，成员 D）
 
 **1. 怎么发现的**

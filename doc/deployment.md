@@ -336,6 +336,8 @@ npm run dev
 | `MCP_SERVER_URL` | `http` 传输时的 MCP Server 地址 |
 | `MCP_INCLUDE_REGISTERED_SERVERS` | 是否把登记并「发现」过的 MCP Server 工具并入 Agent 工具集与 `GET /api/v1/tools`；部署默认 `true`，代码默认 `false`（见 ADR-026） |
 | `TOOL_SEARCH_ENDPOINT` | 网页搜索端点。代码默认 DuckDuckGo Instant Answer，**一键部署默认指向同网络的 `search-gateway`**（`http://search-gateway:8800/search`，ADR-032）；要换回官方端点或自建网关用这个变量覆盖 |
+| `TOOL_SEARCH_PROVIDER` | 搜索出口实现：`duckduckgo`（DuckDuckGo / 网关契约）/ `volcengine`（火山引擎豆包搜索 Custom，POST + Bearer key，ADR-037）。**compose 与本地形态都默认 `volcengine`**；不写或写空 `TOOL_SEARCH_ENDPOINT` 时端点自动取 `https://open.feedcoopapi.com/search_api/web_search`。要切回网关：本项设 `duckduckgo` + 端点设 `http://search-gateway:8800/search` |
+| `TOOL_SEARCH_API_KEY` | `TOOL_SEARCH_PROVIDER=volcengine` 时的按量付费 API key。compose 形态从 **compose 同级 `.env`**（即 `deploy/.env`）传入，没配时 backend 会以空 key 启动、搜索时报明确配置错。只从环境 / `.env` 读（两者都已被 gitignore），**不进仓库、不进日志**；留空时工具直接报配置错，不发出无鉴权请求 |
 | `TOOL_SQL_DSN` | 只读 SQL 工具的 DSN，留空则用 `DATABASE_URL` |
 | `SANDBOX_BACKEND` | 代码执行沙箱后端：`docker`（默认）/ `denied` |
 | `SANDBOX_TIMEOUT_SECONDS` | 单次沙箱执行超时，默认 15 |

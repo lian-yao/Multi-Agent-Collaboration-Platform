@@ -52,10 +52,13 @@ services:
       # 工具集与 GET /api/v1/tools。代码默认关闭（免让工具目录依赖配置库），部署侧
       # 显式打开；要退回「只暴露平台内置工具」设 MCP_INCLUDE_REGISTERED_SERVERS=false。
       MCP_INCLUDE_REGISTERED_SERVERS: ${MCP_INCLUDE_REGISTERED_SERVERS:-true}
-      # Agent 的网页搜索出口（ADR-032）：默认走同网络的 search-gateway——平台默认的
-      # DuckDuckGo Instant Answer 在部分网络连不通，Agent 会一直搜不到资料。要换回
-      # 官方端点或自建网关，用 TOOL_SEARCH_ENDPOINT 覆盖。
-      TOOL_SEARCH_ENDPOINT: ${TOOL_SEARCH_ENDPOINT:-http://search-gateway:8800/search}
+      # Agent 的网页搜索出口（ADR-037）：默认火山引擎豆包搜索 Custom，按量付费 key 从
+      # compose 同级 `.env` 的 TOOL_SEARCH_API_KEY 传进来（**不要写进本文件**）。
+      # 端点留空＝按 provider 取代码默认；要回到同网络的 search-gateway（ADR-032）就设
+      # TOOL_SEARCH_PROVIDER=duckduckgo 并显式给 TOOL_SEARCH_ENDPOINT=http://search-gateway:8800/search。
+      TOOL_SEARCH_PROVIDER: ${TOOL_SEARCH_PROVIDER:-volcengine}
+      TOOL_SEARCH_API_KEY: ${TOOL_SEARCH_API_KEY:-}
+      TOOL_SEARCH_ENDPOINT: ${TOOL_SEARCH_ENDPOINT:-}
       # 工作区（ADR-033 阶段 1）：容器内根固定 /workspace，宿主目录由下面的卷挂载决定。
       # 阶段 1 只有只读档位；写档位与沙箱挂载在阶段 2。
       # **形态必须显式声明**（ADR-035）：代码默认是 `host`（宿主直跑，用户当场选文件夹），

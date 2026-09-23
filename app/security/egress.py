@@ -374,28 +374,126 @@ def http_get(
 ) -> HttpResponse:
     """按策略取一次 GET；重定向逐跳重校验。"""
 
+    return _send(
+        url,
+        method="GET",
+        body=None,
+        extra_headers=None,
+        purpose=purpose,
+        policy=policy,
+        timeout=timeout,
+        max_bytes=max_bytes,
+    )
+
+
+def http_post(
+    url: str,
+    *,
+    payload: dict[str, Any] | bytes,
+    headers: dict[str, str] | None = None,
+    purpose: str = "tool",
+    policy: EgressPolicy | None = None,
+    timeout: float | None = None,
+    max_bytes: int | None = None,
+) -> HttpResponse:
+    """按策略发一次 POST（默认 JSON），**走与 GET 完全相同的判定与钉扎**（ADR-037 §4）。
+
+    为什么出网层要开 POST：豆包搜索（`open.feedcoopapi.com/search_api/web_search`）是 POST +
+    自定义请求头。判定顺序、私网拦截、连接钉扎、重定向上限、响应体上限一个都不能少，
+    所以不另开一条"裸"通道，而是复用同一条路径。
+
+    `headers` 只用于鉴权这类附加头；`Host` / `User-Agent` / `Content-Length` 不允许覆盖——
+    前两个决定钉扎与反爬语义，后一个由 http.client 按实际字节数写。
+    """
+
+    if isinstance(payload, (bytes, bytearray)):
+        body = bytes(payload)
+        merged: dict[str, str] = {}
+    else:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        merged = {"Content-Type": "application/json"}
+    merged.update(headers or {})
+
+    return _send(
+        url,
+        method="POST",
+        body=body,
+        extra_headers=merged,
+        purpose=purpose,
+        policy=policy,
+        timeout=timeout,
+        max_bytes=max_bytes,
+    )
+
+
+_FORBIDDEN_EXTRA_HEADERS = frozenset({"host", "user-agent", "content-length"})
+
+
+def _build_headers(target: EgressTarget, extra: dict[str, str] | None) -> dict[str, str]:
+    """默认头 + 调用方附加头；附加头不得覆盖决定钉扎与长度语义的那几个。"""
+
+    headers = {
+        "Host": target.host_header,
+        "User-Agent": USER_AGENT,
+        "Accept-Encoding": "identity",
+    }
+    for key, value in (extra or {}).items():
+        if key.lower() in _FORBIDDEN_EXTRA_HEADERS:
+            raise EgressConfigError(f"禁止覆盖请求头：{key}")
+        headers[key] = value
+    return headers
+
+
+def _send(
+    url: str,
+    *,
+    method: str,
+    body: bytes | None,
+    extra_headers: dict[str, str] | None,
+    purpose: str,
+    policy: EgressPolicy | None,
+    timeout: float | None,
+    max_bytes: int | None,
+) -> HttpResponse:
+    """GET / POST 共用的发送循环：每一跳都重新判定，重定向上限照旧。"""
+
     resolved_policy = policy or get_egress_policy()
     settings = resolved_policy.settings
     limit = max_bytes or settings.max_response_bytes
     deadline = timeout or settings.timeout_seconds
 
     current = url
+    current_method, current_body, current_headers = method, body, extra_headers
     for _hop in range(settings.max_redirects + 1):
         target = resolved_policy.evaluate(current, purpose=purpose)
         if target.via_proxy:
-            status, headers, body, truncated = _request_via_proxy(
-                target, proxy=settings.proxy_url, timeout=deadline, max_bytes=limit
+            status, headers, payload, truncated = _request_via_proxy(
+                target,
+                proxy=settings.proxy_url,
+                timeout=deadline,
+                max_bytes=limit,
+                method=current_method,
+                body=current_body,
+                extra_headers=current_headers,
             )
         else:
-            status, headers, body, truncated = _request_once(
-                target, timeout=deadline, max_bytes=limit
+            status, headers, payload, truncated = _request_once(
+                target,
+                timeout=deadline,
+                max_bytes=limit,
+                method=current_method,
+                body=current_body,
+                extra_headers=current_headers,
             )
         location = headers.get("location")
         if status in {301, 302, 303, 307, 308} and location:
             current = urljoin(current, location)
+            # 标准语义：307/308 保留方法与请求体；301/302/303 把非 GET 降级成 GET 并丢掉请求体。
+            if status in {301, 302, 303} and current_method != "GET":
+                current_method, current_body, current_headers = "GET", None, None
             continue
         return HttpResponse(
-            url=current, status=status, headers=headers, body=body, truncated=truncated
+            url=current, status=status, headers=headers, body=payload, truncated=truncated
         )
     raise EgressDenied(
         "redirect_limit",
@@ -404,7 +502,13 @@ def http_get(
 
 
 def _request_once(
-    target: EgressTarget, *, timeout: float, max_bytes: int
+    target: EgressTarget,
+    *,
+    timeout: float,
+    max_bytes: int,
+    method: str = "GET",
+    body: bytes | None = None,
+    extra_headers: dict[str, str] | None = None,
 ) -> tuple[int, dict[str, str], bytes, bool]:
     address = target.addresses[0]
     if target.scheme == "https":
@@ -417,16 +521,9 @@ def _request_once(
         )
     else:
         connection = _PinnedHTTPConnection(target.host, address, target.port, timeout)
+    headers = _build_headers(target, extra_headers)
     try:
-        connection.request(
-            "GET",
-            target.path,
-            headers={
-                "Host": target.host_header,
-                "User-Agent": USER_AGENT,
-                "Accept-Encoding": "identity",
-            },
-        )
+        connection.request(method, target.path, body=body, headers=headers)
         response = connection.getresponse()
         raw = response.read(max_bytes + 1)
         headers = {key.lower(): value for key, value in response.getheaders()}
@@ -437,7 +534,14 @@ def _request_once(
 
 
 def _request_via_proxy(
-    target: EgressTarget, *, proxy: str, timeout: float, max_bytes: int
+    target: EgressTarget,
+    *,
+    proxy: str,
+    timeout: float,
+    max_bytes: int,
+    method: str = "GET",
+    body: bytes | None = None,
+    extra_headers: dict[str, str] | None = None,
 ) -> tuple[int, dict[str, str], bytes, bool]:
     """经代理取一次：HTTP 用绝对 URI，HTTPS 用 CONNECT 隧道。
 
@@ -468,13 +572,10 @@ def _request_via_proxy(
         else:
             request_target = target.url
         connection.request(
-            "GET",
+            method,
             request_target,
-            headers={
-                "Host": target.host_header,
-                "User-Agent": USER_AGENT,
-                "Accept-Encoding": "identity",
-            },
+            body=body,
+            headers=_build_headers(target, extra_headers),
         )
         response = connection.getresponse()
         raw = response.read(max_bytes + 1)
@@ -516,6 +617,7 @@ __all__ = [
     "fetch_json",
     "get_egress_policy",
     "http_get",
+    "http_post",
     "is_blocked_address",
     "parse_host_patterns",
     "parse_internal_hosts",
