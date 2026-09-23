@@ -1656,6 +1656,16 @@ check(
   "",
 );
 check(
+  "工作区：一个会话只绑定一个——文案说清「再登记就是改绑」，且改绑后回执点名旧绑定已解除",
+  workspacePanelSource.includes("一个会话只绑定一个工作区") &&
+    workspacePanelSource.includes("再登记就是改绑") &&
+    // 静默换掉旧绑定 = 让人以为两个目录都还挂着，而执行侧只可能用一个
+    /已解除/.test(workspacePanelSource) &&
+    // 按 id 判"是不是换了一条"，不按路径字符串（同一个目录有多种写法）
+    /previous\.id !== created\.id/.test(workspacePanelSource),
+  "",
+);
+check(
   "草稿态 → 会话建好时补登记：绑定失败不吞掉消息，但要说出来",
   /created && workspaceDraft[\s\S]{0,600}api\.createWorkspace\(\{[\s\S]{0,120}session_id: sessionId/.test(
     conversationSource,

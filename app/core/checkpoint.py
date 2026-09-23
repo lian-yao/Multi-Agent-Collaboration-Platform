@@ -457,12 +457,12 @@ class WorkspaceRecord(Base):
     )
 
     __table_args__ = (
-        Index("idx_workspaces_session", "session_id"),
-        # 去重范围是**会话内**，不是全局（2026-09-23 修正）：一个目录被多个项目共用是常态，
-        # 全局唯一会让第二个项目直接 409。要挡的是"同一个项目把同一个目录登记两遍"。
-        # 用「唯一索引」而不是 `UniqueConstraint`：迁移要靠 `CREATE UNIQUE INDEX IF NOT EXISTS`
-        # 幂等重建，两者用同一个名字才对得上（见 `_REGISTRY_INDEX_MIGRATIONS`）。
-        Index("ux_workspaces_session_path", "session_id", "path", unique=True),
+        # **一个会话只绑定一个工作区**（2026-09-23 修正之二）：执行侧按 `session_id` 取工作区只能
+        # 取一条，多条会让「界面上选了哪个」与「Agent 实际用哪个」不一致。再登记＝改绑。
+        # `session_id` 为 NULL 的"未绑定登记"不受限（PostgreSQL 唯一索引把 NULL 视为互不相同）。
+        # 用「唯一索引」而不是 `UniqueConstraint`：迁移靠 `CREATE UNIQUE INDEX IF NOT EXISTS`
+        # 幂等重建，两者同名才对得上（见 `_REGISTRY_INDEX_MIGRATIONS`）。
+        Index("ux_workspaces_session", "session_id", unique=True),
     )
 
 
@@ -2137,8 +2137,17 @@ _REGISTRY_INDEX_MIGRATIONS: tuple[str, ...] = (
     # 所以先 drop constraint（它会顺带删掉背后的索引）；新索引用 `CREATE UNIQUE INDEX
     # IF NOT EXISTS`，名字与 ORM 里的 `Index(..., unique=True)` 一致，重复执行无副作用。
     "ALTER TABLE workspaces DROP CONSTRAINT IF EXISTS ux_workspaces_path",
-    "CREATE UNIQUE INDEX IF NOT EXISTS ux_workspaces_session_path "
-    "ON workspaces (session_id, path)",
+    # 同年同日再修一次：去重范围收窄到「会话」本身——**一个会话只绑定一个工作区**，
+    # 再登记＝改绑。执行侧按 session_id 只能取一条，多条会让界面选择与实际执行不一致。
+    "DROP INDEX IF EXISTS ux_workspaces_session_path",
+    # 建唯一索引之前必须先把"一个会话绑了多条"的历史数据收敛掉，否则索引建不起来。
+    # 保留**最新**那条（那是使用者最近一次选择），删掉更早的登记；审批随工作区行级联删除。
+    "DELETE FROM workspaces older USING workspaces newer "
+    "WHERE older.session_id IS NOT NULL AND older.session_id = newer.session_id "
+    "AND (older.created_at, older.id) < (newer.created_at, newer.id)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_workspaces_session ON workspaces (session_id)",
+    # 唯一索引已经覆盖 session_id 的查找，原来的普通索引成了冗余（同一列两个索引）。
+    "DROP INDEX IF EXISTS idx_workspaces_session",
 )
 """索引 / 约束类迁移：**幂等**且按名重建，Python 侧是唯一的执行顺序来源。"""
 

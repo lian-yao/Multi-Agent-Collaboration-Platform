@@ -2202,6 +2202,51 @@ tests/integration/test_workspace_api.py` → **996 passed / 12 failed**（仍是
 - **真机语义**：A 登记 `D:\测试` → **201**，B 登记同一个文件夹 → **201**（改前是 409），
   A 再登记同一路径 → **409**。验证用的测试会话已删除（只留使用者原有的登记）。
 
+**第十一轮（同日）：修「无法准确绑定工作区」——一个会话只绑定一个工作区**。使用者反馈
+「无法准确绑定工作区」。先复现：同一会话先后登记 `D:\测试` 与 `C:\Users\zq\MacpWorkspace`，
+库里留下**两条**，而执行侧 `workspace_source(session_id)` 取的是 `rows[0]`——**最早那条
+`D:\测试`**，与界面上最后登记/选中的那个不一致。也就是说「界面选了哪个」与「Agent 实际用哪个」
+根本不是同一件事：界面的选中只改本地状态，从不参与执行侧的判定。
+
+根因不在界面，在模型：**一个会话可以挂多条登记**，而执行侧只能用一个，于是"用哪个"退化成
+"哪条先建的"。这也与使用者的原始要求不符——他要的是**一个**文件夹（「选一个文件夹……
+也只能在这个文件夹下面」）。所以把模型改成：**一个会话只绑定一个工作区，再登记＝改绑**。
+
+改动：
+
+- **模型**：`ux_workspaces_session_path (session_id, path)` → `ux_workspaces_session (session_id)`
+  唯一索引（`session_id` 为 NULL 的"未绑定登记"不受限——PostgreSQL 唯一索引视 NULL 互不相同）；
+- **迁移**：清掉前两版唯一结构（`DROP CONSTRAINT IF EXISTS ux_workspaces_path`、
+  `DROP INDEX IF EXISTS ux_workspaces_session_path`），**先按会话收敛历史数据**（同一会话多条时
+  保留 `created_at` 最新那条，即使用者最近一次选择；审批随工作区行级联删除），再
+  `CREATE UNIQUE INDEX IF NOT EXISTS ux_workspaces_session`，最后删掉被唯一索引取代的冗余索引
+  `idx_workspaces_session`；
+- **服务层**：`create_workspace` 带 `session_id` 时——同路径重复登记＝**幂等**（不重建那条登记，
+  免得丢掉它的待批审批；但档位跟随这次选择，不静默忽略使用者的动作），换路径＝**改绑**（旧绑定
+  在同一步解除，记 `workspace.rebound` 日志并带 `replaced_path`）；
+- **界面**：文案说清「一个会话只绑定一个工作区，再登记就是改绑」，改绑成功后回执点名
+  「原 <旧路径> 已解除」——**静默换掉等于让人以为两个目录都还挂着**；按 **id** 判"是不是换了一条"，
+  不比较路径字符串（同一个目录有多种写法）。
+
+验证：
+
+- 单元：`test_the_same_folder_can_be_registered_by_different_sessions`（跨会话共用仍放开）、
+  `test_registering_the_same_path_again_is_idempotent_but_keeps_the_new_mode`、
+  `test_registering_another_folder_rebinds_the_session`——最后一条直接断言
+  `workspace_source(session_id).root()` 与界面看到的那条绑定**一致**（这正是本轮修的缺陷本身）；
+- 迁移护栏：`test_migration_statements_are_idempotent` 扩到四类写法（补列 / 建唯一索引 /
+  `DROP ... IF EXISTS` / 收敛型 `DELETE`，最后一类显式点名而不是放宽成"什么都行"），新增
+  `test_migration_switches_workspace_uniqueness_to_one_per_session`，并**钉住顺序**：
+  收敛数据必须排在建唯一索引之前（顺序错了老库直接建不起来）；
+- 全量 `pytest tests/unit tests/integration/test_api.py tests/integration/test_workspace_api.py`
+  → **1001 passed / 12 failed**（仍是缺 `pypdfium2` 的 PDF 用例）；`npm run build` 通过；
+  `workspace-smoke` **229/229**（新增一条：文案与改绑回执）、`config-smoke` **85/85**；
+- **真库迁移**：重启后端后 `pg_indexes` 只剩 `workspaces_pkey` 与 `ux_workspaces_session`；
+  那个双绑定的测试会话被收敛成 1 条（保留最新）；
+- **真机语义与准确性**：同一会话登记 `D:\测试` 再改绑到 `C:\Users\zq\MacpWorkspace` → 两次都
+  201、该会话绑定数 **1**、同路径再登记**幂等**（同一条 id）；`workspace_source` 实际使用的路径
+  与界面看到的**完全一致**（修复前这里是最早那条 `D:\测试`）。测试会话已删除。
+
 **前端容器与服务**：`npm run build` 通过（bundle 441.52 kB，未过告警阈值）；
 `workspace-smoke` **210/210** 未受影响。
 - **`doc/15` 只加了两条**：模块 3 的工作区与出网边界、第五节的三层边界表；该文件是事实源，

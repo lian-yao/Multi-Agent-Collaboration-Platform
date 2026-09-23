@@ -506,9 +506,9 @@ export function WorkspaceBoundary({
           <div>
             <h3>工作区</h3>
             <p>
-              Agent 的文件业务限定在这里，而且按会话生效：选中的工作区绑定当前会话，
-              它的文件工具才会进这次执行的工具集。路径是工作区根之下的相对路径——
-              浏览器拿不到宿主路径，所以没有「选择本地文件夹」这一步。
+              Agent 的文件业务限定在这里，而且按会话生效：绑定的那个工作区，它的文件工具
+              才会进这次执行的工具集。<b>一个会话只绑定一个工作区</b>，再登记就是改绑
+              （旧绑定自动解除）。宿主形态下这里的路径就是本机那个文件夹。
             </p>
           </div>
         </div>
@@ -575,7 +575,7 @@ export function WorkspaceBoundary({
       <form className="cfg-form-grid" onSubmit={submit}>
         <Field
           label="登记路径"
-          hint="相对工作区根的路径，如 project/reports；留空 = 按会话自动建 sessions/<会话 id>/。不确定就点「浏览根目录」逐层选。"
+          hint="宿主形态下选本机文件夹（点「浏览根目录」逐层选）；容器形态下写根内相对路径，如 project/reports。留空 = 按会话自动建 sessions/<会话 id>/。再登记会替换本会话当前的绑定。"
         >
           <input
             value={path}
@@ -821,14 +821,22 @@ export function WorkspacePanel({
     }
     setBusy(true);
     try {
+      // 改绑前的绑定：登记成功后要如实告诉使用者"原来那个已经解除"——静默换掉等于让人
+      // 以为两个目录都还挂着，而执行侧只可能用一个。按 **id** 比较，不比较路径字符串：
+      // 同一个目录可能有多种写法，而 id 是权威的。
+      const previous = workspaces[0] ?? null;
       const created = await api.createWorkspace({
         session_id: sessionId,
         path: path || null,
         mode,
       });
+      const rebound =
+        previous && previous.id !== created.id
+          ? `（原 ${truncate(previous.path || "/（工作区根）", 40)} 已解除）`
+          : "";
       setNotice({
         tone: "ok",
-        text: `已登记并绑定本会话：${created.path || "/（工作区根）"}`,
+        text: `已登记并绑定本会话：${created.path || "/（工作区根）"}${rebound}`,
       });
       await reload(created.id);
     } catch (cause) {

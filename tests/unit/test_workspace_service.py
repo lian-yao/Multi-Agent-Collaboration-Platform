@@ -240,13 +240,45 @@ def test_the_same_folder_can_be_registered_by_different_sessions(store, settings
     assert service.get_workspace(second["id"], settings=settings)["mode"] == "read_only"
 
 
-def test_duplicate_path_within_one_session_is_rejected(store, settings):
-    """去重收窄到会话内：同一会话重复登记同一路径仍然拒绝（那是误操作，不是共用）。"""
+def test_registering_the_same_path_again_is_idempotent_but_keeps_the_new_mode(store, settings):
+    """同一会话 + 同一路径 = 幂等（不重建那条登记，审批不会因此丢），但档位跟随这次选择。"""
 
-    service.create_workspace(session_id="s-1", path="shared", settings=settings)
+    first = service.create_workspace(
+        session_id="s-1", path="shared", mode="read_only", settings=settings
+    )
 
-    with pytest.raises(WorkspaceExistsError):
-        service.create_workspace(session_id="s-1", path="shared", settings=settings)
+    again = service.create_workspace(
+        session_id="s-1", path="shared", mode="workspace_write", settings=settings
+    )
+
+    assert again["id"] == first["id"], "同路径重复登记不该换一条新行"
+    assert again["mode"] == "workspace_write", "档位是使用者这次明确选的，不能静默忽略"
+    assert len(service.list_workspaces(session_id="s-1", settings=settings)["items"]) == 1
+
+
+def test_registering_another_folder_rebinds_the_session(store, settings, tmp_path: Path):
+    """**一个会话只绑定一个工作区**：换文件夹＝改绑，旧绑定在同一步解除。
+
+    这条钉的是本轮修的缺陷本身：之前一个会话能留下多条登记，而执行侧只取最早那条，
+    于是"界面上选了哪个"与"Agent 实际用哪个"不一致。
+    """
+
+    service.create_workspace(session_id="s-1", path="first", settings=settings)
+    other = service.create_workspace(session_id="s-2", path="shared", settings=settings)
+
+    rebound = service.create_workspace(session_id="s-1", path="second", settings=settings)
+
+    rows = service.list_workspaces(session_id="s-1", settings=settings)["items"]
+    assert [row["path"] for row in rows] == ["second"]
+    assert rebound["id"] != other["id"]
+    # 别的会话不受影响
+    assert [row["path"] for row in service.list_workspaces(session_id="s-2", settings=settings)["items"]] == [
+        "shared"
+    ]
+    # **准确性**：执行侧拿到的就是那条唯一的绑定，与界面所见一致
+    source = service.workspace_source("s-1", settings=settings)
+    assert source is not None
+    assert source.root() == service.workspace_base(rebound, settings=settings)
 
 
 def test_workspace_write_can_be_created_or_lifted(store, settings, tmp_path: Path):

@@ -189,10 +189,30 @@ def create_workspace(
         except OSError as exc:
             raise WorkspacePathError(f"无法创建工作区目录：{stored or '/'}（{exc}）") from exc
 
-    # 去重限定在**本会话**内（2026-09-23 修正）：同一个文件夹可以被不同会话各自登记——
-    # 一个目录被多个项目共用是常态，全局查重会让第二个项目直接 409。
-    if checkpoint.find_workspace_by_path(stored, session_id=session_id) is not None:
-        raise WorkspaceExistsError(f"本会话已登记该路径：{stored or '/'}")
+    # **一个会话只绑定一个工作区**（2026-09-23 修正之二）：执行侧按 `session_id` 取工作区只能
+    # 取一条，多条会让"界面上选了哪个"与"Agent 实际用哪个"不一致（实测过）。所以：
+    # 同路径重复登记＝幂等（顺带把档位改成这次选的），换路径＝**改绑**（旧绑定在同一步解除）。
+    replaced: str | None = None
+    if session_id is not None:
+        for existing in checkpoint.list_workspaces(session_id=session_id):
+            if existing["path"] == stored:
+                if existing["mode"] != resolved_mode:
+                    # 同一个文件夹重新登记成不同档位：这是使用者的明确选择，不能静默忽略
+                    # （否则又是一次"界面选了、执行侧没变"）。
+                    checkpoint.update_workspace(
+                        existing["id"], mode=resolved_mode, updated_by=actor
+                    )
+                return _view(
+                    checkpoint.get_workspace(existing["id"]) or existing,
+                    settings=resolved_settings,
+                )
+        for existing in checkpoint.list_workspaces(session_id=session_id):
+            # 改绑：先解除旧绑定。审批行随工作区行级联删除（`approvals.workspace_id`）。
+            checkpoint.delete_workspace(existing["id"])
+            replaced = existing["path"]
+    elif checkpoint.find_workspace_by_path(stored) is not None:
+        # 未绑定会话的登记（`session_id` 省略）不参与"一个会话一个工作区"，仍按路径去重。
+        raise WorkspaceExistsError(f"该路径已登记：{stored or '/'}")
 
     row = checkpoint.create_workspace(
         workspace_id=uuid.uuid4(),
@@ -205,13 +225,14 @@ def create_workspace(
     )
     log_event(
         logger,
-        "workspace.created",
+        "workspace.rebound" if replaced is not None else "workspace.created",
         workspace_id=row["id"],
         session_id=session_id,
         path=stored,
         form=form,
         mode=resolved_mode,
         actor=actor,
+        replaced_path=replaced,
     )
     return _view(row, settings=resolved_settings)
 

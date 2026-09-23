@@ -73,35 +73,50 @@ def test_migration_covers_the_workspace_actor_column():
     )
 
 
+_IDEMPOTENT_MARKERS = (
+    "ADD COLUMN IF NOT EXISTS",
+    "CREATE UNIQUE INDEX IF NOT EXISTS",
+    "DROP CONSTRAINT IF EXISTS",
+    "DROP INDEX IF EXISTS",
+)
+
+_DEDUPE_PREFIX = "DELETE FROM workspaces older USING workspaces newer"
+
+
 def test_migration_statements_are_idempotent():
     """每条都必须**幂等**：启动时每次都跑，重复执行不能报错。
 
-    迁移现在有两类，各有各的幂等写法——补列用 `ADD COLUMN IF NOT EXISTS`，
-    重建索引用 `CREATE ... IF NOT EXISTS`（外加 `DROP CONSTRAINT IF EXISTS` 先清旧的）。
-    所以这里按类别断言，而不是要求所有语句都长成补列的样子。
+    迁移现在有三类写法——补列 / 建索引 / 清旧结构都用 `IF [NOT] EXISTS`，另有一条**收敛型
+    数据迁移**（把"同一会话里更早的登记"删掉）没有 `IF NOT EXISTS` 可写，但它第二次执行时
+    已经无可删的行，效果同样收敛。这里按类别点名，而不是放宽成"什么都行"。
     """
 
     statements = checkpoint._registry_migration_statements("postgresql")
 
     assert statements
     for statement in statements:
-        assert (
-            "ADD COLUMN IF NOT EXISTS" in statement
-            or "CREATE UNIQUE INDEX IF NOT EXISTS" in statement
-            or "DROP CONSTRAINT IF EXISTS" in statement
-        ), f"这条迁移不幂等：{statement}"
+        if any(marker in statement for marker in _IDEMPOTENT_MARKERS):
+            continue
+        assert statement.startswith(_DEDUPE_PREFIX), f"这条迁移既不幂等、也不是已点名的收敛型：{statement}"
 
 
-def test_migration_switches_workspace_uniqueness_to_per_session():
-    """2026-09-23：工作区去重从「全局唯一」收窄到「会话内唯一」——已有库要能升上来。"""
+def test_migration_switches_workspace_uniqueness_to_one_per_session():
+    """2026-09-23 两次修正的迁移都要在，且顺序正确——已有库必须能自己升上来。
+
+    历史：先是「全局唯一」→「会话内路径唯一」→「**一个会话一条**」。老库上可能残留前两者的
+    结构（一个是约束、一个是索引），都要清掉；而建「会话唯一」索引之前**必须**先按会话收敛
+    历史数据（保留最新那条），否则同一会话有多条绑定的库会直接建索引失败。
+    """
 
     statements = checkpoint._registry_migration_statements("postgresql")
+    per_session = "CREATE UNIQUE INDEX IF NOT EXISTS ux_workspaces_session ON workspaces (session_id)"
 
     assert "ALTER TABLE workspaces DROP CONSTRAINT IF EXISTS ux_workspaces_path" in statements
-    assert (
-        "CREATE UNIQUE INDEX IF NOT EXISTS ux_workspaces_session_path "
-        "ON workspaces (session_id, path)" in statements
-    )
+    assert "DROP INDEX IF EXISTS ux_workspaces_session_path" in statements
+    assert per_session in statements
+    dedupe = [item for item in statements if item.startswith(_DEDUPE_PREFIX)]
+    assert dedupe, "建「一个会话一条」的唯一索引之前必须先收敛历史数据"
+    assert statements.index(dedupe[0]) < statements.index(per_session), "收敛必须排在建索引之前"
 
 
 def test_migration_is_postgresql_only():
