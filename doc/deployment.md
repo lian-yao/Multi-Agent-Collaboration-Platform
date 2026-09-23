@@ -21,8 +21,13 @@ cd deploy
 ```
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/start_local.ps1 -Stop   # 停止
+cd deploy
+.\stop.ps1                        # 停止（默认停本地服务形态，含它起的依赖容器）
 ```
+
+停止与启动**对称**：`start.ps1` / `stop.ps1` 都不带参数就是本地服务形态，容器形态两边都加
+`-Container`（`stop.ps1 -Container` 走 `docker compose down`，与原来一致）。`start.ps1 -Stop`
+也保留，语义与 `stop.ps1` 相同（内部就是同一份实现，不会各修一半）。
 
 `deploy/start.ps1` 不带参数时**转调** `scripts/start_local.ps1`——入口收敛成一条，免得
 「默认形态」写在文档里、实际还得记另一个脚本名。这条脚本把四件事一次做完：起 Redis /

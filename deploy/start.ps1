@@ -42,12 +42,17 @@ if ((-not $Container) -and (-not (Test-Path $localScript))) {
 }
 
 if ($Stop) {
-    # 停止只对本地服务形态有意义：那三个进程是本仓库起的宿主进程；容器那套由 compose 管。
-    if ($Container) {
-        Write-Host "容器形态请用：docker compose stop（或 deploy\stop.ps1）" -ForegroundColor Yellow
-        exit 0
+    # 停止有专门的脚本（`stop.ps1`），这里只转调它——同一份实现，免得两处各修一半。
+    # `-Container` 一并透传：`.\start.ps1 -Stop -Container` 等价于 `.\stop.ps1 -Container`。
+    $stopScript = Join-Path $PSScriptRoot "stop.ps1"
+    if (-not (Test-Path $stopScript)) {
+        Write-Error "找不到 $stopScript"
     }
-    & $localScript -Stop
+    if ($Container) {
+        & $stopScript -Container
+    } else {
+        & $stopScript
+    }
     exit $LASTEXITCODE
 }
 

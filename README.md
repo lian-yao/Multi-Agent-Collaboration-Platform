@@ -98,7 +98,7 @@ cd deploy
 Redis / PostgreSQL / Jaeger 走容器。这样工作区才能让你**当场选一个本机文件夹**——Agent 在那个
 文件夹里读写，文件夹之外一律拒绝。
 
-停止用 `scripts/start_local.ps1 -Stop`（它由 `deploy/start.ps1` 转调，同一套状态）。
+停止用 `cd deploy; .\stop.ps1`（与启动对称：默认停本地服务形态，容器形态加 `-Container`）。
 
 容器形态仍然保留（适合部署与演示）：`cd deploy; .\start.ps1 -Container`，见
 [doc/deployment.md](doc/deployment.md)。两种形态**共用 3500/8000/5173**，不能同时跑——

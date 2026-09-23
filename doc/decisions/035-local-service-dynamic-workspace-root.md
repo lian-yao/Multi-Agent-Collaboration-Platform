@@ -102,6 +102,11 @@ trace 端点是 `localhost:4318`，见 `app/observability/config.py`）；Promet
 `backend:8000`、`search-gateway` 与 `egress-proxy` 只在 `internal` 网——宿主进程按设计碰不到
 它们，起了也没有数据，所以本形态不起，并在 `doc/deployment.md` 写明原因。
 
+**停止入口同样收敛**：`deploy/stop.ps1` 不带参数＝停本地服务形态（三个宿主进程 + 它起的
+依赖容器），`-Container`＝原来的 `docker compose down`。启动与停止必须对称——只有启动收敛、
+停止还散在 `start.ps1 -Stop` / `scripts/start_local.ps1 -Stop` 两处，早晚会有一处漏改。
+`start.ps1 -Stop` 保留但内部转调 `stop.ps1`，不另写一份实现。
+
 ## 备选方案
 
 - **桌面壳（Tauri / Electron）**：能拿原生对话框与真实路径。否决：为一件 HTTP 已经能做到的
