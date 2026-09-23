@@ -30,6 +30,7 @@ from app.workspace.errors import (
     WorkspaceDisabled,
     WorkspaceError,
     WorkspaceExistsError,
+    WorkspaceHostBrowseDisabled,
     WorkspaceNotFoundError,
     WorkspacePathError,
     WorkspaceQuotaExceeded,
@@ -38,6 +39,7 @@ from app.workspace.errors import (
 from app.workspace.paths import (
     normalize_relative,
     relative_to_root,
+    resolve_host_dir,
     resolve_in_workspace,
     resolve_root,
 )
@@ -75,8 +77,15 @@ def default_quota(settings: WorkspaceSettings) -> dict[str, int]:
     }
 
 
-def _validate_mode(mode: str | None) -> str:
-    resolved = (mode or "read_only").strip() or "read_only"
+def _validate_mode(mode: str | None, *, form: str = "container") -> str:
+    """档位取值校验。**默认档按形态分**（ADR-035 §4）：
+
+    宿主形态下用户是"当场选了一个文件夹并交出去"，默认就是可写；容器形态沿用 ADR-033
+    的默认只读。调用方传 `mode=None` 才走默认。
+    """
+
+    fallback = "workspace_write" if form == "host" else "read_only"
+    resolved = (mode or fallback).strip() or fallback
     if resolved not in ALL_MODES:
         raise WorkspaceError(f"mode 取值无效：{resolved}（可选 {' / '.join(ALL_MODES)}）")
     return resolved
@@ -90,6 +99,39 @@ def _relative_path(value: str | None) -> str:
     return "" if text == "." else text
 
 
+def _form(settings: WorkspaceSettings) -> str:
+    """当前形态（ADR-035）。取值非法时**显式报错**。
+
+    静默把非法值当成 `host` 会换掉整条路径语义（相对 ↔ 绝对），那是最难查的一类问题。
+    """
+
+    form = (settings.source or "").strip().lower()
+    if form not in ("host", "container"):
+        raise WorkspaceError(
+            f"WORKSPACE_SOURCE 取值非法：{settings.source}（只接受 host / container）"
+        )
+    return form
+
+
+def workspace_base(
+    row: dict[str, Any],
+    *,
+    settings: WorkspaceSettings | None = None,
+) -> Path:
+    """工作区的**生效根**（ADR-035）。
+
+    宿主形态取 `row["path"]` 的**绝对路径**；容器形态是 `WORKSPACE_ROOT` 加相对 `path`。
+    两种形态的 `path` 不通用：宿主形态拿到相对路径时 `resolve_host_dir()` 会拒绝，
+    容器形态拿到绝对路径时 `normalize_relative()` 会拒绝——两边都**显式失败**，
+    不静默按另一层含义解释。
+    """
+
+    resolved_settings = _resolved_settings(settings)
+    if _form(resolved_settings) == "host":
+        return resolve_host_dir(row["path"])
+    return resolve_in_workspace(resolved_settings.root, row["path"], expect="dir")
+
+
 # --------------------------------------------------------------------------- #
 # 登记与查询
 # --------------------------------------------------------------------------- #
@@ -99,41 +141,61 @@ def create_workspace(
     *,
     session_id: str | None = None,
     path: str | None = None,
-    mode: str | None = "read_only",
+    mode: str | None = None,
     name: str | None = None,
     actor: str | None = None,
     settings: WorkspaceSettings | None = None,
 ) -> dict[str, Any]:
     """登记一个工作区并返回视图（`doc/api.md` §5.19）。
 
-    目录不存在时由**平台**创建（`sessions/<id>/` 首次登记必然不存在）——这不是 Agent
-    行为，因此不受 `read_only` 档位限制。宿主绝对路径在这里是不可达的：`path` 只能是
-    相对路径，越界与符号链接逃逸由 `resolve_in_workspace()` 拒绝。
+    `path` 的含义按形态分（ADR-035）：**宿主形态**是用户当场选定的宿主绝对路径，
+    **容器形态**是根内的相对子路径。两种形态各自由 `resolve_host_dir()` /
+    `resolve_in_workspace()` 守卫，越界一律拒绝。
+
+    目录由谁创建也不同：宿主形态选的是**已有**文件夹（不存在就是选错了，报错而不是
+    悄悄造一个）；容器形态与宿主形态的默认路径由**平台**创建——那不是 Agent 行为，
+    因此不受 `read_only` 档位限制。
     """
 
     resolved_settings = _resolved_settings(settings)
     _ensure_enabled(resolved_settings)
-    root = resolve_root(resolved_settings.root)
-    resolved_mode = _validate_mode(mode)
+    form = _form(resolved_settings)
+    resolved_mode = _validate_mode(mode, form=form)
 
-    if path is None or not str(path).strip():
-        relative = f"{DEFAULT_SESSION_DIR}/{session_id}" if session_id else ""
+    chosen = (str(path).strip() if path is not None else "")
+    if form == "host":
+        if chosen:
+            stored = str(resolve_host_dir(chosen))
+        else:
+            # 没选文件夹时的兜底：家目录下的平台工作区，按会话分子目录（与容器形态同构）。
+            stored = str(
+                Path.home() / "MacpWorkspace" / DEFAULT_SESSION_DIR / (session_id or "shared")
+            )
+        target = Path(stored)
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise WorkspacePathError(f"无法创建工作区目录：{stored}（{exc}）") from exc
     else:
-        relative = _relative_path(path)
+        root = resolve_root(resolved_settings.root)
+        stored = (
+            _relative_path(chosen)
+            if chosen
+            else (f"{DEFAULT_SESSION_DIR}/{session_id}" if session_id else "")
+        )
+        target = resolve_in_workspace(root, stored)
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise WorkspacePathError(f"无法创建工作区目录：{stored or '/'}（{exc}）") from exc
 
-    target = resolve_in_workspace(root, relative)
-    try:
-        target.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        raise WorkspacePathError(f"无法创建工作区目录：{relative or '/'}（{exc}）") from exc
-
-    if checkpoint.find_workspace_by_path(relative) is not None:
-        raise WorkspaceExistsError(f"该路径已登记：{relative or '/'}")
+    if checkpoint.find_workspace_by_path(stored) is not None:
+        raise WorkspaceExistsError(f"该路径已登记：{stored or '/'}")
 
     row = checkpoint.create_workspace(
         workspace_id=uuid.uuid4(),
         session_id=session_id,
-        path=relative,
+        path=stored,
         mode=resolved_mode,
         name=name,
         quota=default_quota(resolved_settings),
@@ -144,7 +206,8 @@ def create_workspace(
         "workspace.created",
         workspace_id=row["id"],
         session_id=session_id,
-        path=relative,
+        path=stored,
+        form=form,
         mode=resolved_mode,
         actor=actor,
     )
@@ -255,7 +318,7 @@ def import_files(
             "浏览器会分片上传，请重试"
         )
 
-    base = resolve_in_workspace(resolved_settings.root, row["path"], expect="dir")
+    base = workspace_base(row, settings=resolved_settings)
 
     # 第一遍：**先算清楚会写什么**（路径合法、不撞目录、已存在且不覆盖的跳过），
     # 这样配额能在动盘之前一次判掉——导入是批量操作，写到一半才发现超配额最难收拾。
@@ -461,9 +524,7 @@ def workspace_tree(
     if row is None:
         raise WorkspaceNotFoundError(workspace_id)
 
-    base = resolve_in_workspace(
-        resolved_settings.root, row["path"], expect="dir"
-    )
+    base = workspace_base(row, settings=resolved_settings)
     # 以工作区为根再守一次：`path` 不能借符号链接跑回工作区根之外。
     target = resolve_in_workspace(base, path)
     if not target.is_dir():
@@ -518,6 +579,74 @@ def root_tree(
         "truncated": budget["truncated"],
         "limit": resolved_settings.tree_max_entries,
     }
+
+
+def host_tree(
+    *,
+    path: str | None = None,
+    depth: int = 1,
+    settings: WorkspaceSettings | None = None,
+) -> dict[str, Any]:
+    """列出**宿主**目录（ADR-035 §3）：用户"当场选一个本地文件夹"的那一步。
+
+    只读、**只列目录**：这里拿到的是"能选哪些文件夹"，文件正文仍然只经工作区工具与审批
+    链路（不让浏览接口变成第二个读文件的口子）。容器形态直接拒绝——见
+    `WorkspaceHostBrowseDisabled` 的说明。
+    """
+
+    resolved_settings = _resolved_settings(settings)
+    _ensure_enabled(resolved_settings)
+    if _form(resolved_settings) != "host":
+        raise WorkspaceHostBrowseDisabled(
+            "当前是容器形态（WORKSPACE_SOURCE=container）：容器里看不到宿主路径，"
+            "只能用工作区根内的目录浏览接口。要选本机文件夹请用宿主直跑（scripts/start_local.ps1）。"
+        )
+
+    start = (str(path).strip() if path is not None else "")
+    # 浏览**不设**「平台源码目录」那道闸：它是只读的，而对着仓库的父目录也要能走上去
+    # 才能挑到旁边的文件夹。那道禁令只在**选定**那一刻生效（`create_workspace`）。
+    target = resolve_host_dir(start, forbidden=None) if start else Path.home().resolve()
+    if not target.is_dir():  # pragma: no cover - resolve_host_dir 已经断言过
+        raise WorkspacePathError(f"不是目录：{target}")
+
+    resolved_depth = max(1, min(int(depth or 1), resolved_settings.tree_max_depth))
+    budget = {"left": resolved_settings.tree_max_entries, "truncated": False}
+    entries = [
+        {**entry, "path": str(target / entry["path"])}
+        for entry in _collect_entries(
+            target,
+            target,
+            depth=resolved_depth,
+            budget=budget,
+            trash=resolved_settings.delete_trash_dir,
+        )
+        if entry["kind"] == "dir"
+    ]
+    parent = target.parent
+    return {
+        "path": str(target),
+        "parent": None if parent == target else str(parent),
+        "home": str(Path.home().resolve()),
+        "roots": _host_roots(),
+        "depth": resolved_depth,
+        "entries": entries,
+        "truncated": budget["truncated"],
+        "limit": resolved_settings.tree_max_entries,
+    }
+
+
+def _host_roots() -> list[dict[str, str]]:
+    """盘符（Windows）/ 根（POSIX）入口，供选择器一层层往上走。"""
+
+    if os.name == "nt":  # pragma: no cover - 取决于运行平台
+        import string
+
+        return [
+            {"name": f"{letter}:", "path": f"{letter}:\\"}
+            for letter in string.ascii_uppercase
+            if Path(f"{letter}:\\").exists()
+        ]
+    return [{"name": "/", "path": "/"}]
 
 
 def _collect_entries(
@@ -631,7 +760,7 @@ class LocalWorkspaceSource:
         return str(self._row.get("mode") or "read_only")
 
     def root(self) -> Path:
-        return resolve_in_workspace(self._settings.root, self._row["path"], expect="dir")
+        return workspace_base(self._row, settings=self._settings)
 
     def list_entries(self, path: str = "", *, depth: int = 1) -> dict[str, Any]:
         base = self.root()
@@ -1013,7 +1142,7 @@ def workspace_source(
         return None
     row = rows[0]
     try:
-        resolve_in_workspace(resolved_settings.root, row["path"], expect="dir")
+        workspace_base(row, settings=resolved_settings)
     except (WorkspaceRootUnavailable, WorkspacePathError) as exc:
         log_event(
             logger,

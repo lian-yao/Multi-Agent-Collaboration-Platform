@@ -21,6 +21,7 @@ from app.workspace.errors import (
     WorkspaceDisabled,
     WorkspaceError,
     WorkspaceExistsError,
+    WorkspaceHostBrowseDisabled,
     WorkspaceNotFoundError,
     WorkspacePathError,
     WorkspaceQuotaExceeded,
@@ -177,7 +178,7 @@ def store(monkeypatch) -> FakeWorkspaceStore:
 
 @pytest.fixture
 def settings(tmp_path: Path) -> WorkspaceSettings:
-    return WorkspaceSettings(
+    return WorkspaceSettings(source="container",
         _env_file=None,
         root=str(tmp_path),
         # 读取上限要大于 read_max_chars，否则"截断"和"超限"两件事会撞在一起。
@@ -262,14 +263,14 @@ def test_escaping_path_is_rejected_at_registration(store, settings):
 
 
 def test_disabled_workspace_fails_loudly(store, tmp_path: Path):
-    disabled = WorkspaceSettings(_env_file=None, root=str(tmp_path), enabled=False)
+    disabled = WorkspaceSettings(source="container", _env_file=None, root=str(tmp_path), enabled=False)
 
     with pytest.raises(WorkspaceDisabled):
         service.create_workspace(session_id="s-1", settings=disabled)
 
 
 def test_missing_root_is_unavailable(store, tmp_path: Path):
-    broken = WorkspaceSettings(_env_file=None, root=str(tmp_path / "nope"))
+    broken = WorkspaceSettings(source="container", _env_file=None, root=str(tmp_path / "nope"))
 
     with pytest.raises(WorkspaceRootUnavailable):
         service.create_workspace(session_id="s-1", settings=broken)
@@ -575,7 +576,7 @@ def test_write_file_rejects_paths_outside_the_workspace(store, settings, tmp_pat
 
 
 def test_total_bytes_quota_is_enforced_with_current_usage(store, tmp_path: Path):
-    tight = WorkspaceSettings(
+    tight = WorkspaceSettings(source="container",
         _env_file=None, root=str(tmp_path), max_file_bytes=256, max_total_bytes=10
     )
     source = _writable(store, tight, tmp_path)
@@ -588,7 +589,7 @@ def test_total_bytes_quota_is_enforced_with_current_usage(store, tmp_path: Path)
 
 
 def test_entry_quota_counts_directories_too(store, tmp_path: Path):
-    tight = WorkspaceSettings(
+    tight = WorkspaceSettings(source="container",
         _env_file=None, root=str(tmp_path), max_file_bytes=256, max_entries=2
     )
     source = _writable(store, tight, tmp_path)
@@ -779,9 +780,9 @@ def test_workspace_source_needs_a_binding(store, settings):
 def test_workspace_source_is_fail_soft_when_the_root_disappears(store, tmp_path: Path):
     """根被挪走时返回 `None`（没有额外工具），而不是把流水线带崩（ADR-026 同一取向）。"""
 
-    settings = WorkspaceSettings(_env_file=None, root=str(tmp_path))
+    settings = WorkspaceSettings(source="container", _env_file=None, root=str(tmp_path))
     service.create_workspace(session_id="s-1", path="project", settings=settings)
-    broken = WorkspaceSettings(_env_file=None, root=str(tmp_path / "gone"))
+    broken = WorkspaceSettings(source="container", _env_file=None, root=str(tmp_path / "gone"))
 
     assert service.workspace_source("s-1", settings=broken) is None
 
@@ -854,7 +855,7 @@ def test_import_skips_existing_until_overwrite_is_set(store, settings, tmp_path:
 def test_import_checks_quota_before_writing_anything(store, tmp_path: Path):
     """批量导入是"先算清楚、再动盘"：不能写到一半才发现超配额。"""
 
-    tight = WorkspaceSettings(
+    tight = WorkspaceSettings(source="container",
         _env_file=None, root=str(tmp_path), max_file_bytes=256, max_total_bytes=8
     )
     view = service.create_workspace(session_id="s-1", path="project", settings=tight)
@@ -873,7 +874,7 @@ def test_import_checks_quota_before_writing_anything(store, tmp_path: Path):
 
 def test_import_rejects_too_many_files_and_oversized_ones(store, settings, tmp_path: Path):
     view = service.create_workspace(session_id="s-1", path="project", settings=settings)
-    tiny = WorkspaceSettings(
+    tiny = WorkspaceSettings(source="container",
         _env_file=None, root=str(tmp_path), import_max_files=1, import_max_file_bytes=4
     )
 
@@ -903,3 +904,135 @@ def test_import_rejects_bad_base64_and_missing_path(store, settings, tmp_path: P
         service.import_files(
             view["id"], [{"path": "  ", "content_base64": _b64("x")}], settings=settings
         )
+
+
+# --------------------------------------------------------------------------- #
+# 宿主形态（ADR-035）：授权单位是用户当场选的文件夹
+# --------------------------------------------------------------------------- #
+
+
+def _host_settings() -> WorkspaceSettings:
+    """宿主形态：`path` 是绝对路径，`root`（容器挂载点）不再参与解析。"""
+
+    return WorkspaceSettings(source="host", _env_file=None, root="/workspace")
+
+
+def test_host_form_binds_the_chosen_folder_and_defaults_to_write(store, tmp_path: Path):
+    chosen = tmp_path / "我的项目"
+    chosen.mkdir()
+    (chosen / "a.txt").write_text("hi", encoding="utf-8")
+    settings = _host_settings()
+
+    view = service.create_workspace(session_id="s-1", path=str(chosen), settings=settings)
+
+    assert view["path"] == str(chosen.resolve())
+    assert view["mode"] == "workspace_write", "选了文件夹交出去就是可写（ADR-035 §4）"
+    tree = service.workspace_tree(view["id"], settings=settings)
+    assert [entry["name"] for entry in tree["entries"]] == ["a.txt"]
+    # 工具侧的根走同一条解析
+    source = service.LocalWorkspaceSource(view, settings=settings)
+    assert source.root() == chosen.resolve()
+
+
+def test_host_form_writes_inside_the_chosen_folder(store, tmp_path: Path):
+    chosen = tmp_path / "工作区"
+    chosen.mkdir()
+    settings = _host_settings()
+    view = service.create_workspace(session_id="s-1", path=str(chosen), settings=settings)
+    source = service.LocalWorkspaceSource(view, settings=settings)
+
+    source.write_file("reports/2026.md", "内容")
+
+    assert (chosen / "reports" / "2026.md").read_text(encoding="utf-8") == "内容"
+    # 「只能在这个文件夹下面」：越界仍然被拒，与容器形态同一条守卫。
+    with pytest.raises(WorkspacePathError):
+        source.write_file("../outside.md", "x")
+
+
+@pytest.mark.parametrize("value", ["project", "sessions/s-1", "./x"])
+def test_host_form_rejects_relative_paths(store, tmp_path: Path, value):
+    """相对路径在宿主形态下没有意义——它是容器形态留下的登记，不能悄悄按另一层含义解释。"""
+
+    with pytest.raises(WorkspacePathError):
+        service.create_workspace(session_id="s-1", path=value, settings=_host_settings())
+
+
+def test_host_form_refuses_missing_or_non_directory(store, tmp_path: Path):
+    settings = _host_settings()
+    with pytest.raises(WorkspacePathError):
+        service.create_workspace(session_id="s-1", path=str(tmp_path / "nope"), settings=settings)
+    file_path = tmp_path / "a.txt"
+    file_path.write_text("x", encoding="utf-8")
+    with pytest.raises(WorkspacePathError):
+        service.create_workspace(session_id="s-1", path=str(file_path), settings=settings)
+
+
+def test_host_form_refuses_the_platform_source(store):
+    """沙箱对工作区可写，而仓库里是平台自己的源码（与 `pick_work_dir.ps1` 同一条禁令）。"""
+
+    from app.workspace.paths import PLATFORM_HOME
+
+    settings = _host_settings()
+    for candidate in (PLATFORM_HOME, PLATFORM_HOME / "app", PLATFORM_HOME.parent):
+        with pytest.raises(WorkspacePathError):
+            service.create_workspace(session_id="s-1", path=str(candidate), settings=settings)
+
+
+def test_host_form_default_path_lands_under_home(store, monkeypatch, tmp_path: Path):
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+    view = service.create_workspace(session_id="s-7", settings=_host_settings())
+
+    assert view["path"] == str(fake_home / "MacpWorkspace" / "sessions" / "s-7")
+    assert Path(view["path"]).is_dir()
+
+
+def test_host_tree_lists_directories_only(store, tmp_path: Path):
+    root = tmp_path / "root"
+    (root / "sub").mkdir(parents=True)
+    (root / "sub2").mkdir()
+    (root / "note.txt").write_text("x", encoding="utf-8")
+
+    tree = service.host_tree(path=str(root), settings=_host_settings())
+
+    assert tree["path"] == str(root.resolve())
+    assert tree["parent"] == str(tmp_path.resolve())
+    # 只列目录：这一步选的是文件夹，铺文件只会让人误点；条目路径是**绝对路径**，
+    # 选择器要按它继续往下走。
+    assert [entry["path"] for entry in tree["entries"]] == [
+        str(root.resolve() / "sub"),
+        str(root.resolve() / "sub2"),
+    ]
+    assert "note.txt" not in str(tree["entries"])
+    assert tree["roots"], "盘符 / 根入口要给出，否则没法换盘"
+
+
+def test_host_tree_starts_at_home_and_can_walk_up(store, monkeypatch, tmp_path: Path):
+    fake_home = tmp_path / "home"
+    (fake_home / "deep").mkdir(parents=True)
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: fake_home))
+
+    tree = service.host_tree(settings=_host_settings())
+    assert tree["path"] == str(fake_home.resolve())
+    assert [entry["name"] for entry in tree["entries"]] == ["deep"]
+
+    up = service.host_tree(path=tree["parent"] or str(fake_home), settings=_host_settings())
+    assert up["path"] == str(tmp_path.resolve())
+
+
+def test_host_tree_is_refused_in_container_form(store, settings):
+    """容器里看不到宿主路径——开了就是"能选、不能用"的假入口（ADR-035 §3）。"""
+
+    with pytest.raises(WorkspaceHostBrowseDisabled):
+        service.host_tree(settings=settings)
+
+
+def test_source_value_is_validated(store, tmp_path: Path):
+    broken = WorkspaceSettings(source="Host ", _env_file=None, root=str(tmp_path))
+    # 大小写与空白是被容忍的（部署脚本里手写环境变量很容易带空格）
+    service.create_workspace(session_id="s-1", path=str(tmp_path), settings=broken)
+    bad = WorkspaceSettings(source="somewhere", _env_file=None, root=str(tmp_path))
+    with pytest.raises(WorkspaceError):
+        service.create_workspace(session_id="s-2", path=str(tmp_path), settings=bad)

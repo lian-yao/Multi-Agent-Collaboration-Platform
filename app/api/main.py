@@ -33,6 +33,7 @@ from app.workspace import (
     WorkspaceDisabled,
     WorkspaceError,
     WorkspaceExistsError,
+    WorkspaceHostBrowseDisabled,
     WorkspaceNotFoundError,
     WorkspacePathError,
     WorkspaceQuotaExceeded,
@@ -1005,6 +1006,9 @@ def _workspace_api_error(exc: Exception) -> ApiError:
         return ApiError("WORKSPACE_EXISTS", str(exc), status.HTTP_409_CONFLICT)
     if isinstance(exc, WorkspaceDisabled):
         return ApiError("WORKSPACE_DISABLED", str(exc), 503)
+    if isinstance(exc, WorkspaceHostBrowseDisabled):
+        # 必须排在 WorkspaceRootUnavailable 之前：它是子类，否则会被吞成 ROOT_UNAVAILABLE。
+        return ApiError("WORKSPACE_HOST_BROWSE_DISABLED", str(exc), 503)
     if isinstance(exc, WorkspaceRootUnavailable):
         return ApiError("WORKSPACE_ROOT_UNAVAILABLE", str(exc), 503)
     if isinstance(exc, WorkspacePathError):
@@ -2323,6 +2327,30 @@ class WorkspaceRootTreeResponse(BaseModel):
     limit: int
 
 
+class HostTreeRoot(BaseModel):
+    """盘符 / 根入口（ADR-035 §3）。"""
+
+    name: str
+    path: str
+
+
+class HostTreeResponse(BaseModel):
+    """**宿主**目录列表（`doc/api.md` §5.19、ADR-035 §3）：用户当场选文件夹的那一步。
+
+    只读、只列目录——文件正文仍然只经工作区工具与审批链路，不让浏览接口变成第二个
+    读文件的口子。
+    """
+
+    path: str
+    parent: str | None = None
+    home: str
+    roots: list[HostTreeRoot]
+    depth: int
+    entries: list[WorkspaceEntry]
+    truncated: bool
+    limit: int
+
+
 class WorkspaceCreateRequest(BaseModel):
     """`POST /api/v1/workspaces` 的请求体（`doc/api.md` §5.19）。
 
@@ -2331,7 +2359,9 @@ class WorkspaceCreateRequest(BaseModel):
 
     session_id: str | None = None
     path: str | None = Field(default=None, max_length=500)
-    mode: Literal["read_only", "workspace_write"] = "read_only"
+    # `None` = 按形态取默认档（宿主形态可写、容器形态只读，ADR-035 §4）；
+    # 显式写死 "read_only" 会让宿主形态的"选了就能读写"变成一个需要多点一次开关的承诺。
+    mode: Literal["read_only", "workspace_write"] | None = None
     name: str | None = Field(default=None, max_length=100)
 
 
@@ -2443,6 +2473,21 @@ def read_workspace_tree(
         lambda: workspace_service.workspace_tree(workspace_id, path=path, depth=depth)
     )
     return WorkspaceTreeResponse.model_validate(data)
+
+
+@app.get("/api/v1/host/tree", response_model=HostTreeResponse)
+def read_host_tree(
+    path: str | None = Query(default=None, max_length=500),
+    depth: int = Query(default=1, ge=1, le=8),
+) -> HostTreeResponse:
+    """列出**宿主**目录（`doc/api.md` §5.19、ADR-035 §3）。
+
+    用户"当场选一个本地文件夹"的那一步：只读、只列目录，浏览器只经这条 HTTP 拿结果。
+    容器形态下返回 503 `WORKSPACE_HOST_BROWSE_DISABLED`——容器里看不到宿主路径。
+    """
+
+    data = _workspace_call(lambda: workspace_service.host_tree(path=path, depth=depth))
+    return HostTreeResponse.model_validate(data)
 
 
 @app.get("/api/v1/workspace-root/tree", response_model=WorkspaceRootTreeResponse)

@@ -58,6 +58,9 @@ services:
       TOOL_SEARCH_ENDPOINT: ${TOOL_SEARCH_ENDPOINT:-http://search-gateway:8800/search}
       # 工作区（ADR-033 阶段 1）：容器内根固定 /workspace，宿主目录由下面的卷挂载决定。
       # 阶段 1 只有只读档位；写档位与沙箱挂载在阶段 2。
+      # **形态必须显式声明**（ADR-035）：代码默认是 `host`（宿主直跑，用户当场选文件夹），
+      # 容器里不声明就会被当成宿主形态——`/workspace` 挂载与相对 `path` 立刻失效。
+      WORKSPACE_SOURCE: container
       WORKSPACE_ROOT: /workspace
       WORKSPACE_ENABLED: ${WORKSPACE_ENABLED:-true}
       # 沙箱容器建在**宿主机**守护进程上（见下面 volumes），所以沙箱镜像必须先存在于宿主机。

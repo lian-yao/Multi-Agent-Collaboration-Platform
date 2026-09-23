@@ -25,6 +25,13 @@ FORBIDDEN_CHARS = frozenset('<>:"|?*')
 MAX_PATH_CHARS = 500
 """与 `workspaces.path` 的列宽一致。"""
 
+PLATFORM_HOME = Path(__file__).resolve().parents[2]
+"""平台自身的源码/安装目录（`app/workspace/paths.py` 往上三级）。
+
+宿主形态下用户能选任意文件夹，但**不能选平台自己的源码**：沙箱对工作区可写，
+而这里放的是平台代码（与 `scripts/pick_work_dir.ps1` 的同一条禁令，ADR-035 §5）。
+"""
+
 _RESERVED_NAMES = frozenset(
     {"CON", "PRN", "AUX", "NUL"}
     | {f"COM{index}" for index in range(1, 10)}
@@ -106,6 +113,44 @@ def resolve_in_workspace(
     if expect == "dir" and not candidate.is_dir():
         raise WorkspacePathError(f"不是工作区里的目录：{value}")
     return candidate
+
+
+def resolve_host_dir(value: str | Path, *, forbidden: Path | None = PLATFORM_HOME) -> Path:
+    """解析用户**当场选定**的宿主文件夹（ADR-035）。
+
+    与 `normalize_relative()` 的取向相反，这里要的正是绝对路径：
+
+    - 必须是绝对路径——宿主形态下相对路径没有意义（容器形态另有 `resolve_in_workspace`）；
+    - 必须**已存在且是目录**：用户选的是一个已有文件夹，不是要新建的路径；
+    - 不能是平台自身的源码目录，也不是它的祖先或后代（见 `PLATFORM_HOME`）。
+
+    失败一律抛 `WorkspacePathError`，由接口层按 422 `WORKSPACE_PATH_REJECTED` 报出去。
+    """
+
+    raw = str(value or "").strip()
+    if not raw:
+        raise WorkspacePathError("没有选择文件夹")
+    candidate = Path(raw).expanduser()
+    if not candidate.is_absolute():
+        raise WorkspacePathError(
+            f"宿主形态需要绝对路径：{raw}（容器形态留下的相对登记不能直接沿用）"
+        )
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError as exc:
+        raise WorkspacePathError(f"目录不存在或不可访问：{raw}（{exc}）") from exc
+    if not resolved.is_dir():
+        raise WorkspacePathError(f"不是目录：{raw}")
+
+    if forbidden is not None:
+        home = Path(forbidden).resolve()
+        # 两个方向都拒：选源码的父目录会把源码一起授权；选它内部的子目录同理。
+        if resolved == home or resolved.is_relative_to(home) or home.is_relative_to(resolved):
+            raise WorkspacePathError(
+                f"不能把平台自身源码所在的位置（{home}）作为工作区"
+                "——沙箱对工作区可写，而那里放的是平台代码。请另选一个文件夹。"
+            )
+    return resolved
 
 
 def relative_to_root(root: str | Path, path: Path) -> str:

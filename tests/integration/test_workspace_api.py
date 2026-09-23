@@ -24,6 +24,7 @@ from app.workspace.errors import (
     WorkspaceDisabled,
     WorkspaceError,
     WorkspaceExistsError,
+    WorkspaceHostBrowseDisabled,
     WorkspaceNotFoundError,
     WorkspacePathError,
     WorkspaceQuotaExceeded,
@@ -73,6 +74,27 @@ TREE_VIEW = {
 }
 
 SESSION_ID = "3f2b8f4e-1b6d-4c3a-9c6f-2c1b7f7a1a11"
+
+HOST_TREE_VIEW = {
+    # 宿主目录浏览（ADR-035 §3）：只列目录，条目路径是**绝对路径**。
+    "path": "C:\\Users\\zq",
+    "parent": "C:\\Users",
+    "home": "C:\\Users\\zq",
+    "roots": [{"name": "C:", "path": "C:\\"}],
+    "depth": 1,
+    "entries": [
+        {
+            "name": "项目",
+            "path": "C:\\Users\\zq\\项目",
+            "kind": "dir",
+            "outside": False,
+            "size_bytes": None,
+            "modified_at": None,
+        }
+    ],
+    "truncated": False,
+    "limit": 500,
+}
 
 ROOT_TREE_VIEW = {
     # 与 TREE_VIEW 同形，**没有** workspace_id：根不是一条登记。
@@ -140,6 +162,7 @@ class WorkspaceApi:
         "get_workspace",
         "workspace_tree",
         "root_tree",
+        "host_tree",
         "import_files",
         "delete_workspace",
     )
@@ -171,6 +194,8 @@ class WorkspaceApi:
             return TREE_VIEW
         if name == "root_tree":
             return ROOT_TREE_VIEW
+        if name == "host_tree":
+            return HOST_TREE_VIEW
         if name == "import_files":
             return {
                 "workspace_id": "w-1",
@@ -349,6 +374,48 @@ def test_workspace_tree_is_still_reachable_alongside_the_root_route(api):
     assert stub["root_tree"].last_call[0] == ()
 
 
+def test_host_tree_returns_absolute_directories(api):
+    """宿主形态下用户"当场选文件夹"：出参是绝对路径与盘符入口（ADR-035 §3）。"""
+    stub, client = api
+
+    response = client.get("/api/v1/host/tree?path=C%3A%5CUsers%5Czq")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["path"] == "C:\\Users\\zq"
+    assert body["home"] == "C:\\Users\\zq"
+    assert [root["name"] for root in body["roots"]] == ["C:"]
+    # 只列目录——浏览接口不该变成第二个读文件的口子。
+    assert [entry["kind"] for entry in body["entries"]] == ["dir"]
+    assert stub["host_tree"].last_call[1] == {"path": "C:\\Users\\zq", "depth": 1}
+
+
+def test_host_tree_is_503_in_container_form(api):
+    """容器形态下必须显式拒绝：容器里看不到宿主路径，返回空列表会被读成"磁盘是空的"。"""
+    stub, client = api
+    stub.stub(
+        "host_tree",
+        WorkspaceHostBrowseDisabled("当前是容器形态：要选本机文件夹请用宿主直跑"),
+    )
+
+    response = client.get("/api/v1/host/tree")
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "WORKSPACE_HOST_BROWSE_DISABLED"
+
+
+def test_create_workspace_accepts_an_absolute_path_in_host_form(api):
+    stub, client = api
+
+    response = client.post(
+        "/api/v1/workspaces",
+        json={"session_id": SESSION_ID, "path": "D:\\项目\\2026"},
+    )
+
+    assert response.status_code == 201
+    assert stub["create_workspace"].last_call[1]["path"] == "D:\\项目\\2026"
+
+
 # --------------------------------------------------------------------------- #
 # 写
 # --------------------------------------------------------------------------- #
@@ -367,7 +434,9 @@ def test_create_workspace_returns_201(api):
     kwargs = stub["create_workspace"].last_call[1]
     assert kwargs["session_id"] == SESSION_ID
     assert kwargs["path"] == "project"
-    assert kwargs["mode"] == "read_only"
+    # 没显式传档位时**不替服务层决定**：默认档按形态取（宿主可写 / 容器只读，ADR-035 §4），
+    # 接口这一层写死 "read_only" 会让宿主形态的默认语义在路由层被悄悄改掉。
+    assert kwargs["mode"] is None
 
 
 def test_create_workspace_with_unknown_session_is_404(api, monkeypatch):

@@ -79,7 +79,7 @@ class _Store:
 @pytest.fixture
 def workspace_root(tmp_path: Path, monkeypatch) -> Path:
     _Store().install(monkeypatch)
-    settings = WorkspaceSettings(_env_file=None, root=str(tmp_path))
+    settings = WorkspaceSettings(source="container", _env_file=None, root=str(tmp_path))
     # 服务层读的是模块级函数；换掉它就不必依赖环境变量与 lru_cache 的清理顺序。
     monkeypatch.setattr(
         workspace_service, "get_workspace_settings", lambda: settings
@@ -139,7 +139,7 @@ def test_import_endpoint_rejects_escaping_paths_without_writing(workspace_root: 
 
 
 def test_import_endpoint_reports_quota_as_409(workspace_root: Path, monkeypatch):
-    settings = WorkspaceSettings(_env_file=None, root=str(workspace_root), max_total_bytes=4)
+    settings = WorkspaceSettings(source="container", _env_file=None, root=str(workspace_root), max_total_bytes=4)
     monkeypatch.setattr(workspace_service, "get_workspace_settings", lambda: settings)
     client = TestClient(api_main.app)
     workspace_id = client.post(

@@ -109,7 +109,7 @@ class StubRegistry:
 
 @pytest.fixture
 def settings() -> WorkspaceSettings:
-    return WorkspaceSettings(_env_file=None, read_max_chars=20)
+    return WorkspaceSettings(source="container", _env_file=None, read_max_chars=20)
 
 
 # --------------------------------------------------------------------------- #

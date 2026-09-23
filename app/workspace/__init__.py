@@ -17,19 +17,27 @@ from app.workspace.errors import (
     WorkspaceDisabled,
     WorkspaceError,
     WorkspaceExistsError,
+    WorkspaceHostBrowseDisabled,
     WorkspaceNotFoundError,
     WorkspacePathError,
     WorkspaceQuotaExceeded,
     WorkspaceRootUnavailable,
 )
-from app.workspace.paths import normalize_relative, resolve_in_workspace, resolve_root
+from app.workspace.paths import (
+    normalize_relative,
+    resolve_host_dir,
+    resolve_in_workspace,
+    resolve_root,
+)
 from app.workspace.service import (
     LocalWorkspaceSource,
     create_workspace,
     delete_workspace,
     get_workspace,
+    host_tree,
     list_workspaces,
     update_workspace,
+    workspace_base,
     workspace_source,
     workspace_tree,
 )
@@ -43,6 +51,7 @@ __all__ = [
     "WorkspaceDisabled",
     "WorkspaceError",
     "WorkspaceExistsError",
+    "WorkspaceHostBrowseDisabled",
     "WorkspaceNotFoundError",
     "WorkspacePathError",
     "WorkspaceQuotaExceeded",
@@ -53,12 +62,15 @@ __all__ = [
     "delete_workspace",
     "get_workspace",
     "get_workspace_settings",
+    "host_tree",
     "list_workspaces",
     "list_session_approvals",
     "normalize_relative",
+    "resolve_host_dir",
     "resolve_in_workspace",
     "resolve_root",
     "update_workspace",
     "workspace_source",
+    "workspace_base",
     "workspace_tree",
 ]

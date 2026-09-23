@@ -45,6 +45,16 @@ class WorkspaceDisabled(WorkspaceRootUnavailable):
     code = "WORKSPACE_DISABLED"
 
 
+class WorkspaceHostBrowseDisabled(WorkspaceRootUnavailable):
+    """容器形态下调「浏览宿主目录」的显式拒绝（ADR-035 §3）。
+
+    容器里 `/workspace` 之外的宿主路径既不存在也无从挂载——开了就是一个"能选、不能用"
+    的假入口，所以宁可 503 说清楚，也不返回一个空列表让人以为磁盘是空的。
+    """
+
+    code = "WORKSPACE_HOST_BROWSE_DISABLED"
+
+
 class WorkspaceQuotaExceeded(WorkspaceError):
     """超过配额（单文件 / 总字节 / 条目数）。错误信息里必须带当前用量与上限。"""
 

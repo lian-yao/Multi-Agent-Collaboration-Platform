@@ -112,7 +112,7 @@ def store(monkeypatch) -> FakeApprovalStore:
 
 @pytest.fixture
 def settings() -> WorkspaceSettings:
-    return WorkspaceSettings(_env_file=None, approval_ttl_seconds=900)
+    return WorkspaceSettings(source="container", _env_file=None, approval_ttl_seconds=900)
 
 
 WORKSPACE_ID = str(uuid.uuid4())

@@ -1,8 +1,12 @@
-"""工作区配置（ADR-033，环境变量前缀 `WORKSPACE_`）。
+"""工作区配置（ADR-033 / ADR-035，环境变量前缀 `WORKSPACE_`）。
 
-`root` 是**容器内**的挂载点（默认 `/workspace`）；宿主要挂到哪里由部署层的
-`WORKSPACE_HOST_ROOT` 决定，见 `doc/deployment.md`。宿主绝对路径不进数据库
-（`doc/data-model.md` §3.3），否则改一次部署根就会让历史行失效。
+两种形态由 `source` 决定，`path` 的含义随之改变（`doc/data-model.md` §3.3）：
+
+- **`host`（默认，ADR-035）**：后端直跑在宿主上，工作区根由用户**当场选定**，
+  `workspaces.path` 存宿主绝对路径；目录浏览可以看整机（只读、仅目录）。
+- **`container`（ADR-033 原样）**：`root` 是容器内的挂载点（默认 `/workspace`），
+  宿主要挂到哪里由部署层的 `WORKSPACE_HOST_ROOT` 决定，见 `doc/deployment.md`；
+  `workspaces.path` 存**相对**子目录，绝对路径不进库，改一次部署根才不至于让历史行失效。
 """
 
 from __future__ import annotations
@@ -24,8 +28,13 @@ class WorkspaceSettings(BaseSettings):
     enabled: bool = True
     """关闭后所有工作区接口返回 503 `WORKSPACE_DISABLED`，不静默降级成"没有工作区"。"""
 
+    source: str = "host"
+    """`host` / `container`（ADR-035）。默认 `host`——使用者的默认形态是**本地服务**；
+    容器部署由 `deploy/compose.yaml` 显式设成 `container`。取值非法时按 `host` 之外处理
+    会静默换语义，所以读取处一律显式校验。"""
+
     root: str = "/workspace"
-    """工作区根（容器内路径）。宿主机直跑后端时改成宿主目录的绝对路径。"""
+    """**容器形态**的工作区根（容器内路径）。宿主机直跑后端时改成宿主目录的绝对路径。"""
 
     max_file_bytes: int = 5 * 1024 * 1024
     """单文件大小上限。与附件侧同量级（`app/attachments/spec.py`），读超过即拒绝。"""
