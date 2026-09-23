@@ -21,6 +21,7 @@ from pydantic import Field
 from app.agents.roles import RoleId, get_role
 from app.attachments import AttachmentPayload
 from app.config import AgentSettings
+from app.memory import MessageRole, SessionMessage
 from app.orchestration.dynamic_graph import (
     DEFAULT_MAX_PLAN_STEPS,
     DynamicPipelineState,
@@ -271,6 +272,87 @@ def test_generate_plan_prompt_carries_the_task():
 
     assert "把这篇论文整理成综述" in model.calls[0][1].content
     assert "任务规划 Agent" in model.calls[0][0].content
+
+
+# ---------------------------------------------------------------------------------------
+# 会话历史注入（ADR-019 的读点在动态链路上补齐）
+#
+# 这条不是"锦上添花"：2026-09-23 实测反馈「同一个会话不记得我之前说过什么」，
+# 根因就是动态图的规划与步骤输入都只带当前任务——历史接进了固定三步、没接这里。
+# ---------------------------------------------------------------------------------------
+
+
+def _history(*pairs: tuple[MessageRole, str]) -> tuple[SessionMessage, ...]:
+    return tuple(
+        SessionMessage(session_id="s-1", role=role, content=content)
+        for role, content in pairs
+    )
+
+
+def test_generate_plan_prompt_carries_the_session_history():
+    model = ScriptedChatModel(replies=[plan_json(COLLECT_STEP)])
+    history = _history(
+        (MessageRole.USER, "生成冒泡代码python版本，放在文件夹里"),
+        (MessageRole.ASSISTANT, "已生成 bubble.py。"),
+        (MessageRole.USER, "重试"),
+    )
+
+    generate_plan("重试", model, history=history)
+
+    content = model.calls[0][1].content
+    assert "【会话历史（最近 3 条，供多轮上下文继承）】" in content
+    assert "user: 生成冒泡代码python版本，放在文件夹里" in content
+    assert "assistant: 已生成 bubble.py。" in content
+    # 历史在前、本轮任务在后：模型先看到上下文，再看到这一轮要干什么。
+    assert content.index("会话历史") < content.index("用户任务：\n重试")
+
+
+def test_generate_plan_prompt_is_unchanged_without_history():
+    """没有历史时提示词与接线前逐字一致——单轮的既有行为不受影响（ADR-019 口径）。"""
+
+    model = ScriptedChatModel(replies=[plan_json(COLLECT_STEP)])
+
+    generate_plan("只做这一件事", model)
+
+    assert model.calls[0][1].content == "用户任务：\n只做这一件事"
+
+
+def test_step_input_prefixes_session_history():
+    plan = parse_plan(plan_json(COLLECT_STEP, ANALYST_STEP, REPORTER_STEP))
+    results = {
+        "s1": StepOutcome(
+            step_id="s1",
+            role=RoleId.COLLECTOR,
+            instruction="收集信息",
+            status=PlanStepStatus.COMPLETED,
+            content="收集结果",
+        )
+    }
+    history = _history((MessageRole.USER, "第一轮的要求"))
+
+    text = step_input("继续", plan.steps[1], results, history)
+
+    assert text.startswith("【会话历史（最近 1 条，供多轮上下文继承）】")
+    assert "user: 第一轮的要求" in text
+    assert "用户任务：\n继续" in text
+    assert "【s1 · 信息收集 Agent】" in text
+    # 不带历史时逐字不变
+    assert "会话历史" not in step_input("继续", plan.steps[1], results)
+
+
+def test_run_plan_step_passes_history_into_the_prompt():
+    plan = parse_plan(plan_json(COLLECT_STEP))
+    model = ScriptedChatModel(replies=["产出"])
+
+    run_plan_step(
+        plan.steps[0],
+        "重试",
+        {},
+        model,
+        history=_history((MessageRole.USER, "上一轮：写冒泡排序")),
+    )
+
+    assert "上一轮：写冒泡排序" in model.calls[0][1].content
 
 
 # --------------------------------------------------------------------------------------

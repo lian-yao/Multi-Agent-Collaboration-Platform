@@ -51,7 +51,7 @@ from app.orchestration.dynamic_graph import (
 from app.orchestration.llm import build_chat_model
 from app.orchestration.pipeline import PipelineStatus
 from app.orchestration.tools import ToolCaller, default_tool_registry
-from app.workflows.pipeline import finalize_activity
+from app.workflows.pipeline import finalize_activity, session_history
 
 DYNAMIC_WORKFLOW_NAME = "agent_dynamic"
 DYNAMIC_SUBTASK_WORKFLOW_NAME = "agent_dynamic_subtask"
@@ -118,11 +118,14 @@ def dynamic_plan_activity(
         plan = fallback_plan("演练模式：使用确定性假模型，直接采用固定三步计划。")
     else:
         settings = _planner_settings()
+        # 规划也要看得到上一轮：用户只回「重试」时，没有历史连"重试什么"都判断不了。
+        history = session_history(task.get("session_id"), task.get("agent_run_id"))
         plan = generate_plan(
             task["task"],
             build_chat_model(settings),
             resolve_max_plan_steps(settings),
             workflow_id=workflow_id,
+            history=history,
         )
     return {"workflow_id": workflow_id, "plan": plan.model_dump(mode="json")}
 
@@ -168,6 +171,7 @@ def dynamic_step_activity(
             caller,
             workflow_id,
             attachments,
+            session_history(task.get("session_id"), task.get("agent_run_id")),
         )
     return {"workflow_id": workflow_id, "outcome": outcome.model_dump(mode="json")}
 

@@ -35,6 +35,7 @@ from app.memory import SessionMessage
 from app.observability.instrumentation import observed_stage
 from app.observability.logging import get_logger, log_event
 from app.orchestration.llm import build_chat_model
+from app.orchestration.context import conversation_block
 from app.orchestration.pipeline import (
     PIPELINE_STEPS,
     PipelineStage,
@@ -62,10 +63,9 @@ PIPELINE_ROLE_ASSIGNMENT: dict[PipelineStage, RoleId] = {
 # 单个角色节点内允许的「请求工具 → 回填观察」轮次上限，避免模型陷入无限循环。
 TOOL_CALL_MAX_ITERATIONS = 4
 
-# 注入提示词的会话历史条数上限：最近 N 条（不含本次执行自己的消息）。
-# 会话记忆是短期上下文，条数上限同时约束提示词长度；读取方见
-# `app/workflows/pipeline.py::_session_history`，接线口径见 ADR-019。
-CONVERSATION_CONTEXT_LIMIT = 10
+# 注入提示词的会话历史条数上限与渲染都在 `app/orchestration/context.py`：**两条编排
+# （固定三步 / 动态）共用一份**，避免「静态记得上一轮、动态不记得」这种只有用户能
+# 发现的差异（2026-09-23 实测反馈）。读取方见 `app/workflows/pipeline.py::session_history`。
 
 # 阶段输出为空时的兜底（F-07，2026-09-20）：真实 API 模型在工具回合后可能只回空
 # content（deepseek-flash 实测），阶段仍记 completed，下游于是拿到空上游内容、
@@ -136,20 +136,6 @@ def _content_text(content: str | list[Any]) -> str:
     return "\n".join(parts).strip()
 
 
-def _conversation_block(history: Sequence[SessionMessage]) -> str:
-    """把会话历史渲染成提示词前缀；无有效内容时返回空串（不加空段）。"""
-
-    lines = [
-        f"{message.role.value}: {message.content.strip()}"
-        for message in history
-        if message.content and message.content.strip()
-    ]
-    if not lines:
-        return ""
-    header = f"【会话历史（最近 {len(lines)} 条，供多轮上下文继承）】"
-    return "\n".join([header, *lines, ""])
-
-
 def _role_input(
     role: RoleId,
     task: str,
@@ -162,7 +148,7 @@ def _role_input(
     两者前面都会加上最近若干轮的历史（F-06，接线口径见 ADR-019）。
     """
 
-    prefix = _conversation_block(history)
+    prefix = conversation_block(history)
     if role is RoleId.COLLECTOR:
         return f"{prefix}用户任务：\n{task}"
     if previous is None or not isinstance(previous.get("content"), str):

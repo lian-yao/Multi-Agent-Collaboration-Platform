@@ -48,11 +48,8 @@ from app.orchestration.pipeline import (
 )
 from app.memory import MessageRole, MessageStatus, SessionMessage
 from app.memory.runtime import conversation_memory
-from app.orchestration.pipeline_graph import (
-    CONVERSATION_CONTEXT_LIMIT,
-    role_for_stage,
-    run_role_stage,
-)
+from app.orchestration.context import CONVERSATION_CONTEXT_LIMIT
+from app.orchestration.pipeline_graph import role_for_stage, run_role_stage
 from app.orchestration.tools import (
     ToolRegistry,
     default_tool_registry,
@@ -202,17 +199,17 @@ def advance_pipeline_stage(
             tool_registry=registry,
             tool_scope=workflow_run_id or workflow_id or run_id,
             workflow_id=workflow_id,
-            history=_session_history(session_id, agent_run_id),
+            history=session_history(session_id, agent_run_id),
             attachments=attachments,
         )
     updated = complete_step(state, stage, result)
     return {**build_step_result(updated), "result": result}
 
 
-def _session_history(
+def session_history(
     session_id: str | None,
     agent_run_id: str | None,
-    *,
+    *, 
     limit: int = CONVERSATION_CONTEXT_LIMIT,
 ) -> tuple[SessionMessage, ...]:
     """读会话记忆里最近 `limit` 条消息，剔除本次执行自己的消息。

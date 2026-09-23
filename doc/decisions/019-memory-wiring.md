@@ -60,3 +60,38 @@
 - 测试基线：`tests/unit/conftest.py`、`tests/integration/conftest.py`、`tests/e2e/conftest.py`
   都注入会话记忆内存替身，用例不依赖真实 Redis，也不会把测试数据写进开发环境。
 - 对外契约不变：`doc/api.md` 的请求/响应字段与状态码不变，受理消息只是多了一个内部写缓存动作。
+
+## 修订（2026-09-23）：动态编排漏接会话记忆
+
+**问题（使用者实测反馈）**：「同一个会话不记得我之前说过什么」。查证：会话记忆**写入正常**
+（Redis 里能看到该会话每一轮的用户与助手消息），是**回注**没到位——而当时的接线只覆盖了
+固定三步链路。
+
+根因：本文的读点写在 `app/orchestration/pipeline_graph.py`（`_conversation_block` →
+`_role_input`）与 `app/workflows/pipeline.py::_session_history`，即**静态三步**那条；
+后来新增的动态编排（ADR-019 的档 2，`dynamic_graph.py`）两个入口都只给当前任务——
+规划是 `HumanMessage(content=f"用户任务：\n{task}")`、每步是 `parts = [f"用户任务：\n{task}"]`，
+从没带过历史。而前端默认编排模式就是 `dynamic`（`App.tsx`），所以使用者日常走的那条
+恰好是没接的那条。同一条记忆里，助手对「重试我要你写的代码」回答「本会话没有其他消息」，
+即模型端确实没看到历史。
+
+修复（**两条编排共用一份实现，避免再次分叉**）：
+
+- 新增 `app/orchestration/context.py`：`CONVERSATION_CONTEXT_LIMIT` 与
+  `conversation_block()` 从 `pipeline_graph.py` 提出来，两条链路共用；
+- `app/workflows/pipeline.py::_session_history` 改公开名 `session_history`（读点不变：
+  最近 N 条、剔除本轮 `agent_run_id`），动态链路直接复用；
+- `dynamic_graph.generate_plan()` / `step_input()` / `run_plan_step()` 增加 `history` 入口，
+  历史放在提示词**最前面**（与静态链路同一形态）；
+- `workflows/dynamic.py` 的 `dynamic_plan_activity` / `dynamic_step_activity` 按
+  `session_id` + `agent_run_id` 读记忆并透传（`agent_dynamic_workflow` 本来就把这两个字段
+  放进了 task，缺的只是有人读）。
+
+**规划节点也要历史**：这不只是"步骤好看一点"——用户只回「重试」两个字时，规划模型没有历史
+就连"重试什么"都无法判断，只能产出一份泛泛的计划。
+
+验证：`tests/unit/test_dynamic_pipeline.py` 新增 4 例（规划提示词携带历史且历史在任务之前、
+**无历史时提示词逐字不变**、步骤输入带历史前缀、`run_plan_step` 透传），
+`tests/unit/test_workflow_dynamic.py` 新增 2 例（规划活动与步骤活动确实读到了会话记忆，
+注入内存替身断言内容）。全量 `pytest tests/unit tests/integration/test_workspace_api.py`
+→ **961 passed / 12 failed**（12 条是缺 `pypdfium2` 的既有 PDF 用例，与本修订无关）。

@@ -150,6 +150,97 @@ def test_step_activity_absent_results_are_tolerated():
     assert result["outcome"]["step_id"] == "s1"
 
 
+def test_plan_activity_feeds_session_history_into_the_planner(monkeypatch):
+    """规划活动必须带上会话历史（ADR-019 的读点在动态链路上补齐）。
+
+    2026-09-23 实测反馈「同一个会话不记得我之前说过什么」：动态图规划时只给了当前
+    任务，用户只回「重试」时连要重试什么都判断不了。这条钉住活动层的接线。
+    """
+
+    from app.memory import MessageRole, SessionMessage
+    from app.memory.runtime import conversation_memory
+    import app.workflows.dynamic as dynamic_module
+
+    memory = conversation_memory()
+    memory.append_message(
+        "session-1",
+        SessionMessage(
+            session_id="session-1",
+            role=MessageRole.USER,
+            content="生成冒泡代码python版本",
+            agent_run_id="run-0",
+        ),
+    )
+    memory.append_message(
+        "session-1",
+        SessionMessage(
+            session_id="session-1",
+            role=MessageRole.ASSISTANT,
+            content="已生成 bubble.py",
+            agent_run_id="run-0",
+        ),
+    )
+    captured: dict[str, Any] = {}
+
+    def fake_generate_plan(task, llm, max_steps, **kwargs):
+        captured["task"] = task
+        captured["history"] = kwargs.get("history")
+        return fallback_plan("测试替身")
+
+    monkeypatch.setattr(dynamic_module, "generate_plan", fake_generate_plan)
+    monkeypatch.setattr(dynamic_module, "build_chat_model", lambda settings: object())
+
+    dynamic_plan_activity(_ActivityContext(), {"task": _task(use_fake_model=False)})
+
+    assert captured["task"] == "演示任务"
+    assert [message.content for message in captured["history"]] == [
+        "生成冒泡代码python版本",
+        "已生成 bubble.py",
+    ], "规划模型要能看到上一轮，不只是当前任务"
+
+
+def test_step_activity_feeds_session_history_into_the_step(monkeypatch):
+    """步骤活动同样要带历史——否则「重试」这一步拿不到上一轮的产物。"""
+
+    from app.memory import MessageRole, SessionMessage
+    from app.memory.runtime import conversation_memory
+    import app.workflows.dynamic as dynamic_module
+
+    conversation_memory().append_message(
+        "session-1",
+        SessionMessage(
+            session_id="session-1",
+            role=MessageRole.USER,
+            content="上一轮：写冒泡排序",
+            agent_run_id="run-0",
+        ),
+    )
+    captured: dict[str, Any] = {}
+
+    def fake_run_plan_step(step, task, results, llm, caller, workflow_id, attachments, history=()):
+        captured["task"] = task
+        captured["history"] = history
+        return StepOutcome(
+            step_id=step.id,
+            role=step.role,
+            instruction=step.instruction,
+            status=PlanStepStatus.COMPLETED,
+            content="ok",
+        )
+
+    monkeypatch.setattr(dynamic_module, "run_plan_step", fake_run_plan_step)
+    monkeypatch.setattr(dynamic_module, "build_chat_model", lambda settings: object())
+    monkeypatch.setattr(dynamic_module, "default_tool_registry", lambda: None)
+
+    dynamic_step_activity(
+        _ActivityContext(),
+        {"task": _task(use_fake_model=False), "step": THREE_STEPS[0], "results": {}},
+    )
+
+    assert captured["task"] == "演示任务"
+    assert [message.content for message in captured["history"]] == ["上一轮：写冒泡排序"]
+
+
 # --------------------------------------------------------------------------------------
 # 父工作流
 # --------------------------------------------------------------------------------------

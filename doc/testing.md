@@ -2067,6 +2067,27 @@ backend / dapr-sidecar / frontend）→ 本地 sidecar 与后端（绑 127.0.0.1
 `path` 不通用，切形态会让旧登记解析失败并**显式报错**。宿主形态只绑 `127.0.0.1`，是单人单机
 前提；多用户或公网部署必须回到容器形态。
 
+**第七轮（同日）：动态编排漏接会话记忆（使用者实测反馈）**。反馈原话是「这个项目的会话记忆
+有问题，同一个会话不记得我之前说过什么」。查证结论：**写入正常、回注缺失**——该会话在 Redis
+里每一轮（含用户最初的需求与后续「重试」）都在；而助手在同一会话内答「当前会话中没有任何你
+此前要求我编写代码的记录」，说明模型端没看到历史。取证路径：Redis `lrange` 出该会话 6 条记忆；
+该会话 3 次 workflow 全部 `has_plan = t`（走动态编排）；前端默认 `mode = "dynamic"`；
+而 ADR-019 的读点只接在固定三步（`pipeline_graph._conversation_block` /
+`workflows.pipeline._session_history`），动态图的两个入口都只给当前任务。
+
+修复：`app/orchestration/context.py` 收拢 `CONVERSATION_CONTEXT_LIMIT` 与
+`conversation_block()`（两条编排共用一份，避免再次分叉）；`_session_history` 提为公开的
+`session_history` 供动态链路复用；`dynamic_graph` 的 `generate_plan` / `step_input` /
+`run_plan_step` 增加 `history` 入口并把历史放在提示词最前面；两个动态活动按
+`session_id` + `agent_run_id` 读记忆并透传（`agent_dynamic_workflow` 本来就把这两个字段
+放进了 task）。**规划节点也接了历史**：用户只回「重试」时，没有历史连重试什么都判断不了。
+
+验证：`test_dynamic_pipeline.py` +4（规划提示词带历史且历史在任务之前、**无历史时提示词逐字
+不变**、步骤输入带历史前缀、`run_plan_step` 透传），`test_workflow_dynamic.py` +2（规划活动
+与步骤活动确实读到会话记忆，用内存替身断言内容）；全量 `pytest tests/unit
+tests/integration/test_workspace_api.py` → **961 passed / 12 failed**（仍是缺 `pypdfium2`
+的 PDF 用例）。改进程影响：静态链路的既有断言（无历史时提示词逐字不变）全部保持。
+
 **前端容器与服务**：`npm run build` 通过（bundle 441.52 kB，未过告警阈值）；
 `workspace-smoke` **210/210** 未受影响。
 - **`doc/15` 只加了两条**：模块 3 的工作区与出网边界、第五节的三层边界表；该文件是事实源，

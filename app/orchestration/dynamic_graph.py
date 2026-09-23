@@ -48,8 +48,10 @@ from pydantic import BaseModel, Field
 from app.agents.roles import RoleId, get_role
 from app.attachments import AttachmentPayload, build_human_content
 from app.config import AgentSettings, get_settings
+from app.memory import SessionMessage
 from app.observability.instrumentation import observed_stage
 from app.observability.logging import get_logger, log_event
+from app.orchestration.context import conversation_block
 from app.orchestration.llm import build_chat_model
 from app.orchestration.pipeline import PipelineStatus
 from app.orchestration.pipeline_graph import (
@@ -291,8 +293,13 @@ def generate_plan(
     llm: BaseChatModel,
     max_steps: int = DEFAULT_MAX_PLAN_STEPS,
     workflow_id: str | None = None,
+    history: Sequence[SessionMessage] = (),
 ) -> DynamicPlan:
-    """调用规划模型产出计划；解析失败或调用失败一律回退，不向上抛。"""
+    """调用规划模型产出计划；解析失败或调用失败一律回退，不向上抛。
+
+    `history` 是会话记忆里最近若干条（不含本轮），按 ADR-019 的口径渲染成提示词前缀——
+    **规划也要看得到上下文**：只说「重试」时，规划节点否则连要重试什么都没法判断。
+    """
 
     started = time.perf_counter()
     log_event(logger, "dynamic.plan.start", workflow_id=workflow_id, task_chars=len(task))
@@ -300,7 +307,7 @@ def generate_plan(
         response = llm.invoke(
             [
                 SystemMessage(content=planner_prompt(max_steps)),
-                HumanMessage(content=f"用户任务：\n{task}"),
+                HumanMessage(content=f"{conversation_block(history)}用户任务：\n{task}"),
             ]
         )
         text = content_with_tools(response.content)
@@ -378,10 +385,19 @@ def blocked_steps(state: DynamicPipelineState) -> list[PlanStep]:
     return blocked
 
 
-def step_input(task: str, step: PlanStep, results: dict[str, StepOutcome]) -> str:
-    """构造步骤的角色输入：任务 + 依赖步骤的正文 + 本步职责。"""
+def step_input(
+    task: str,
+    step: PlanStep,
+    results: dict[str, StepOutcome],
+    history: Sequence[SessionMessage] = (),
+) -> str:
+    """构造步骤的角色输入：会话历史 + 任务 + 依赖步骤的正文 + 本步职责。
 
-    parts = [f"用户任务：\n{task}"]
+    历史放在最前面，与固定三步链路（`pipeline_graph._role_input`）同一形态——两条编排
+    对模型呈现的上下文必须一致，否则「同一个会话在两种模式下记忆表现不同」。
+    """
+
+    parts = [f"{conversation_block(history)}用户任务：\n{task}"]
     upstream = [
         f"【{dep} · {get_role(results[dep].role).name}】\n{results[dep].content}"
         for dep in step.depends_on
@@ -401,6 +417,7 @@ def run_plan_step(
     caller: ToolCaller | None = None,
     workflow_id: str | None = None,
     attachments: Sequence[AttachmentPayload] = (),
+    history: Sequence[SessionMessage] = (),
 ) -> StepOutcome:
     """执行一个计划步骤，返回结果；异常被收敛成 ``failed`` 结果而不外抛。
 
@@ -413,7 +430,7 @@ def run_plan_step(
     """
 
     definition = get_role(step.role)
-    prompt = step_input(task, step, results)
+    prompt = step_input(task, step, results, history)
     content = build_human_content(prompt, attachments if not step.depends_on else ())
     messages = [
         SystemMessage(content=definition.system_prompt),
