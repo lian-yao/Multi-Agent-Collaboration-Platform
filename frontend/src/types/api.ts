@@ -710,6 +710,18 @@ export interface WorkspaceTree {
   limit: number;
 }
 
+/**
+ * 工作区**根**的目录树（§5.19）：与 `WorkspaceTree` 同形，但**没有** `workspace_id`
+ * ——根不是一条登记。供「选择文件夹位置」在**登记之前**浏览根内的子目录。
+ */
+export interface WorkspaceRootTree {
+  path: string;
+  depth: number;
+  entries: WorkspaceEntry[];
+  truncated: boolean;
+  limit: number;
+}
+
 export interface WorkspaceCreate {
   session_id?: string | null;
   path?: string | null;

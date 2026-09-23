@@ -1356,6 +1356,30 @@ latin-1 编码报错）。
   `outside=true` 且**不跟随**——不列它的子项，也不把根外的结构暴露出去。
 - 条目数超过 `WORKSPACE_TREE_MAX_ENTRIES` 时 `truncated=true`。
 
+`GET /api/v1/workspace-root/tree?path=&depth=1`（**登记之前**的目录浏览，即 ADR-033 §1 的
+「`/workspace` 内的目录选择器」）：
+
+```json
+{
+  "path": "",
+  "depth": 1,
+  "entries": [
+    { "name": "project", "path": "project", "kind": "dir", "outside": false, "size_bytes": null, "modified_at": "2026-09-23T02:00:00Z" }
+  ],
+  "truncated": false,
+  "limit": 500
+}
+```
+
+- 与 `GET /workspaces/{id}/tree` 出参同形，只是**没有** `workspace_id`——根不是一条登记。
+  基准换成**工作区根**，因此**不需要先有一条工作区**：用户「选文件夹位置」发生在登记之前，
+  而 `{id}/tree` 要求先登记，用它来选位置是循环依赖。
+- 只读：不建目录、不写库；`path` 同样过 §5.19 的路径守卫（`..`、绝对路径/盘符、越界
+  符号链接一律 422 `WORKSPACE_PATH_REJECTED`）。
+- 为什么不用 `GET /workspaces/root/tree`：它与 `GET /workspaces/{workspace_id}/tree` 形状
+  相同，谁能命中只取决于**路由注册顺序**——以后调一下顺序就会静默换成另一个语义。
+  单独一条路径把这个歧义从接口面上消掉。
+
 `DELETE /api/v1/workspaces/{workspace_id}` 返回 204：只解除登记，**不删宿主文件**。
 
 `POST /api/v1/workspaces/{workspace_id}/files`（**导入文件**，前端「选择文件夹」的服务端一侧）：
@@ -1585,6 +1609,11 @@ POST /api/v1/agents/{agent_id}/run
   之后再补一次登记。**不要**为了让抽屉立刻可用而提前建会话（会在历史里留空会话），
   也**不要**在草稿态先造一条 `session_id=null` 的工作区——它不会被会话级注册表选中，
   Agent 拿不到任何文件工具，等于一个「存下来却不生效」的假入口。
+- **「选择文件夹位置」= 根内目录选择器**（ADR-033 §1）：登记表单的路径旁给一个「浏览根目录」
+  入口，用 `GET /workspace-root/tree` 逐层点选根内的子目录，选定后**回填相对路径**再登记。
+  它解决的是「登记路径只能盲打」——不解决、也不该假装解决「选宿主任意路径」：浏览器拿不到
+  宿主路径，bind mount 又在容器创建时固定，真正换根只能是部署动作
+  （`scripts/pick_work_dir.ps1`，见下一条）。
 - **「选择文件夹」按钮允许做，但它是「导入副本」**：用 `<input type="file" webkitdirectory>`
   让浏览器弹系统文件夹选择框，把**相对路径 + 内容**传给 `POST /workspaces/{id}/files`
   （§5.19）——和附件上传同一思路，区别是内容落到工作区目录里。文案必须写清这是**复制**，

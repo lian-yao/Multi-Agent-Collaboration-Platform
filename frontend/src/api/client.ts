@@ -35,6 +35,7 @@ import type {
   WorkspaceImportResult,
   WorkspaceList,
   WorkspacePatch,
+  WorkspaceRootTree,
   WorkspaceTree,
   ProviderPresetCatalog,
   ProviderRegistry,
@@ -315,6 +316,15 @@ export const api = {
     json<WorkspaceTree>(
       `/api/v1/workspaces/${encodeURIComponent(id)}/tree${query({ path, depth })}`,
     ),
+  /**
+   * 工作区**根**的目录树（§5.19）：「选择文件夹位置」用。
+   *
+   * 与 `workspaceTree` 的关键区别是**不需要已有工作区**——选位置发生在登记之前，
+   * 用它才能不陷入循环依赖。基准是部署层挂进来的根（`WORKSPACE_HOST_ROOT`），
+   * 也就是**服务端**看得见的那个目录，不是浏览器本机的磁盘。
+   */
+  workspaceRootTree: (path = "", depth = 1) =>
+    json<WorkspaceRootTree>(`/api/v1/workspace-root/tree${query({ path, depth })}`),
   /** 提档 / 降档。**只有人能调**：Agent 没有提权通道（ADR-033 §3）。 */
   patchWorkspace: (id: string, payload: WorkspacePatch) =>
     json<Workspace>(`/api/v1/workspaces/${encodeURIComponent(id)}`, {

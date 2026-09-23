@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { FolderTree, HardDrive, ShieldAlert } from "lucide-react";
 import { api } from "../api/client";
 import { InlineConfirm } from "../components/InlineConfirm";
@@ -8,6 +8,7 @@ import type {
   WorkspaceEntry,
   WorkspaceImportFile,
   WorkspaceMode,
+  WorkspaceRootTree,
   WorkspaceTree,
 } from "../types/api";
 import {
@@ -120,6 +121,137 @@ export function folderTargets(files: readonly File[]): {
   return { targets, oversized };
 }
 
+/**
+ * 「选择文件夹位置」：**根内**的目录浏览器（ADR-033 §1 的「`/workspace` 内的目录选择器」）。
+ *
+ * 它补的是「登记路径只能盲打」这个缺口。能选的只有**服务端挂进来的那个根下面的子目录**：
+ * 浏览器拿不到宿主路径、bind mount 又在容器创建时固定，所以这里不是「浏览你的磁盘」。
+ * 真正的换根仍然是部署动作（`scripts/pick_work_dir.ps1`），界面上必须分清这两件事。
+ *
+ * 只列目录：这一层的产物是一个路径，把文件也铺出来只会让人误点。
+ * 越界的符号链接**列出来但不可进**——它们不是可读内容，也不该看起来像普通目录。
+ */
+export function WorkspaceLocationPicker({
+  onPick,
+  onClose,
+}: {
+  onPick: (path: string) => void;
+  onClose: () => void;
+}) {
+  const [tree, setTree] = useState<WorkspaceRootTree | null>(null);
+  const [current, setCurrent] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  const load = useCallback(async (path: string) => {
+    setLoading(true);
+    setError("");
+    try {
+      const value = await api.workspaceRootTree(path, 1);
+      setTree(value);
+      setCurrent(value.path);
+    } catch (cause) {
+      setTree(null);
+      setError(describeError(cause, "读取工作区根失败"));
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load("");
+  }, [load]);
+
+  const segments = current.split("/").filter(Boolean);
+  const parent = segments.slice(0, -1).join("/");
+  // 目录已按「目录优先」排过，这里再筛一次：路径选择只对目录有意义。
+  const dirs = (tree?.entries ?? []).filter((entry) => entry.kind === "dir");
+
+  return (
+    <div className="cfg-ws-picker" role="group" aria-label="选择工作区位置">
+      <div className="cfg-ws-picker-head">
+        <span className="cfg-ws-picker-crumbs">
+          <button type="button" className="cfg-quiet" onClick={() => void load("")}>
+            根
+          </button>
+          {segments.map((segment, index) => (
+            <Fragment key={segments.slice(0, index + 1).join("/")}>
+              <span aria-hidden="true">/</span>
+              <button
+                type="button"
+                className="cfg-quiet"
+                onClick={() => void load(segments.slice(0, index + 1).join("/"))}
+              >
+                {segment}
+              </button>
+            </Fragment>
+          ))}
+        </span>
+        <button type="button" className="cfg-quiet" onClick={onClose}>
+          收起
+        </button>
+      </div>
+
+      {error && (
+        <p role="alert" className="cfg-alert">
+          {error}{" "}
+          <button type="button" className="cfg-quiet" onClick={() => void load(current)}>
+            重试
+          </button>
+        </p>
+      )}
+      {loading && <p className="cfg-hint">读取中…</p>}
+
+      {!loading && !error && (
+        <>
+          {segments.length > 0 && (
+            <button
+              type="button"
+              className="cfg-quiet"
+              onClick={() => void load(parent)}
+            >
+              ↑ 上一级
+            </button>
+          )}
+          {dirs.length === 0 ? (
+            <p className="cfg-hint">这一层没有子目录，可以直接选定当前位置。</p>
+          ) : (
+            <ul className="cfg-ws-picker-list">
+              {dirs.map((entry) => (
+                <li key={entry.path}>
+                  <button
+                    type="button"
+                    disabled={entry.outside}
+                    title={entry.outside ? "指向工作区之外的符号链接：不跟随" : entry.path}
+                    onClick={() => void load(entry.path)}
+                  >
+                    <FolderTree size={14} />
+                    {entry.name}
+                  </button>
+                  {entry.outside && <Chip tone="amber">工作区外</Chip>}
+                </li>
+              ))}
+            </ul>
+          )}
+          {tree?.truncated && (
+            <p className="cfg-hint">
+              条目数超过 {tree.limit}，只列出前面一部分。
+            </p>
+          )}
+          <div className="cfg-ws-picker-foot">
+            <button type="button" className="cfg-primary" onClick={() => onPick(current)}>
+              选定此文件夹
+            </button>
+            <span className="cfg-hint">
+              {current ? `将登记 ${current}` : "将登记工作区根"}
+            </span>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 function TreeList({ entries, depth = 0 }: { entries: WorkspaceEntry[]; depth?: number }) {
   return (
     <ul className="cfg-ws-tree" data-depth={depth}>
@@ -186,6 +318,8 @@ export function WorkspaceBoundary({
   const [path, setPath] = useState("");
   const [mode, setMode] = useState<WorkspaceMode>("read_only");
   const [overwrite, setOverwrite] = useState(false);
+  /** 「浏览根目录」展开态：选位置是**看一眼再填**，不展开就不发那次请求。 */
+  const [picking, setPicking] = useState(false);
   const folderPicker = useRef<HTMLInputElement>(null);
 
   const submit = (event: FormEvent) => {
@@ -271,13 +405,41 @@ export function WorkspaceBoundary({
       <form className="cfg-form-grid" onSubmit={submit}>
         <Field
           label="登记路径"
-          hint="相对工作区根的路径，如 project/reports；留空 = 按会话自动建 sessions/<会话 id>/"
+          hint="相对工作区根的路径，如 project/reports；留空 = 按会话自动建 sessions/<会话 id>/。不确定就点「浏览根目录」逐层选。"
         >
           <input
             value={path}
             onChange={(event) => setPath(event.target.value)}
             placeholder="project/reports"
           />
+          <button
+            type="button"
+            className="cfg-quiet"
+            aria-expanded={picking}
+            onClick={() => setPicking((value) => !value)}
+          >
+            {picking ? "收起目录浏览" : "浏览根目录"}
+          </button>
+          {/*
+            选的是**服务端挂进来的根**里的子目录，不是浏览器本机的磁盘——文案必须写清，
+            否则用户会以为这就是「选我电脑上的文件夹」（那件事只有宿主侧脚本能做）。
+          */}
+          {picking && (
+            <>
+              <p className="cfg-hint">
+                浏览的是部署层挂进来的工作区根（容器里的 <code>/workspace</code>），
+                不是你这台机器上的任意路径。要换根用宿主侧
+                <code> scripts/pick_work_dir.ps1</code>。
+              </p>
+              <WorkspaceLocationPicker
+                onPick={(picked) => {
+                  setPath(picked);
+                  setPicking(false);
+                }}
+                onClose={() => setPicking(false)}
+              />
+            </>
+          )}
         </Field>
         <Field
           label="档位"

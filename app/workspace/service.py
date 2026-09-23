@@ -484,6 +484,42 @@ def workspace_tree(
     }
 
 
+def root_tree(
+    *,
+    path: str = "",
+    depth: int = 1,
+    settings: WorkspaceSettings | None = None,
+) -> dict[str, Any]:
+    """列出**工作区根**下的目录树（`doc/api.md` §5.19）。
+
+    与 `workspace_tree()` 的区别是**不需要已登记的工作区**：用户「选文件夹位置」这件事
+    发生在登记之前，而 `{id}/tree` 要求先有一条登记——用它来选位置是循环依赖。
+
+    只读：不建目录、不写库。`path` 照样过 `resolve_in_workspace()` 守卫，越界（`..`、
+    绝对路径、指向根外的符号链接）一律 `WorkspacePathError`。
+    """
+
+    resolved_settings = _resolved_settings(settings)
+    _ensure_enabled(resolved_settings)
+    root = resolve_root(resolved_settings.root)
+    target = resolve_in_workspace(root, path)
+    if not target.is_dir():
+        raise WorkspacePathError(f"不是目录：{path or '/'}")
+
+    resolved_depth = max(1, min(int(depth or 1), resolved_settings.tree_max_depth))
+    budget = {"left": resolved_settings.tree_max_entries, "truncated": False}
+    entries = _collect_entries(
+        root, target, depth=resolved_depth, budget=budget, trash=resolved_settings.delete_trash_dir
+    )
+    return {
+        "path": relative_to_root(root, target),
+        "depth": resolved_depth,
+        "entries": entries,
+        "truncated": budget["truncated"],
+        "limit": resolved_settings.tree_max_entries,
+    }
+
+
 def _collect_entries(
     base: Path,
     directory: Path,

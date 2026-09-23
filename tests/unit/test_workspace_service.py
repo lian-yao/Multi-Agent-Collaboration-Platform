@@ -378,6 +378,67 @@ def test_tree_rejects_paths_outside_the_workspace(store, settings, tmp_path: Pat
 
 
 # --------------------------------------------------------------------------- #
+# 根的目录树（登记之前选位置）
+# --------------------------------------------------------------------------- #
+
+
+def test_root_tree_lists_the_root_without_any_workspace(store, settings, tmp_path: Path):
+    """「选文件夹位置」发生在登记之前：不该要求先有一条工作区。"""
+    (tmp_path / "project").mkdir()
+    (tmp_path / "notes.txt").write_text("note", encoding="utf-8")
+    (tmp_path / ".trash").mkdir()
+    (tmp_path / ".trash" / "gone.txt").write_text("gone", encoding="utf-8")
+
+    tree = service.root_tree(settings=settings)
+
+    # 目录优先、跳过回收站，与 `workspace_tree` 同一口径。
+    assert [entry["name"] for entry in tree["entries"]] == ["project", "notes.txt"]
+    assert tree["path"] == ""
+    assert store.rows == {}, "列根目录不该写库"
+
+
+def test_root_tree_walks_into_a_subdirectory(store, settings, tmp_path: Path):
+    (tmp_path / "project" / "reports").mkdir(parents=True)
+    (tmp_path / "project" / "readme.md").write_text("hi", encoding="utf-8")
+
+    tree = service.root_tree(path="project", depth=2, settings=settings)
+
+    assert tree["path"] == "project"
+    assert tree["depth"] == 2
+    entry = next(item for item in tree["entries"] if item["name"] == "reports")
+    assert entry["kind"] == "dir"
+    assert entry["path"] == "project/reports"
+
+
+@pytest.mark.parametrize("value", ["../", "/etc", "C:/windows", "..\\..\\x"])
+def test_root_tree_rejects_paths_outside_the_root(store, settings, tmp_path: Path, value):
+    with pytest.raises(WorkspacePathError):
+        service.root_tree(path=value, settings=settings)
+
+
+def test_root_tree_marks_symlinks_that_escape_the_root(store, settings, tmp_path: Path):
+    # 这里 tmp_path **就是**工作区根，所以"根外"必须是 tmp_path 之外——
+    # 不能用 `tmp_path / "outside"`（那仍在根内，标记成 outside 反而错）。
+    _symlink_or_skip(
+        tmp_path / "escape", tmp_path.parent / "macp-root-tree-outside", directory=True
+    )
+
+    tree = service.root_tree(settings=settings)
+
+    entry = next(item for item in tree["entries"] if item["name"] == "escape")
+    assert entry["kind"] == "symlink"
+    assert entry["outside"] is True
+    assert "children" not in entry, "越界链接不跟随，也不暴露根外结构"
+
+
+def test_root_tree_is_disabled_with_the_feature(store, settings, tmp_path: Path):
+    disabled = settings.model_copy(update={"enabled": False})
+
+    with pytest.raises(WorkspaceDisabled):
+        service.root_tree(settings=disabled)
+
+
+# --------------------------------------------------------------------------- #
 # 用量与只读读取
 # --------------------------------------------------------------------------- #
 

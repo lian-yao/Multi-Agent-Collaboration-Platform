@@ -2308,6 +2308,21 @@ class WorkspaceTreeResponse(BaseModel):
     limit: int
 
 
+class WorkspaceRootTreeResponse(BaseModel):
+    """工作区**根**的目录树（`doc/api.md` §5.19）。
+
+    与 `WorkspaceTreeResponse` 同形但**没有** `workspace_id`：根不是一条登记。
+    一条独立路径（而不是 `GET /workspaces/root/tree`）是为了不和
+    `GET /workspaces/{workspace_id}/tree` 争路由——那种写法谁能命中只取决于注册顺序。
+    """
+
+    path: str = ""
+    depth: int
+    entries: list[WorkspaceEntry]
+    truncated: bool
+    limit: int
+
+
 class WorkspaceCreateRequest(BaseModel):
     """`POST /api/v1/workspaces` 的请求体（`doc/api.md` §5.19）。
 
@@ -2428,6 +2443,23 @@ def read_workspace_tree(
         lambda: workspace_service.workspace_tree(workspace_id, path=path, depth=depth)
     )
     return WorkspaceTreeResponse.model_validate(data)
+
+
+@app.get("/api/v1/workspace-root/tree", response_model=WorkspaceRootTreeResponse)
+def read_workspace_root_tree(
+    path: str = Query(default="", max_length=500),
+    depth: int = Query(default=1, ge=1, le=8),
+) -> WorkspaceRootTreeResponse:
+    """列出**工作区根**下的目录树（`doc/api.md` §5.19）。
+
+    供登记之前的「选择文件夹位置」用（ADR-033 §1 的「`/workspace` 内的目录选择器」）：
+    这时还没有工作区可查，所以基准是部署层挂进来的根。只读，不建目录、不写库。
+    """
+
+    data = _workspace_call(
+        lambda: workspace_service.root_tree(path=path, depth=depth)
+    )
+    return WorkspaceRootTreeResponse.model_validate(data)
 
 
 @app.patch("/api/v1/workspaces/{workspace_id}", response_model=WorkspaceResponse)

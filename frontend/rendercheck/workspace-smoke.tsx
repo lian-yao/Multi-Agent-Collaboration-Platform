@@ -51,7 +51,11 @@ import { RunActivity } from "../src/workspace/RunActivity";
 import { ToolCallBlock } from "../src/workspace/TraceParts";
 import { TaskUsagePanel, groupUsage, usageFor } from "../src/workspace/TaskUsage";
 import { MessageAttachmentList, PendingFileChips } from "../src/workspace/AttachmentList";
-import { WorkspaceBoundary, folderTargets } from "../src/workspace/WorkspacePanel";
+import {
+  WorkspaceBoundary,
+  WorkspaceLocationPicker,
+  folderTargets,
+} from "../src/workspace/WorkspacePanel";
 import {
   ATTACHMENT_EXTENSIONS,
   MAX_ATTACHMENT_BYTES,
@@ -1801,6 +1805,40 @@ check(
   folder.targets.map((item) => item.path).join(",") === "docs/a.md,root.txt" &&
     folder.oversized.join(",") === "b.bin",
   JSON.stringify(folder.targets.map((item) => item.path)) + " / " + folder.oversized.join(","),
+);
+
+/* -------------------------------------------------------------------------- */
+/* 选择文件夹位置（根内目录浏览器，ADR-033 §1）                                  */
+/* -------------------------------------------------------------------------- */
+
+const clientSource = readFileSync(join(process.cwd(), "src", "api", "client.ts"), "utf8");
+// 静态渲染只到「读取中」那一步（effects 不跑），但这足以钉住挂载即要数据。
+const pickerMarkup = renderToStaticMarkup(
+  <WorkspaceLocationPicker onPick={() => {}} onClose={() => {}} />,
+);
+check(
+  "选位置：挂载即读根目录，且入口在登记表单里（不再是只能盲打路径）",
+  pickerMarkup.includes('aria-label="选择工作区位置"') &&
+    pickerMarkup.includes("读取中") &&
+    /api\.workspaceRootTree\(/.test(workspacePanelSource) &&
+    workspacePanelSource.includes("浏览根目录"),
+  pickerMarkup.slice(0, 160),
+);
+check(
+  "选位置：走的是**根**接口——不需要先有一条登记（用 {id}/tree 会变成循环依赖）",
+  clientSource.includes("/api/v1/workspace-root/tree") &&
+    // 面板里对「已经登记的工作区」仍用 {id}/tree，对「选位置」用根接口，两者不能混。
+    /api\.workspaceTree\(/.test(workspacePanelSource) &&
+    !/api\.workspaceRootTree\(\s*workspace/i.test(workspacePanelSource),
+  "",
+);
+check(
+  "选位置：文案把「挂进来的根」与本机磁盘分开，并指向宿主侧脚本",
+  workspacePanelSource.includes("不是你这台机器上的任意路径") &&
+    workspacePanelSource.includes("pick_work_dir.ps1") &&
+    // 越界链接列出来但点不动（不可进）
+    /disabled=\{entry\.outside\}/.test(workspacePanelSource),
+  "",
 );
 
 const passed = results.filter(([ok]) => ok).length;

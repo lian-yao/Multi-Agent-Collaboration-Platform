@@ -74,6 +74,24 @@ TREE_VIEW = {
 
 SESSION_ID = "3f2b8f4e-1b6d-4c3a-9c6f-2c1b7f7a1a11"
 
+ROOT_TREE_VIEW = {
+    # 与 TREE_VIEW 同形，**没有** workspace_id：根不是一条登记。
+    "path": "",
+    "depth": 1,
+    "entries": [
+        {
+            "name": "project",
+            "path": "project",
+            "kind": "dir",
+            "outside": False,
+            "size_bytes": None,
+            "modified_at": None,
+        }
+    ],
+    "truncated": False,
+    "limit": 500,
+}
+
 APPROVAL_VIEW = {
     "id": "ap-1",
     "workspace_id": "w-1",
@@ -121,6 +139,7 @@ class WorkspaceApi:
         "update_workspace",
         "get_workspace",
         "workspace_tree",
+        "root_tree",
         "import_files",
         "delete_workspace",
     )
@@ -150,6 +169,8 @@ class WorkspaceApi:
             return WORKSPACE_VIEW
         if name == "workspace_tree":
             return TREE_VIEW
+        if name == "root_tree":
+            return ROOT_TREE_VIEW
         if name == "import_files":
             return {
                 "workspace_id": "w-1",
@@ -280,6 +301,52 @@ def test_tree_rejects_a_depth_out_of_range(api):
     response = client.get("/api/v1/workspaces/w-1/tree?depth=99")
 
     assert response.status_code == 422
+
+
+def test_root_tree_lists_the_root_without_a_registered_workspace(api):
+    """「选文件夹位置」发生在登记之前：这条路径查不到、也不该查工作区表。"""
+    stub, client = api
+
+    response = client.get("/api/v1/workspace-root/tree?path=&depth=1")
+
+    assert response.status_code == 200
+    body = response.json()
+    # 与 `{id}/tree` 同形，但**没有** workspace_id——根不是一条登记。
+    assert "workspace_id" not in body
+    assert body["entries"][0]["path"] == "project"
+    assert stub["root_tree"].last_call[1] == {"path": "", "depth": 1}
+    assert not stub["workspace_tree"].calls
+
+
+def test_root_tree_rejects_paths_outside_the_root(api):
+    stub, client = api
+    stub.stub("root_tree", WorkspacePathError("路径不能包含 `..`"))
+
+    response = client.get("/api/v1/workspace-root/tree?path=..%2Fetc")
+
+    assert response.status_code == 422
+    assert response.json()["code"] == "WORKSPACE_PATH_REJECTED"
+
+
+def test_root_tree_reports_an_unavailable_root(api):
+    stub, client = api
+    stub.stub("root_tree", WorkspaceRootUnavailable("工作区根不可用"))
+
+    response = client.get("/api/v1/workspace-root/tree")
+
+    assert response.status_code == 503
+    assert response.json()["code"] == "WORKSPACE_ROOT_UNAVAILABLE"
+
+
+def test_workspace_tree_is_still_reachable_alongside_the_root_route(api):
+    """两条路由形状相近，钉住它们没有互相吃掉。"""
+    stub, client = api
+
+    assert client.get("/api/v1/workspaces/w-1/tree").status_code == 200
+    assert stub["workspace_tree"].last_call[0][0] == "w-1"
+
+    assert client.get("/api/v1/workspace-root/tree").status_code == 200
+    assert stub["root_tree"].last_call[0] == ()
 
 
 # --------------------------------------------------------------------------- #

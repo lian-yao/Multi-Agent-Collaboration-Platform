@@ -2278,6 +2278,93 @@
   color:#8b9da5
 }
 
+/* 「选择文件夹位置」的根内目录浏览器（ADR-033 §1）。 */
+.cfg-ws-picker {
+  margin-top:8px;
+  padding:10px 12px;
+  border:1px solid var(--cfg-line-faint);
+  border-radius:var(--cfg-radius-sm);
+  background:var(--cfg-surface-soft)
+}
+
+
+
+.cfg-ws-picker-head {
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+  margin-bottom:6px
+}
+
+
+
+.cfg-ws-picker-crumbs {
+  display:flex;
+  align-items:center;
+  flex-wrap:wrap;
+  gap:2px;
+  min-width:0;
+  color:#8b9da5
+}
+
+
+
+.cfg-ws-picker-list {
+  list-style:none;
+  margin:6px 0;
+  padding:0;
+  max-height:180px;
+  overflow:auto
+}
+
+
+
+.cfg-ws-picker-list li {
+  display:flex;
+  align-items:center;
+  gap:6px
+}
+
+
+
+.cfg-ws-picker-list button {
+  display:flex;
+  flex:1;
+  align-items:center;
+  gap:7px;
+  min-width:0;
+  padding:5px 6px;
+  border:0;
+  border-radius:var(--cfg-radius-sm);
+  background:transparent;
+  color:#26444f;
+  overflow-wrap:anywhere;
+  text-align:left
+}
+
+
+
+.cfg-ws-picker-list button:hover:not(:disabled) {
+  background:var(--cfg-surface-hover)
+}
+
+
+
+.cfg-ws-picker-list button:disabled {
+  color:#9fb0b7;
+  cursor:not-allowed
+}
+
+
+
+.cfg-ws-picker-foot {
+  display:flex;
+  align-items:center;
+  gap:10px;
+  margin-top:8px
+}
+
 
 
 .cfg-egress-blocked {
