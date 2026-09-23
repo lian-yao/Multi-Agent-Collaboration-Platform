@@ -1,11 +1,12 @@
 import { Fragment, useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { FolderTree, HardDrive, ShieldAlert } from "lucide-react";
-import { api } from "../api/client";
+import { ApiError, api } from "../api/client";
 import { InlineConfirm } from "../components/InlineConfirm";
 import { fileToBase64 } from "./attachments";
 import type {
   Workspace,
   WorkspaceEntry,
+  WorkspaceHostTree,
   WorkspaceImportFile,
   WorkspaceMode,
   WorkspaceRootTree,
@@ -131,6 +132,128 @@ export function folderTargets(files: readonly File[]): {
  * 只列目录：这一层的产物是一个路径，把文件也铺出来只会让人误点。
  * 越界的符号链接**列出来但不可进**——它们不是可读内容，也不该看起来像普通目录。
  */
+/**
+ * **宿主**目录浏览器（ADR-035 §3）：用户当场选一个本机文件夹。
+ *
+ * 纯 props 驱动（容器在 `WorkspaceLocationPicker` 里取数），便于 rendercheck 直接挂载断言。
+ * 这里显示的**是绝对路径**——宿主形态下路径本身就是用户在意的信息，不能再缩成相对路径。
+ */
+export function HostLocationBrowser({
+  tree,
+  loading,
+  error,
+  onNavigate,
+  onRetry,
+  onPick,
+  onClose,
+}: {
+  tree: WorkspaceHostTree | null;
+  loading: boolean;
+  error: string;
+  onNavigate: (path: string) => void;
+  onRetry: () => void;
+  onPick: (path: string) => void;
+  onClose: () => void;
+}) {
+  const dirs = (tree?.entries ?? []).filter((entry) => entry.kind === "dir");
+  const current = tree?.path ?? "";
+
+  return (
+    <div className="cfg-ws-picker" role="group" aria-label="选择本机文件夹">
+      <div className="cfg-ws-picker-head">
+        <span className="cfg-ws-picker-crumbs">
+          <FolderTree size={14} />
+          <b>{current || "读取中…"}</b>
+        </span>
+        <button type="button" className="cfg-quiet" onClick={onClose}>
+          收起
+        </button>
+      </div>
+
+      <p className="cfg-hint">
+        浏览的是后端所在机器上的文件夹。宿主直跑时那就是你这台电脑：选中的文件夹里
+        Agent 可以读写，文件夹之外一律拒绝。
+      </p>
+
+      {error && (
+        <p role="alert" className="cfg-alert">
+          {error}{" "}
+          <button type="button" className="cfg-quiet" onClick={onRetry}>
+            重试
+          </button>
+        </p>
+      )}
+      {loading && <p className="cfg-hint">读取中…</p>}
+
+      {!loading && !error && (
+        <>
+          <div className="cfg-ws-picker-jumps">
+            {(tree?.roots ?? []).map((root) => (
+              <button
+                key={root.path}
+                type="button"
+                className="cfg-quiet"
+                onClick={() => onNavigate(root.path)}
+              >
+                {root.name}
+              </button>
+            ))}
+            {tree?.home && (
+              <button
+                type="button"
+                className="cfg-quiet"
+                onClick={() => onNavigate(tree.home)}
+              >
+                家目录
+              </button>
+            )}
+            {tree?.parent && (
+              <button
+                type="button"
+                className="cfg-quiet"
+                onClick={() => onNavigate(tree.parent as string)}
+              >
+                ↑ 上一级
+              </button>
+            )}
+          </div>
+
+          {dirs.length === 0 ? (
+            <p className="cfg-hint">这一层没有子文件夹，可以直接选定当前位置。</p>
+          ) : (
+            <ul className="cfg-ws-picker-list">
+              {dirs.map((entry) => (
+                <li key={entry.path}>
+                  <button
+                    type="button"
+                    disabled={entry.outside}
+                    title={entry.outside ? "指向别处的符号链接：不跟随" : entry.path}
+                    onClick={() => onNavigate(entry.path)}
+                  >
+                    <FolderTree size={14} />
+                    {entry.name}
+                  </button>
+                  {entry.outside && <Chip tone="amber">链接</Chip>}
+                </li>
+              ))}
+            </ul>
+          )}
+          {tree?.truncated && (
+            <p className="cfg-hint">条目数超过 {tree.limit}，只列出前面一部分。</p>
+          )}
+
+          <div className="cfg-ws-picker-foot">
+            <button type="button" className="cfg-primary" onClick={() => onPick(current)}>
+              选定此文件夹
+            </button>
+            <span className="cfg-hint">将登记 {current}</span>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 export function WorkspaceLocationPicker({
   onPick,
   onClose,
@@ -140,10 +263,17 @@ export function WorkspaceLocationPicker({
 }) {
   const [tree, setTree] = useState<WorkspaceRootTree | null>(null);
   const [current, setCurrent] = useState("");
+  const [host, setHost] = useState<WorkspaceHostTree | null>(null);
+  /**
+   * 形态判定：先问**宿主**目录（默认形态就是宿主直跑，ADR-035 §2），
+   * 容器形态会以 503 `WORKSPACE_HOST_BROWSE_DISABLED` 拒绝，那时才退回根内浏览。
+   * 按错误码判、而不是"两个接口都试一遍"，是为了默认路径只发一次请求。
+   */
+  const [mode, setMode] = useState<"probing" | "host" | "root">("probing");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
-  const load = useCallback(async (path: string) => {
+  const loadRoot = useCallback(async (path: string) => {
     setLoading(true);
     setError("");
     try {
@@ -158,9 +288,49 @@ export function WorkspaceLocationPicker({
     }
   }, []);
 
+  const loadHost = useCallback(
+    async (path?: string) => {
+      setLoading(true);
+      setError("");
+      try {
+        const value = await api.hostTree(path, 1);
+        setHost(value);
+        setMode("host");
+        setLoading(false);
+        return;
+      } catch (cause) {
+        if (cause instanceof ApiError && cause.code === "WORKSPACE_HOST_BROWSE_DISABLED") {
+          // 容器形态：容器里看不到宿主路径，退回根内浏览。
+          setMode("root");
+          setLoading(false);
+          await loadRoot("");
+          return;
+        }
+        setHost(null);
+        setError(describeError(cause, "读取目录失败"));
+        setLoading(false);
+      }
+    },
+    [loadRoot],
+  );
+
   useEffect(() => {
-    void load("");
-  }, [load]);
+    void loadHost();
+  }, [loadHost]);
+
+  if (mode === "host") {
+    return (
+      <HostLocationBrowser
+        tree={host}
+        loading={loading}
+        error={error}
+        onNavigate={(path) => void loadHost(path)}
+        onRetry={() => void loadHost(host?.path)}
+        onPick={onPick}
+        onClose={onClose}
+      />
+    );
+  }
 
   const segments = current.split("/").filter(Boolean);
   const parent = segments.slice(0, -1).join("/");
@@ -171,7 +341,7 @@ export function WorkspaceLocationPicker({
     <div className="cfg-ws-picker" role="group" aria-label="选择工作区位置">
       <div className="cfg-ws-picker-head">
         <span className="cfg-ws-picker-crumbs">
-          <button type="button" className="cfg-quiet" onClick={() => void load("")}>
+          <button type="button" className="cfg-quiet" onClick={() => void loadRoot("")}>
             根
           </button>
           {segments.map((segment, index) => (
@@ -180,7 +350,7 @@ export function WorkspaceLocationPicker({
               <button
                 type="button"
                 className="cfg-quiet"
-                onClick={() => void load(segments.slice(0, index + 1).join("/"))}
+                onClick={() => void loadRoot(segments.slice(0, index + 1).join("/"))}
               >
                 {segment}
               </button>
@@ -195,7 +365,7 @@ export function WorkspaceLocationPicker({
       {error && (
         <p role="alert" className="cfg-alert">
           {error}{" "}
-          <button type="button" className="cfg-quiet" onClick={() => void load(current)}>
+          <button type="button" className="cfg-quiet" onClick={() => void loadRoot(current)}>
             重试
           </button>
         </p>
@@ -208,7 +378,7 @@ export function WorkspaceLocationPicker({
             <button
               type="button"
               className="cfg-quiet"
-              onClick={() => void load(parent)}
+              onClick={() => void loadRoot(parent)}
             >
               ↑ 上一级
             </button>
@@ -223,7 +393,7 @@ export function WorkspaceLocationPicker({
                     type="button"
                     disabled={entry.outside}
                     title={entry.outside ? "指向工作区之外的符号链接：不跟随" : entry.path}
-                    onClick={() => void load(entry.path)}
+                    onClick={() => void loadRoot(entry.path)}
                   >
                     <FolderTree size={14} />
                     {entry.name}
@@ -420,25 +590,16 @@ export function WorkspaceBoundary({
           >
             {picking ? "收起目录浏览" : "浏览根目录"}
           </button>
-          {/*
-            选的是**服务端挂进来的根**里的子目录，不是浏览器本机的磁盘——文案必须写清，
-            否则用户会以为这就是「选我电脑上的文件夹」（那件事只有宿主侧脚本能做）。
-          */}
+          {/* 浏览范围随形态变（宿主＝后端所在机器上的文件夹；容器＝挂进来的根），
+              所以措辞交给选择器自己讲——这里写死一句必然会在另一种形态下说错。 */}
           {picking && (
-            <>
-              <p className="cfg-hint">
-                浏览的是部署层挂进来的工作区根（容器里的 <code>/workspace</code>），
-                不是你这台机器上的任意路径。要换根用宿主侧
-                <code> scripts/pick_work_dir.ps1</code>。
-              </p>
-              <WorkspaceLocationPicker
-                onPick={(picked) => {
-                  setPath(picked);
-                  setPicking(false);
-                }}
-                onClose={() => setPicking(false)}
-              />
-            </>
+            <WorkspaceLocationPicker
+              onPick={(picked) => {
+                setPath(picked);
+                setPicking(false);
+              }}
+              onClose={() => setPicking(false)}
+            />
           )}
         </Field>
         <Field

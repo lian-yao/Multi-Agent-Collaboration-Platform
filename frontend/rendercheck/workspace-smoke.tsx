@@ -52,6 +52,7 @@ import { ToolCallBlock } from "../src/workspace/TraceParts";
 import { TaskUsagePanel, groupUsage, usageFor } from "../src/workspace/TaskUsage";
 import { MessageAttachmentList, PendingFileChips } from "../src/workspace/AttachmentList";
 import {
+  HostLocationBrowser,
   WorkspaceBoundary,
   WorkspaceLocationPicker,
   folderTargets,
@@ -70,6 +71,7 @@ import {
 import type {
   Agent,
   Attachment,
+  WorkspaceHostTree,
   Metric,
   StageTraceItem,
   Workspace,
@@ -1833,12 +1835,74 @@ check(
   "",
 );
 check(
-  "选位置：文案把「挂进来的根」与本机磁盘分开，并指向宿主侧脚本",
-  workspacePanelSource.includes("不是你这台机器上的任意路径") &&
-    workspacePanelSource.includes("pick_work_dir.ps1") &&
-    // 越界链接列出来但点不动（不可进）
+  "选位置：先问宿主目录（默认形态），容器形态按错误码退回根内浏览",
+  /api\.hostTree\(/.test(workspacePanelSource) &&
+    // 退回依据是**错误码**，不是"把两个接口都试一遍"
+    /WORKSPACE_HOST_BROWSE_DISABLED/.test(workspacePanelSource) &&
+    /setMode\("root"\)/.test(workspacePanelSource) &&
+    // 越界链接列出来但点不动（不可进）——两种浏览都要守这条
     /disabled=\{entry\.outside\}/.test(workspacePanelSource),
   "",
+);
+
+const hostTree: WorkspaceHostTree = {
+  path: "C:\\Users\\zq",
+  parent: "C:\\Users",
+  home: "C:\\Users\\zq",
+  roots: [
+    { name: "C:", path: "C:\\" },
+    { name: "D:", path: "D:\\" },
+  ],
+  depth: 1,
+  entries: [
+    {
+      name: "项目",
+      path: "C:\\Users\\zq\\项目",
+      kind: "dir",
+      outside: false,
+      size_bytes: null,
+      modified_at: null,
+    },
+    {
+      name: "note.txt",
+      path: "C:\\Users\\zq\\note.txt",
+      kind: "file",
+      outside: false,
+      size_bytes: 12,
+      modified_at: null,
+    },
+  ],
+  truncated: false,
+  limit: 500,
+};
+const hostMarkup = renderToStaticMarkup(
+  <HostLocationBrowser
+    tree={hostTree}
+    loading={false}
+    error=""
+    onNavigate={() => {}}
+    onRetry={() => {}}
+    onPick={() => {}}
+    onClose={() => {}}
+  />,
+);
+check(
+  "选位置（宿主形态）：显示绝对路径、盘符与家目录入口，且只列文件夹",
+  hostMarkup.includes("C:\\Users\\zq") &&
+    hostMarkup.includes("项目") &&
+    hostMarkup.includes("C:") &&
+    hostMarkup.includes("D:") &&
+    hostMarkup.includes("家目录") &&
+    hostMarkup.includes("上一级") &&
+    hostMarkup.includes("选定此文件夹") &&
+    // 只列目录：这一层的产物是路径，铺文件只会让人误点
+    !hostMarkup.includes("note.txt"),
+  hostMarkup.slice(0, 200),
+);
+check(
+  "选位置（宿主形态）：写清读写边界就是选中的那个文件夹",
+  hostMarkup.includes("Agent 可以读写") && hostMarkup.includes("文件夹之外一律拒绝"),
+  hostMarkup.slice(0, 200),
 );
 
 const passed = results.filter(([ok]) => ok).length;

@@ -35,6 +35,7 @@ import type {
   WorkspaceImportResult,
   WorkspaceList,
   WorkspacePatch,
+  WorkspaceHostTree,
   WorkspaceRootTree,
   WorkspaceTree,
   ProviderPresetCatalog,
@@ -325,6 +326,15 @@ export const api = {
    */
   workspaceRootTree: (path = "", depth = 1) =>
     json<WorkspaceRootTree>(`/api/v1/workspace-root/tree${query({ path, depth })}`),
+  /**
+   * **宿主**目录列表（ADR-035 §3）：`WORKSPACE_SOURCE=host` 时可用，用来让用户
+   * 当场选一个本机文件夹；`path` 省略时从家目录开始。
+   *
+   * 容器形态会以 503 `WORKSPACE_HOST_BROWSE_DISABLED` 拒绝——这不是故障，而是
+   * 「容器里看不到宿主路径」的如实回答，调用方据此退回根内浏览。
+   */
+  hostTree: (path?: string, depth = 1) =>
+    json<WorkspaceHostTree>(`/api/v1/host/tree${query({ path, depth })}`),
   /** 提档 / 降档。**只有人能调**：Agent 没有提权通道（ADR-033 §3）。 */
   patchWorkspace: (id: string, payload: WorkspacePatch) =>
     json<Workspace>(`/api/v1/workspaces/${encodeURIComponent(id)}`, {

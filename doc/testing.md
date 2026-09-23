@@ -2024,6 +2024,49 @@ bind mount 又在容器创建时固定，换根仍是部署动作（`scripts/pic
 口径，不是本轮未完成项。另外使用者当前的根 `D:\测试` 里没有子目录，界面上会直接提示
 「这一层没有子目录，可以直接选定当前位置」。
 
+**第六轮（同日）：宿主形态落地——「当场选本机文件夹」端到端可用**。使用者定了范围与形态：
+「用户可以在本地机器任意选择一个文件夹，然后在那个文件夹下的所有文件都可以读写，但也只能
+在这个文件夹下面」＋「把宿主直跑做成一键默认」。设计与取舍见
+[ADR-035](decisions/035-local-service-dynamic-workspace-root.md)（含为什么**不加列**、
+为什么浏览范围要按形态判定、为什么仍然拒绝选平台自身源码目录）。
+
+服务端：`WORKSPACE_SOURCE`（默认 `host`，非法值显式报错）＋ `resolve_host_dir()`（绝对路径、
+必须存在且是目录、拒绝平台源码目录及其祖先/后代）＋ `workspace_base()`（目录树 / 文件工具 /
+导入 / 沙箱挂载统一走它）＋ `host_tree()`（只读、只列目录、条目给绝对路径、附盘符与家目录入口）
+＋ `GET /api/v1/host/tree`；创建接口的 `mode` 默认改为 `None`，默认档按形态取（宿主可写、
+容器只读）。`deploy/compose.yaml` 显式 `WORKSPACE_SOURCE: container`——代码默认已是 host，
+容器不声明就会被当成宿主形态，`/workspace` 挂载与相对 `path` 会立刻失效。
+
+前端：选择器先问宿主目录（默认形态），容器形态按错误码 `WORKSPACE_HOST_BROWSE_DISABLED`
+退回根内浏览——用错误码判而不是两个接口都试一遍，是为了默认路径只发一次请求。宿主浏览器
+显示**绝对路径**、盘符与家目录入口、上一级，只列文件夹，越界链接列出来但点不动。
+
+一键直跑 `scripts/start_local.ps1`：Redis/PostgreSQL 容器 → 腾出 8000/3500/5173（stop 容器里的
+backend / dapr-sidecar / frontend）→ 本地 sidecar 与后端（绑 127.0.0.1）→ Vite dev。
+`-Stop` 按记录的 PID 收工。过程中撞到并修掉两个真问题：
+
+1. **`uv run` 会重新解析依赖**，本机镜像对 `asyncpg` 返 403，后端以
+   "requirements are unsatisfiable" 收场、根本没启动。改成直接用项目 `.venv`
+   （容器里本来也是 `uv run --no-sync`）。
+2. **`-Stop` 只杀包装进程**：记录的 PID 是 powershell / cmd，真正占端口的是子进程
+   `daprd.exe` 与 vite 的 `node.exe`，只杀父会留下孤儿、下次启动撞端口。改成
+   `taskkill /PID <记录的 PID> /T /F`（仍只按 PID 杀自己记录的那几个，绝不按名字杀）。
+
+验证：全量 `pytest tests/unit tests/integration/test_workspace_api.py` → **955 passed /
+12 failed**（仍是缺 `pypdfium2` 的 PDF 用例）；新增 9 例服务层 + 3 例接口（绑选定文件夹且默认
+可写、区内可写而 `../` 被拒、相对路径被拒、不存在/非目录被拒、拒绝平台源码的三个方向、
+留空落家目录、只列目录且条目为绝对路径、从家目录起并能上一级、容器形态 503 语义、宿主浏览
+出参、创建接口收绝对路径）。前端 `npm run build` 通过；`workspace-smoke` **228/228**
+（新增：先问宿主、按错误码退回、宿主浏览器显示绝对路径与盘符且只列文件夹、读写边界文案）、
+`config-smoke` **80/80**。真机（本地服务形态，非容器）：`GET /api/v1/host/tree` 返回
+`C:\Users\zq` 的真实目录与 `C:`/`D:` 盘符入口；`POST /workspaces` 以绝对路径 `D:\测试` 登记成功
+（`mode=workspace_write`），目录树随即列出该文件夹的真实内容。
+
+边界（如实记录）：**选根是自由的，根内路径约束一字未改**——「只能在所选文件夹下面」由
+`resolve_in_workspace()` 保证。容器形态保留原样（固定根 + 相对 `path` + 默认只读），两种形态的
+`path` 不通用，切形态会让旧登记解析失败并**显式报错**。宿主形态只绑 `127.0.0.1`，是单人单机
+前提；多用户或公网部署必须回到容器形态。
+
 **前端容器与服务**：`npm run build` 通过（bundle 441.52 kB，未过告警阈值）；
 `workspace-smoke` **210/210** 未受影响。
 - **`doc/15` 只加了两条**：模块 3 的工作区与出网边界、第五节的三层边界表；该文件是事实源，

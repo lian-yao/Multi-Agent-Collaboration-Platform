@@ -722,6 +722,30 @@ export interface WorkspaceRootTree {
   limit: number;
 }
 
+/** 盘符 / 根入口（ADR-035 §3）：选择器要能换盘。 */
+export interface WorkspaceHostRoot {
+  name: string;
+  path: string;
+}
+
+/**
+ * **宿主**目录列表（ADR-035 §3）：用户当场选一个本机文件夹的那一步。
+ *
+ * 只在 `WORKSPACE_SOURCE=host`（后端直跑在本机）时可用；容器形态会以 503
+ * `WORKSPACE_HOST_BROWSE_DISABLED` 拒绝，那时只能用根内的 `WorkspaceRootTree`。
+ * `entries` 的 `path` 是**绝对路径**，选择器按它逐层往下走。
+ */
+export interface WorkspaceHostTree {
+  path: string;
+  parent: string | null;
+  home: string;
+  roots: WorkspaceHostRoot[];
+  depth: number;
+  entries: WorkspaceEntry[];
+  truncated: boolean;
+  limit: number;
+}
+
 export interface WorkspaceCreate {
   session_id?: string | null;
   path?: string | null;

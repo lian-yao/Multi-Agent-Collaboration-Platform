@@ -13,7 +13,27 @@ DAPR_DEFAULT_IMAGE_REGISTRY=ghcr dapr init --runtime-version 1.18.2
 
 5. 运行测试：`uv run pytest`
 
-## 一键部署
+## 默认形态：本地服务（一键直跑，ADR-035）
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/start_local.ps1     # 启动
+powershell -ExecutionPolicy Bypass -File scripts/start_local.ps1 -Stop   # 停止
+```
+
+这条脚本把四件事一次做完：起 Redis / PostgreSQL 容器 → 腾出 8000/3500/5173（停掉容器里的
+`backend` / `dapr-sidecar` / `frontend`，只 stop 不删数据）→ 起本地 Dapr sidecar 与后端
+（`app.workflows.worker`，绑 **127.0.0.1:8000**）→ 起前端 Vite dev（5173，`/api` 反代到 8000）。
+
+**为什么默认是这个形态**：工作区的授权单位是**用户当场选定的一个文件夹**，只有后端跑在
+宿主上，它看到的路径才是宿主路径——浏览器给不了宿主路径，bind mount 又在容器创建时固定
+（ADR-035）。所以在工作台点「工作区」→「浏览根目录」，浏览的是**你这台电脑的磁盘**，
+选中的文件夹内可读写、文件夹之外一律拒绝。
+
+绑定地址刻意收成回环：宿主目录浏览是「读整机目录结构」的能力，不要发布到不可信网络。
+
+日志与状态：进程 PID 记在 `%TEMP%\macp-local-run.json`，日志在 `%TEMP%\macp-local-*.log`。
+
+## 备选形态：容器一键部署
 
 进入 `deploy` 目录执行：
 
