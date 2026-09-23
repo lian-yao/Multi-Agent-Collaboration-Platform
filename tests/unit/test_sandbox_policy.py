@@ -146,6 +146,10 @@ def test_python_policy_rejects_syntax_errors():
         "pip3 install requests",
         "apt-get install curl",
         "apk add curl",
+        "yum install curl",
+        "dnf install curl",
+        "apt full-upgrade",
+        "apt-get remove curl",
         "sudo ls /root",
         "chmod 777 /etc/passwd",
         "dd if=/dev/zero of=/dev/sda",
@@ -154,6 +158,7 @@ def test_python_policy_rejects_syntax_errors():
         "pkill python",
         "shutdown -h now",
         "echo x > /dev/sda",
+        "echo x > /dev/mem",
     ],
 )
 def test_shell_policy_rejects_dangerous_commands(command):
@@ -169,6 +174,15 @@ def test_shell_policy_rejects_dangerous_commands(command):
         "python -c \"print(1+1)\"",
         "cat /tmp/data.txt",
         "wc -l /tmp/data.txt",
+        # 只读的查看命令：丢 stderr、看挂载与目录（2026-09-23 实测被误拦的那几条）
+        "findmnt -T /workspace 2>/dev/null",
+        "mount | grep -i workspace",
+        "ls -la /workspace 2>/dev/null",
+        "df -h /workspace",
+        "stat -c '%n inode=%i' /workspace/host-folder-marker.txt",
+        # 路径里带包管理器名字 ≠ 安装：早先 `\b(apt|apt-get)\b` 会把它拦下来
+        "ls -la /etc/apt",
+        "apt list --installed",
     ],
 )
 def test_shell_policy_allows_ordinary_commands(command):

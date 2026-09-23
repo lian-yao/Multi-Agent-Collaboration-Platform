@@ -2399,7 +2399,40 @@ Agent 的回答里写着「**本会话工具列表中不存在文件类工具**�
 
 另记一条**既有**的沙箱策略误判（不是本轮引入，Agent 自己绕过去了）：一条含
 `findmnt` / `mount | grep` 的**只读**命令被策略拒为「越权命令被拒绝（写入设备文件）」，
-模型改用 `stat` / `df` 拿到同样信息。属成员 C 的策略匹配面，待其评估是否收窄。
+模型改用 `stat` / `df` 拿到同样信息。**已在第十六轮修复**（见下）。
+
+**第十六轮（同日）：修沙箱策略误判——只读命令不该被拦**。使用者要求直接修掉上一轮记下的那条
+误判（含 `findmnt` / `mount | grep` 的只读命令被拒为「越权命令被拒绝（**写入设备文件**）」）。
+命中项就在 `app/sandbox/policy.py` 的 shell 规则里，即下面第 1 条；修它时对同族规则另做了一遍
+排查，又发现第 2 条**同型但未被实测命中**的误判面，一并收窄：
+
+1. **`2>/dev/null` 被当成"写设备文件"（实测命中的就是这条）**：规则原是 `>\s*/dev/`，于是
+   `findmnt -T /workspace 2>/dev/null`（丢弃 stderr 的常规写法，不碰任何设备）整条被拒。
+   改成 `>\s*/dev/(?!null\b|stdout\b|stderr\b)`：`/dev/null`、`/dev/stdout`、`/dev/stderr`
+   是"丢弃 / 转发输出"的标准流写法，放行；**写真实设备节点（`> /dev/sda`、`> /dev/mem`）
+   继续拦**。
+2. **包管理器规则会连路径一起拦（排查发现，不在那次实测的命令里）**：原规则
+   `\b(apt|apt-get|apk|yum|dnf)\b` 对 `ls /etc/apt`、`apt list` 这类**读操作**同样命中。
+   改成"同一条命令里出现改动系统的子命令才拦"：
+   `\b(apt|apt-get|apk|yum|dnf)\b[^|;&]*\b(install|add|update|upgrade|remove|purge|autoremove)\b`
+   ——`apt full-upgrade` 这类带前缀的子命令仍能命中 `\bupgrade\b`。
+
+验证（**两个方向都验**，避免"修误判"变成"放松边界"）：
+
+| 方向 | 命令 | 结果 |
+| --- | --- | --- |
+| 放行 | `findmnt -T /workspace 2>/dev/null`、`mount \| grep -i workspace`、`ls -la /workspace 2>/dev/null`、`df -h /workspace`、`stat -c '%n inode=%i' …` | 策略通过 |
+| 放行 | `ls -la /etc/apt`、`apt list --installed` | 策略通过（路径里带 apt ≠ 安装） |
+| 拦下 | `echo x > /dev/sda`、`echo x >/dev/mem` | 越权命令被拒绝（写入设备文件） |
+| 拦下 | `apt install curl`、`apt-get install curl`、`apk add curl`、`yum install curl`、`apt full-upgrade`、`pip install requests`、`curl http://example.com` | 越权命令被拒绝（安装 / 网络访问） |
+
+**真机**：把第一轮被拒的那条命令原样丢进真沙箱（读档位、挂 `D:\测试`）——`exit_code = 0`，
+输出里 `findmnt` 显示 `/workspace  D:\[/测试]  9p  ro,…`、`df` 显示
+`D:\ … Mounted on /workspace`、`ls -la /workspace` 列出 `66` / `host-folder-marker.txt` /
+`sessions`。单测：`test_sandbox_policy.py` 危险面包 +4（`yum install` / `dnf install` /
+`apt full-upgrade` / `apt-get remove` / `> /dev/mem`）、普通命令面 +7（上面放行那几条）。
+全量 `pytest tests/unit tests/integration/test_api.py tests/integration/test_workspace_api.py`
+→ **1028 passed / 12 failed**（12 条仍是缺 `pypdfium2` 的 PDF 用例，与上一轮同一批）。
 
 **前端容器与服务**：`npm run build` 通过（bundle 441.52 kB，未过告警阈值）；
 `workspace-smoke` **210/210** 未受影响。

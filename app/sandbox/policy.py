@@ -137,13 +137,25 @@ def check_shell_command(command: str) -> None:
 _FORBIDDEN_SHELL_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"\b(curl|wget|nc|ncat|telnet|ssh|scp|ftp|socat)\b", "网络访问"),
     (r"\b(pip|pip3)\s+install\b", "运行期安装依赖"),
-    (r"\b(apt|apt-get|apk|yum|dnf)\b", "运行期安装系统包"),
+    # 包管理器只在**同一条命令里出现改动系统的子命令**时拦。原先的 `\b(apt|apt-get)\b`
+    # 会把 `ls /etc/apt`、`apt list` 这类读操作连路径一起拦下来——这是修下面那条
+    # `/dev/null` 误判时对同族规则排查发现的第二处误判面（**不在** 2026-09-23 那次实测
+    # 命中的命令里；`full-upgrade` 这类带前缀的子命令仍能命中 `\bupgrade\b`，
+    # install/add/update… 同理）。
+    (
+        r"\b(apt|apt-get|apk|yum|dnf)\b[^|;&]*\b(install|add|update|upgrade|remove|purge|autoremove)\b",
+        "运行期安装系统包",
+    ),
     (r"\bsudo\b", "提权"),
     (r"\b(chmod|chown)\b", "修改权限"),
     (r"\b(mkfs|fdisk|dd)\b", "破坏性磁盘操作"),
     (r"\brm\s+-[a-z]*[rf]", "删除文件"),
     (r"\b(shutdown|reboot|kill|pkill)\b", "影响主机进程"),
-    (r">\s*/dev/", "写入设备文件"),
+    # `> /dev/xxx` 写**真实设备节点**是危险的，继续拦；但 `> /dev/null`（含 `2>` / `&>` 写法）
+    # 与 `/dev/stdout`、`/dev/stderr` 是"丢弃 / 转发输出"的常规写法，不碰任何设备。
+    # 2026-09-23 实测：一条只读的 `findmnt -T /workspace 2>/dev/null` 被整条判成
+    # "写入设备文件"，模型只能改用 stat/df 绕过去。
+    (r">\s*/dev/(?!null\b|stdout\b|stderr\b)", "写入设备文件"),
 )
 
 
