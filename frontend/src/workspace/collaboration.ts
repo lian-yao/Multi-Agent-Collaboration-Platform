@@ -16,10 +16,12 @@
  */
 import type {
   Agent,
+  FlowNodeSummary,
   Metric,
   PlanStepSummary,
   StageToolCall,
   StageTraceItem,
+  ValidationSummary,
   Workflow,
   WorkflowStageTrace,
 } from "../types/api";
@@ -63,6 +65,31 @@ function metaForRole(stages: StageMeta[], role: string): StageMeta {
   );
 }
 
+/** 平台节点（意图 / 编排 / 合成 / 校验）的展示元信息：它们没有 Agent 角色。 */
+const PLATFORM_META: Record<string, { label: string; responsibility: string }> = {
+  intent: { label: "意图识别", responsibility: "读懂用户这一轮要什么、要不要拆成多个子任务。" },
+  plan: { label: "编排器", responsibility: "把目标拆成子任务，并决定依赖与并行波次。" },
+  synthesize: { label: "合成器", responsibility: "合并多路子任务产出，冲突消解后按约束成稿。" },
+  validate: { label: "结果校验", responsibility: "核对交付物是否满足原始意图与约束。" },
+};
+
+export function flowKindLabel(kind: string): string {
+  return PLATFORM_META[kind]?.label ?? kind;
+}
+
+function metaForFlowNode(stages: StageMeta[], node: FlowNodeSummary): StageMeta {
+  if (node.kind === "worker") {
+    return metaForRole(stages, node.role || node.id);
+  }
+  const platform = PLATFORM_META[node.kind];
+  return {
+    id: node.id,
+    label: node.label || platform?.label || node.kind,
+    agent: node.kind,
+    responsibility: platform?.responsibility ?? "平台节点。",
+  };
+}
+
 /**
  * 按「阶段 id 优先、角色兜底」解析一条步骤的元信息。
  *
@@ -72,9 +99,13 @@ function metaForRole(stages: StageMeta[], role: string): StageMeta {
  * 两种口径并存的观感问题。所以判断只放在这里。
  */
 export function stageMetaFor(stages: StageMeta[], id: string, role?: string): StageMeta {
-  return stages.some((stage) => stage.id === id)
-    ? metaForStage(stages, id)
-    : metaForRole(stages, role || id);
+  if (stages.some((stage) => stage.id === id)) return metaForStage(stages, id);
+  // 平台节点（意图 / 编排 / 合成 / 校验）用固定名，不能回落成「id + Agent」。
+  const platform = PLATFORM_META[id];
+  if (platform) {
+    return { id, label: platform.label, agent: id, responsibility: platform.responsibility };
+  }
+  return metaForRole(stages, role || id);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -88,15 +119,32 @@ export function planSteps(workflow: Workflow | null): PlanStepSummary[] {
 }
 
 /**
+ * 整条流程的节点序列（ADR-038）：意图 / 编排 / 子任务 / 合成 / 校验。
+ *
+ * 画布**优先读它**，读不到再回落 `plan`（升级前发起的执行只有 `plan`），
+ * 最后才回落静态三段。三级回落是为了让旧执行不碎：把「新链路画不全」变成
+ * 「按旧形状画」，而不是整块空白。
+ */
+export function flowNodes(workflow: Workflow | null): FlowNodeSummary[] {
+  const flow = workflow?.checkpoint?.flow;
+  return Array.isArray(flow) ? flow : [];
+}
+
+/**
  * 计划步骤的显示状态。
  *
  * `skipped` 必须原样透出：它和 `pending` 在界面上长得像，但语义完全相反——
  * 一个是「还在等」，一个是「因为上游失败已经放弃」。
  */
 export function planStepStatus(step: PlanStepSummary): string {
-  if (step.status === "completed") return "completed";
-  if (step.status === "failed") return "failed";
-  if (step.status === "skipped") return "skipped";
+  return statusOf(step.status);
+}
+
+/** 计划步骤与流程节点共用同一份状态词汇（`skipped` 与 `pending` 语义相反）。 */
+export function statusOf(status: string): string {
+  if (status === "completed") return "completed";
+  if (status === "failed") return "failed";
+  if (status === "skipped") return "skipped";
   return "pending";
 }
 
@@ -196,6 +244,8 @@ export type CollabToolCall = {
 export type CollabNode = {
   /** 节点 id：静态阶段是 `collect/analyze/report`，动态链路是计划步骤 id。 */
   id: string;
+  /** 节点类型（ADR-038）：平台节点与子任务在画布上区分展示。 */
+  kind: "intent" | "plan" | "worker" | "synthesize" | "validate";
   /** Agent 角色 id，用量采样按它归集。 */
   agentId: string;
   /** Agent 显示名。 */
@@ -245,6 +295,14 @@ export type CollabGraph = {
   mode: string;
   /** 整条链路都没有分阶段轨迹时的原因（目前只有动态编排走到这里）。 */
   traceReason: string | null;
+  /** 走了哪条路：`single` 单 Agent 直答 / `multi` 波次协作（静态链路为 null）。 */
+  route: string | null;
+  /** 存在失败/跳过的子任务：结果是部分的，界面上要显式说出来。 */
+  partial: boolean;
+  failedSteps: string[];
+  skippedSteps: string[];
+  /** 校验器的结论；没跑校验时为 null。 */
+  validation: ValidationSummary | null;
 };
 
 /**
@@ -336,6 +394,7 @@ export function buildCollaboration({
 }): CollabGraph {
   const traceReason =
     traces && !traces.items.length ? traces.reason ?? null : null;
+  const checkpoint = workflow?.checkpoint ?? null;
   const empty: CollabGraph = {
     nodes: [],
     edges: [],
@@ -343,15 +402,35 @@ export function buildCollaboration({
     task: traces?.task ?? null,
     mode: traces?.mode ?? "static",
     traceReason,
+    route: null,
+    partial: false,
+    failedSteps: [],
+    skippedSteps: [],
+    validation: null,
   };
   if (!workflow) return empty;
 
-  // 1) 参与本次执行的节点，静态阶段与计划步骤收敛成同一种形状
+  // 1) 参与本次执行的节点：流程序列 → 计划步骤 → 静态三段，逐级回落。
   const plan = planSteps(workflow);
-  const entries: { id: string; meta: StageMeta; status: string; deps: string[] }[] =
-    plan.length
+  const flow = flowNodes(workflow);
+  const entries: {
+    id: string;
+    kind: CollabNode["kind"];
+    meta: StageMeta;
+    status: string;
+    deps: string[];
+  }[] = flow.length
+    ? flow.map((node) => ({
+        id: node.id,
+        kind: node.kind,
+        meta: metaForFlowNode(stages, node),
+        status: statusOf(node.status),
+        deps: node.depends_on ?? [],
+      }))
+    : plan.length
       ? plan.map((step) => ({
           id: step.id,
+          kind: "worker" as const,
           meta: metaForRole(stages, step.role),
           status: planStepStatus(step),
           deps: step.depends_on ?? [],
@@ -360,6 +439,7 @@ export function buildCollaboration({
           .filter((stage) => agents.some((agent) => agent.id === stage.agent))
           .map((stage, index, list) => ({
             id: stage.id,
+            kind: "worker" as const,
             meta: stage,
             status: stageStatus(stage.id, workflow, completed),
             // 静态链路是固定串行流水线：每一步都依赖上一步
@@ -387,20 +467,25 @@ export function buildCollaboration({
     const agent = agents.find((item) => item.id === entry.meta.agent);
     const trace = traceByStage.get(entry.id);
     const wave = level.get(entry.id) ?? 0;
+    // 平台节点没有 Agent 角色、不谈模型参数与用量：它们跑的是平台自己的模型配置。
+    const isWorker = entry.kind === "worker";
     return {
       id: entry.id,
-      agentId: entry.meta.agent,
-      name: agent?.name ?? `${entry.meta.agent} Agent`,
+      kind: entry.kind,
+      agentId: isWorker ? entry.meta.agent : entry.kind,
+      name: isWorker
+        ? agent?.name ?? `${entry.meta.agent} Agent`
+        : entry.meta.label,
       stageLabel: entry.meta.label,
       responsibility: entry.meta.responsibility,
       status: entry.status,
       order: ids.indexOf(entry.id) + 1,
       wave,
       parallel: (waveCounts.get(wave) ?? 1) > 1,
-      model: agent?.model ?? "由运行时提供",
-      provider: agent?.provider_name ?? agent?.provider ?? "",
-      params: paramsOf(agent),
-      usage: usageFor(metrics, entry.meta.agent),
+      model: isWorker ? agent?.model ?? "由运行时提供" : "平台节点",
+      provider: isWorker ? agent?.provider_name ?? agent?.provider ?? "" : "",
+      params: isWorker ? paramsOf(agent) : [],
+      usage: isWorker ? usageFor(metrics, entry.meta.agent) : [],
       prompt: trace?.input ?? (entry.deps.length ? null : traces?.task ?? null),
       promptFrom: trace?.input_from ?? null,
       output: trace?.output ?? "",
@@ -447,7 +532,12 @@ export function buildCollaboration({
     edges,
     waves,
     task: traces?.task ?? null,
-    mode: traces?.mode ?? (plan.length ? "dynamic" : "static"),
+    mode: traces?.mode ?? (plan.length || flow.length ? "dynamic" : "static"),
     traceReason,
+    route: checkpoint?.route ?? null,
+    partial: Boolean(checkpoint?.partial),
+    failedSteps: checkpoint?.failed_steps ?? [],
+    skippedSteps: checkpoint?.skipped_steps ?? [],
+    validation: checkpoint?.validation ?? null,
   };
 }

@@ -24,6 +24,7 @@ from app.orchestration.pipeline import (
     PipelineStage,
     deserialize_pipeline_state,
 )
+from app.orchestration.dynamic_graph import dynamic_state_label
 from app.orchestration.pipeline_graph import role_for_stage
 from app.workflows.state import read_step_result
 
@@ -42,8 +43,8 @@ STAGE_TRACE_MAX_TOOL_PAYLOAD_CHARS = 4_000
 """
 
 DYNAMIC_TRACE_REASON = (
-    "本次执行走的是动态编排链路，它当前不落盘逐步骤执行轨迹（ADR-019）；"
-    "可执行到的替代信息是各步骤的阶段状态与「任务记录」里的工具调用链路。"
+    "本次执行是升级前的动态编排（checkpoint 里没有 flow 序列），"
+    "它当时不落盘逐节点轨迹；重新发起一次执行即可看到意图 / 编排 / 并行 / 合成 / 校验的完整轨迹。"
 )
 
 ReadStep = Callable[[str, str], dict[str, Any] | None]
@@ -189,6 +190,118 @@ def _stage_item(
     return item
 
 
+def _dynamic_missing_reason(node: dict[str, Any]) -> str:
+    """动态节点没有轨迹时给具体原因：状态取值决定下一步该做什么。"""
+
+    status = str(node.get("status") or "pending")
+    if status == "completed":
+        return "该节点已完成，但它的执行状态已不在状态存储中（状态可能已被清理）。"
+    if status == "running":
+        return (
+            "该节点正在执行：轨迹在节点执行完成后写入状态存储，稍后再打开这里即可看到；"
+            "当下想跟进工具调用可以走「任务记录」页。"
+        )
+    if status == "failed":
+        return "该节点执行失败，轨迹在重试期间被覆盖或尚未落盘；失败原因见工作流错误与任务记录。"
+    if status == "skipped":
+        return "该节点被跳过（上游未成功完成或意图未解析），因此没有执行轨迹。"
+    return "该节点尚未开始。"
+
+
+def _dynamic_item(
+    node: dict[str, Any],
+    payload: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """组装单个动态节点的轨迹条目。
+
+    数据形状与静态阶段刻意保持一致（`input` 是上游正文、`output` 是本节点产出、
+    `tool_calls` 是本节点内的调用），因此弹窗与画布不需要为动态链路另写渲染分支。
+    """
+
+    node_id = str(node.get("id") or "")
+    item: dict[str, Any] = {
+        "stage": node_id,
+        "role": str(node.get("role") or node.get("kind") or node_id),
+        "input": None,
+        "input_from": None,
+        "output": None,
+        "tool_calls": [],
+        "truncated": False,
+        "reason": None,
+    }
+
+    if payload is None:
+        item["reason"] = _dynamic_missing_reason(node)
+        return item
+
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        item["reason"] = "状态存储里的该节点载荷缺少结果字段。"
+        return item
+
+    previous = result.get("previous")
+    if isinstance(previous, dict) and isinstance(previous.get("content"), str):
+        item["input"], cut = _clip_text(previous["content"], STAGE_TRACE_MAX_OUTPUT_CHARS)
+        item["truncated"] = item["truncated"] or cut
+        item["input_from"] = str(previous.get("step") or "") or None
+    elif node.get("depends_on"):
+        # 没有上游正文时至少说清「依赖谁」：合成器/校验器这类节点的输入本来就是一串节点。
+        item["input_from"] = ",".join(str(dep) for dep in node["depends_on"])
+
+    content = result.get("content")
+    if isinstance(content, str):
+        item["output"], cut = _clip_text(content, STAGE_TRACE_MAX_OUTPUT_CHARS)
+        item["truncated"] = item["truncated"] or cut
+
+    item["tool_calls"], cut = _tool_calls(result)
+    item["truncated"] = item["truncated"] or cut
+
+    error = result.get("error")
+    if error and not item["output"] and not item["tool_calls"]:
+        item["reason"] = str(error)
+    return item
+
+
+def _read_dynamic_traces(
+    workflow_id: str,
+    summary: dict[str, Any],
+    reader: ReadStep,
+) -> dict[str, Any]:
+    """动态链路的逐节点轨迹（ADR-038）。
+
+    `checkpoint.flow` 是节点清单：没有它说明这是升级前的动态执行（当时不落盘逐节点
+    轨迹），此时如实返回 `not_integrated`，而不是给一个空白列表让人以为任务没跑。
+    """
+
+    flow = summary.get("flow")
+    if not isinstance(flow, list) or not flow:
+        return {
+            "workflow_id": workflow_id,
+            "mode": "dynamic",
+            "task": None,
+            "availability": "not_integrated",
+            "reason": DYNAMIC_TRACE_REASON,
+            "items": [],
+        }
+
+    round_number = int(summary.get("round") or 1)
+    items: list[dict[str, Any]] = []
+    task: str | None = summary.get("rewritten_task")
+    for node in flow:
+        if not isinstance(node, dict) or not node.get("id"):
+            continue
+        payload = reader(workflow_id, dynamic_state_label(str(node["id"]), round_number))
+        items.append(_dynamic_item(node, payload))
+    return {
+        "workflow_id": workflow_id,
+        "mode": "dynamic",
+        "task": task,
+        "availability": "available",
+        "reason": None,
+        "items": items,
+    }
+
+
 def read_stage_traces(
     workflow_id: str,
     *,
@@ -207,17 +320,10 @@ def read_stage_traces(
     """
 
     summary = checkpoint or {}
-    if summary.get("mode") == "dynamic":
-        return {
-            "workflow_id": workflow_id,
-            "mode": "dynamic",
-            "task": None,
-            "availability": "not_integrated",
-            "reason": DYNAMIC_TRACE_REASON,
-            "items": [],
-        }
-
     reader: ReadStep = read_step or read_step_result
+    if summary.get("mode") == "dynamic":
+        return _read_dynamic_traces(workflow_id, summary, reader)
+
     completed = [str(step) for step in (summary.get("completed_steps") or [])]
     current = summary.get("current_step")
     current_stage = str(current) if current else None

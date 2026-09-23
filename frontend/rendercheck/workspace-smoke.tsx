@@ -297,6 +297,198 @@ check(
   "侧栏画出三个 Agent 节点",
   ["信息收集 Agent", "数据分析 Agent", "报告生成 Agent"].every((name) => serial.includes(name)),
 );
+
+/* -------------------------------------------------------------------------- */
+/* ADR-038：自动编排的新形状（意图 → 编排 → 波次并行 → 合成 → 校验）            */
+/* -------------------------------------------------------------------------- */
+
+/** 新链路（multi）的 checkpoint：flow 是节点清单，plan 仍只装子任务。 */
+const dynamicCheckpoint: NonNullable<Workflow["checkpoint"]> = {
+  status: "completed",
+  mode: "dynamic",
+  route: "multi",
+  round: 1,
+  rewritten_task: "对比 A 与 B 的实测数据并出报告",
+  rewrite_source: "model",
+  intent: {
+    intent_type: "report",
+    user_goal: "出一份对比报告",
+    constraints: ["中文"],
+    need_multi_subtask: true,
+  },
+  intent_source: "model",
+  partial: true,
+  failed_steps: ["s2"],
+  skipped_steps: ["s3"],
+  validation: { satisfied: true, defects: [], missing: [], source: "model" },
+  completed_steps: ["s1"],
+  flow: [
+    { id: "intent", kind: "intent", label: "意图识别", role: null, depends_on: [], status: "completed", wave: 0 },
+    { id: "plan", kind: "plan", label: "编排器", role: null, depends_on: ["intent"], status: "completed", wave: 1 },
+    { id: "s1", kind: "worker", label: "信息收集 Agent", role: "collector", depends_on: ["plan"], status: "completed", wave: 2 },
+    { id: "s2", kind: "worker", label: "信息收集 Agent", role: "collector", depends_on: ["plan"], status: "failed", wave: 2 },
+    { id: "s3", kind: "worker", label: "数据分析 Agent", role: "analyst", depends_on: ["plan", "s1", "s2"], status: "skipped", wave: 3 },
+    { id: "synthesize", kind: "synthesize", label: "合成器", role: "reporter", depends_on: ["s1", "s2", "s3"], status: "completed", wave: 4 },
+    { id: "validate", kind: "validate", label: "结果校验", role: null, depends_on: ["synthesize"], status: "completed", wave: 5 },
+  ],
+  plan: [
+    { id: "s1", role: "collector", depends_on: [], status: "completed" },
+    { id: "s2", role: "collector", depends_on: [], status: "failed" },
+    { id: "s3", role: "analyst", depends_on: ["s1", "s2"], status: "skipped" },
+  ],
+};
+
+const dynamicWorkflow: Workflow = {
+  id: "w-dynamic",
+  session_id: "s-1",
+  agent_run_id: "r-2",
+  status: "completed",
+  current_step: null,
+  checkpoint: dynamicCheckpoint,
+  created_at: "2026-09-24T10:00:00Z",
+  updated_at: "2026-09-24T10:00:30Z",
+  completed_at: "2026-09-24T10:00:30Z",
+};
+
+const dynamicGraph = buildCollaboration({
+  stages: collabStages,
+  agents: collabAgents,
+  workflow: dynamicWorkflow,
+  completed: new Set(["s1"]),
+  traces: null,
+  metrics: [],
+});
+
+check(
+  "ADR-038：画布优先读 flow，七个节点一个不少",
+  dynamicGraph.nodes.map((node) => node.id).join(",") ===
+    "intent,plan,s1,s2,s3,synthesize,validate",
+  dynamicGraph.nodes.map((node) => node.id).join(","),
+);
+check(
+  "ADR-038：子任务仍是 Agent 节点，平台节点用固定名",
+  dynamicGraph.nodes[0].name === "意图识别" &&
+    dynamicGraph.nodes[1].name === "编排器" &&
+    dynamicGraph.nodes[2].name === "信息收集 Agent" &&
+    dynamicGraph.nodes[5].name === "合成器" &&
+    dynamicGraph.nodes[6].name === "结果校验",
+);
+check(
+  "ADR-038：平台节点不谈模型参数与用量（它们不是使用者配置的 Agent）",
+  dynamicGraph.nodes[0].params.length === 0 &&
+    dynamicGraph.nodes[0].usage.length === 0 &&
+    dynamicGraph.nodes[0].model === "平台节点" &&
+    dynamicGraph.nodes[2].params.length > 0,
+);
+check(
+  "ADR-038：波次算出来是「意图 → 编排 → 两路并行 → 串行 → 合成 → 校验」",
+  dynamicGraph.waves.map((wave) => wave.map((node) => node.id).join("+")).join("|") ===
+    "intent|plan|s1+s2|s3|synthesize|validate",
+  dynamicGraph.waves.map((wave) => wave.map((node) => node.id).join("+")).join("|"),
+);
+check(
+  "ADR-038：部分失败与校验结论随图带出来（不只在正文里说）",
+  dynamicGraph.partial &&
+    dynamicGraph.failedSteps.join(",") === "s2" &&
+    dynamicGraph.skippedSteps.join(",") === "s3" &&
+    dynamicGraph.route === "multi" &&
+    dynamicGraph.validation?.satisfied === true,
+);
+
+const dynamicLayout = layoutCollaboration(dynamicGraph, 720);
+check(
+  "ADR-038：平台节点与 Agent 节点在布局上可分（variant）",
+  dynamicLayout.nodes.filter((node) => node.variant === "platform").length === 6 &&
+    dynamicLayout.nodes.filter((node) => node.variant === "worker").length === 3,
+  JSON.stringify(dynamicLayout.nodes.map((node) => node.variant)),
+);
+
+let dynamicSerial = "";
+try {
+  dynamicSerial = renderToStaticMarkup(
+    <CollaborationGraph graph={dynamicGraph} />,
+  );
+  check("ADR-038：新链路画布可渲染", dynamicSerial.length > 400, `长度 ${dynamicSerial.length}`);
+} catch (cause) {
+  check("ADR-038：新链路画布可渲染", false, cause instanceof Error ? cause.message : String(cause));
+}
+
+check(
+  "ADR-038：平台节点带 dash 边样式，看得见「这不是 Agent」",
+  dynamicSerial.includes("variant-platform"),
+);
+check(
+  "ADR-038：部分失败画在画布上",
+  dynamicSerial.includes("部分子任务未完成") &&
+    dynamicSerial.includes("失败：s2") &&
+    dynamicSerial.includes("跳过：s3"),
+);
+check(
+  "ADR-038：平台节点不画角色图标",
+  dynamicSerial.includes("lucide-target") &&
+    dynamicSerial.includes("lucide-list-tree") &&
+    dynamicSerial.includes("lucide-git-merge") &&
+    dynamicSerial.includes("lucide-shield-check"),
+);
+
+/** 单 Agent 直答：只有「意图 + 一个子任务」，没有编排 / 合成 / 校验三个平台节点。 */
+const singleGraph = buildCollaboration({
+  stages: collabStages,
+  agents: collabAgents,
+  workflow: {
+    ...dynamicWorkflow,
+    id: "w-single",
+    checkpoint: {
+      ...dynamicCheckpoint,
+      route: "single",
+      partial: false,
+      failed_steps: [],
+      skipped_steps: [],
+      validation: null,
+      flow: [
+        { id: "intent", kind: "intent", label: "意图识别", role: null, depends_on: [], status: "completed", wave: 0 },
+        { id: "s1", kind: "worker", label: "报告生成 Agent", role: "reporter", depends_on: ["intent"], status: "completed", wave: 1 },
+      ],
+      plan: [{ id: "s1", role: "reporter", depends_on: [], status: "completed" }],
+    },
+  },
+  completed: new Set(["s1"]),
+  traces: null,
+  metrics: [],
+});
+
+check(
+  "ADR-038：单 Agent 直答只画意图 + 一个子任务",
+  singleGraph.nodes.map((node) => node.id).join(",") === "intent,s1" &&
+    singleGraph.route === "single" &&
+    !singleGraph.partial,
+  singleGraph.nodes.map((node) => node.id).join(","),
+);
+
+/** 升级前发起的执行只有 plan：画布回落到旧形状，不整块空白。 */
+const legacyGraph = buildCollaboration({
+  stages: collabStages,
+  agents: collabAgents,
+  workflow: {
+    ...dynamicWorkflow,
+    id: "w-legacy",
+    checkpoint: {
+      mode: "dynamic",
+      status: "completed",
+      completed_steps: ["s1"],
+      plan: dynamicCheckpoint.plan,
+    },
+  },
+  completed: new Set(["s1"]),
+  traces: null,
+  metrics: [],
+});
+
+check(
+  "ADR-038：没有 flow 的旧执行回落到 plan，不空白",
+  legacyGraph.nodes.map((node) => node.id).join(",") === "s1,s2,s3",
+  legacyGraph.nodes.map((node) => node.id).join(","),
+);
 // 圆面图形与配置页共用 components/AgentGlyph.tsx 的解析：三个角色各拿自己的图标，
 // 而不是清一色机器人。断言 icon 的 kebab 类名——键与图形错配是静默的，只有这样才能发现。
 check(

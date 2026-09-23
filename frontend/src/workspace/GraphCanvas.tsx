@@ -23,7 +23,17 @@
  * 能拖只会让人以为拖动能改变什么，而它什么都不会改变。
  */
 import { useEffect, useRef, useState, type CSSProperties } from "react";
-import { CircleAlert, LoaderCircle, Maximize2, Pause, Wrench } from "lucide-react";
+import {
+  CircleAlert,
+  GitMerge,
+  ListTree,
+  LoaderCircle,
+  Maximize2,
+  Pause,
+  ShieldCheck,
+  Target,
+  Wrench,
+} from "lucide-react";
 import { Status } from "../components/Status";
 import { AgentGlyph } from "../components/AgentGlyph";
 import type { CollabGraph, CollabNode, CollabToolCall } from "./collaboration";
@@ -54,6 +64,8 @@ const WIDE: Geometry = { size: 42, gap: 96, padX: 96, padY: 44, padBottom: 74, i
 export type PlacedNode = {
   id: string;
   kind: "agent" | "start" | "end";
+  /** 子任务节点还是平台节点（意图 / 编排 / 合成 / 校验）：只影响视觉区分。 */
+  variant: "worker" | "platform";
   /** 圆心（画布坐标系）。 */
   x: number;
   y: number;
@@ -208,6 +220,7 @@ export function layoutCollaboration(
   const start: PlacedNode = {
     id: START_ID,
     kind: "start",
+    variant: "platform",
     x: w / 2,
     y: yOf(0),
     size: m.size,
@@ -220,6 +233,7 @@ export function layoutCollaboration(
   const end: PlacedNode = {
     id: END_ID,
     kind: "end",
+    variant: "platform",
     x: w / 2,
     y: yOf(rows - 1),
     size: m.size,
@@ -237,6 +251,7 @@ export function layoutCollaboration(
       nodes.push({
         id: node.id,
         kind: "agent",
+        variant: node.kind === "worker" ? "worker" : "platform",
         x: xOf(index, wave.length),
         y,
         size: m.size,
@@ -360,7 +375,24 @@ function NodeGlyph({ node, size }: { node: PlacedNode; size: number }) {
   if (node.status === "failed") return <CircleAlert size={size} />;
   if (node.status === "paused") return <Pause size={size} />;
   if (node.status === "running") return <LoaderCircle size={size} className="spin" />;
+  // 平台节点（意图 / 编排 / 合成 / 校验）不是 Agent：不套角色图标，
+  // 否则画布会给出「这里是一个它在跑的角色」这种错误暗示。
+  if (node.node && node.node.kind !== "worker") return <PlatformGlyph kind={node.node.kind} size={size} />;
   return <AgentGlyph role={node.node?.agentId ?? ""} name={node.label} size={size} />;
+}
+
+/**
+ * 平台节点的图标：意图（靶心）、编排（树）、合成（归并）、校验（盾）。
+ *
+ * 与 Agent 角色图标分开是刻意的：这四个节点**不是**使用者在「团队」里配置的 Agent，
+ * 给它们套角色图标会让人以为「平台又派了一个角色来干活」。
+ */
+function PlatformGlyph({ kind, size }: { kind: string; size: number }) {
+  if (kind === "intent") return <Target size={size} />;
+  if (kind === "plan") return <ListTree size={size} />;
+  if (kind === "synthesize") return <GitMerge size={size} />;
+  if (kind === "validate") return <ShieldCheck size={size} />;
+  return <span className="cv-dot" />;
 }
 
 /**
@@ -402,20 +434,22 @@ function NodeDetail({ node }: { node: CollabNode }) {
           </ul>
         </div>
       )}
-      <div className="cv-pop-block">
-        <h5>生效参数</h5>
-        <dl>
-          {node.params.map((param) => (
-            <div key={param.key} className={param.overridden ? "override" : ""}>
-              <dt>
-                {param.label}
-                {param.overridden && <i>显式覆盖</i>}
-              </dt>
-              <dd>{param.value}</dd>
-            </div>
-          ))}
-        </dl>
-      </div>
+      {node.params.length > 0 && (
+        <div className="cv-pop-block">
+          <h5>生效参数</h5>
+          <dl>
+            {node.params.map((param) => (
+              <div key={param.key} className={param.overridden ? "override" : ""}>
+                <dt>
+                  {param.label}
+                  {param.overridden && <i>显式覆盖</i>}
+                </dt>
+                <dd>{param.value}</dd>
+              </div>
+            ))}
+          </dl>
+        </div>
+      )}
       <div className="cv-pop-block">
         <h5>Token 消耗</h5>
         {node.usage.length ? (
@@ -551,6 +585,22 @@ export function CollaborationCanvas({
 
   return (
     <div className={`cv-canvas ${dense ? "dense" : "wide"}`} ref={ref} style={{ height: h }}>
+      {/*
+        「部分完成」必须在画布上说出来（ADR-038 §4）：终态可能仍是 completed，
+        但结果是部分的。只在正文里写一句、画布上不体现，会让「已完成的绿点」误导人。
+      */}
+      {graph.partial && (
+        <div className="cv-partial" role="status">
+          <CircleAlert size={dense ? 11 : 13} />
+          <b>部分子任务未完成</b>
+          <span>
+            {graph.failedSteps.length
+              ? `失败：${graph.failedSteps.join("、")}`
+              : "有子任务被跳过"}
+            {graph.skippedSteps.length ? `；跳过：${graph.skippedSteps.join("、")}` : ""}
+          </span>
+        </div>
+      )}
       <svg className="cv-svg cv-svg-base" viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" aria-hidden="true">
         <defs>
           <marker
@@ -640,7 +690,9 @@ export function CollaborationCanvas({
       {nodes.map((node) => (
         <div
           key={node.id}
-          className={`cv-node kind-${node.kind} ${node.status}${node.visited ? " visited" : ""}`}
+          className={`cv-node kind-${node.kind} variant-${node.variant} ${node.status}${
+            node.visited ? " visited" : ""
+          }`}
           style={{
             left: node.x,
             top: node.y,

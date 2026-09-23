@@ -78,6 +78,35 @@ export interface PlanStepSummary {
   role: string;
   depends_on: string[];
   status: "pending" | "completed" | "failed" | "skipped";
+  /** 该步期望的输出形态（ADR-038）；旧计划没有这个字段。 */
+  expected_output?: string;
+  /** 该步允许的重试次数（不含首次）；`null`/undefined = 用服务端默认。 */
+  retry?: number | null;
+  /** 该步模型调用的超时秒数；`null`/undefined = 用服务端默认。 */
+  timeout_seconds?: number | null;
+}
+
+/** 动态编排的流程序列节点（ADR-038）：整条流程里除了子任务还有平台节点。 */
+export interface FlowNodeSummary {
+  id: string;
+  /** `intent` 意图 / `plan` 编排 / `worker` 子任务 / `synthesize` 合成 / `validate` 校验。 */
+  kind: "intent" | "plan" | "worker" | "synthesize" | "validate";
+  label?: string;
+  /** 子任务才有角色；平台节点为 null。 */
+  role?: string | null;
+  depends_on?: string[];
+  status: "pending" | "completed" | "failed" | "skipped";
+  /** 波次序号（0 起）；同波 = 并行。 */
+  wave?: number;
+}
+
+/** 校验器结论（ADR-038 §5）。 */
+export interface ValidationSummary {
+  satisfied: boolean;
+  defects?: string[];
+  missing?: string[];
+  /** `model` / `fallback`（校验器不可用时视为通过）。 */
+  source?: string;
 }
 
 export interface Workflow {
@@ -97,6 +126,32 @@ export interface Workflow {
     plan_source?: string;
     /** 动态链路才有的协作计划；静态链路下为 undefined。 */
     plan?: PlanStepSummary[];
+    /** 改写结果（ADR-037）：使用者要能看见"平台把我的话改成了什么"。 */
+    rewritten_task?: string | null;
+    rewrite_source?: string | null;
+    /** 意图识别结果（ADR-038 §1）；意图不可用时为 null。 */
+    intent?: {
+      intent_type?: string;
+      user_goal?: string;
+      constraints?: string[];
+      need_multi_subtask?: boolean;
+    } | null;
+    intent_source?: string | null;
+    /** `single` = 单 Agent 直答（跳过编排与并行），`multi` = 波次协作。 */
+    route?: "single" | "multi" | string;
+    /** 当前轮次；校验不达标才会到 2。 */
+    round?: number;
+    validation_rounds?: number;
+    /** 还差哪一波没跑完（运行时可见）；全部有结果时为 null。 */
+    current_wave?: number | null;
+    /** 失败的子任务 id：结果仍是 completed，但内容是部分的。 */
+    failed_steps?: string[];
+    skipped_steps?: string[];
+    /** 存在失败/跳过的子任务：终态可能仍是 completed。 */
+    partial?: boolean;
+    validation?: ValidationSummary | null;
+    /** 整条流程（意图 / 编排 / 子任务 / 合成 / 校验）；画布优先读它。 */
+    flow?: FlowNodeSummary[];
   } | null;
   created_at: string;
   updated_at: string;
