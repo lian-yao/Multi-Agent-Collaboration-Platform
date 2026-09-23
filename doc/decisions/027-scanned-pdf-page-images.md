@@ -130,7 +130,8 @@ pdfium 交出来的是**裸像素缓冲**（实测 `n_channels=3`、`stride=widt
 - `app/attachments/prompt.py`：附件数按 **id 去重**计（展开后会虚高）；把「没有可用正文」与
   「超出长度上限」拆成两句不同的说明；清单带上 `ready` 项的降级说明；
 - `app/attachments/__init__.py`：转出 `render_pdf_pages` / `RenderedPages` / 页数上限；
-- `pyproject.toml` + `uv.lock`：新增 `pypdfium2==5.13.0`（BSD-3 / Apache-2.0）；
+- `pyproject.toml` + `uv.lock` + `doc/requirements.txt`：新增 `pypdfium2==5.13.0`
+  （BSD-3 / Apache-2.0；三处必须同步，见 `AGENTS.md` 硬性约束 3）；
 - `frontend/src/workspace/attachments.ts`：`describeAttachment` 显示 `ready` 项自带的降级说明；
 - 测试：`tests/unit/test_pdf_render.py`（新增 13 例）、`test_attachments.py`（展开 / 计数 / 两句说明
   分开 / 渲染失败降级）、`test_attachment_fixtures.py`（两份夹具的期望从"失败"改为"ready + 页面图像"）、

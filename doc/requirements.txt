@@ -33,6 +33,9 @@ pydantic==2.12.5
 pydantic-settings==2.15.0
 python-dotenv==1.2.3
 
+# 附件解析 / 扫描件 PDF 渲染（ADR-027）：wheel 自带 pdfium 二进制，无系统依赖
+pypdfium2==5.13.0
+
 pytest==9.1.1
 pytest-asyncio==1.4.0
 httpx==0.28.1
