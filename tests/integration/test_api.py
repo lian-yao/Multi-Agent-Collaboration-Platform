@@ -339,6 +339,63 @@ def test_send_message_appends_user_message_to_conversation_memory(monkeypatch) -
     assert stored.agent_run_id == accepted.json()["agent_run_id"]
 
 
+def test_remember_directive_writes_long_term_memory_and_is_listed(monkeypatch, memory_long_term) -> None:
+    """`记住：…` 落库 + `GET /memory/long-term` 列出来（ADR-036 §4/§5）。"""
+
+    from app.orchestration.long_term import USER_MEMORY_ID
+
+    store = InMemoryApiStore()
+    monkeypatch.setattr(api_main, "api_store", store)
+    monkeypatch.setattr(api_main, "get_workflow_service", lambda: FakeWorkflowService())
+    client = TestClient(app)
+
+    session_id = client.post(
+        "/api/v1/sessions", json={"user_id": "demo-user"}
+    ).json()["id"]
+    accepted = client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"content": "记住 回答长度：尽量简短"},
+    )
+    assert accepted.status_code == 202
+
+    [entry] = memory_long_term.data[USER_MEMORY_ID]
+    assert entry.key == "回答长度"
+    assert entry.content == "尽量简短"
+
+    listed = client.get("/api/v1/memory/long-term")
+    assert listed.status_code == 200
+    body = listed.json()
+    assert body["total"] == 1
+    assert body["items"][0]["key"] == "回答长度"
+    assert body["items"][0]["content"] == "尽量简短"
+
+
+def test_forget_directive_removes_a_long_term_memory(monkeypatch, memory_long_term) -> None:
+    """长期记忆无 TTL，`忘记：…` 是使用者收回记忆的唯一入口（ADR-036 §5）。"""
+
+    from app.memory import MemoryEntry
+    from app.orchestration.long_term import USER_MEMORY_ID
+
+    memory_long_term.data[USER_MEMORY_ID] = [
+        MemoryEntry(key="回答长度", content="尽量简短", agent_id=USER_MEMORY_ID)
+    ]
+    store = InMemoryApiStore()
+    monkeypatch.setattr(api_main, "api_store", store)
+    monkeypatch.setattr(api_main, "get_workflow_service", lambda: FakeWorkflowService())
+    client = TestClient(app)
+
+    session_id = client.post(
+        "/api/v1/sessions", json={"user_id": "demo-user"}
+    ).json()["id"]
+    accepted = client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"content": "忘记：回答长度"},
+    )
+
+    assert accepted.status_code == 202
+    assert client.get("/api/v1/memory/long-term").json()["total"] == 0
+
+
 def test_send_message_passes_orchestration_mode(monkeypatch) -> None:
     """单次执行的编排模式覆盖必须原样送到调度器（ADR-019、`doc/api.md` §4.4）。"""
 

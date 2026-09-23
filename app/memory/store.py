@@ -45,3 +45,11 @@ class LongTermMemory(Protocol):
     def list_entries(self, agent_id: str) -> list[MemoryEntry]:
         """列出某 Agent 的全部长期记忆项。"""
         ...
+
+    def delete_entry(self, agent_id: str, key: str) -> bool:
+        """删除一条长期记忆，返回是否真的删掉了。
+
+        长期记忆无 TTL，所以删除入口是契约的一部分（ADR-036 §5：使用者要能收回平台
+        记住的东西）。删除不存在的 key 返回 `False`，不视为错误。
+        """
+        ...

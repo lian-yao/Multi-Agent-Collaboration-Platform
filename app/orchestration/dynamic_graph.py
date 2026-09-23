@@ -63,13 +63,6 @@ from app.orchestration.tools import ToolCaller, ToolCallRecord, ToolRegistry, de
 ORCHESTRATION_MODES: tuple[str, ...] = ("static", "dynamic")
 """编排模式取值，对齐 ``AgentSettings.orchestration_mode``。"""
 
-PLANNER_MEMORY_ID = "planner"
-"""规划节点的长期记忆 id。
-
-规划是平台自己的节点，不对应任何已登记角色，所以给它一个**保留 id** 而不是借用某个角色：
-借用的结果是「收集 Agent 的偏好会悄悄影响规划」。写入侧定下来之前它通常是空的。
-"""
-
 DEFAULT_MAX_PLAN_STEPS = 6
 """一次执行允许的最大步骤数。既是成本上限，也是回退判据：超出的计划整份丢弃。"""
 

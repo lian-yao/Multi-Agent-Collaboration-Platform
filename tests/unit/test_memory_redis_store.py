@@ -99,6 +99,16 @@ class FakeRedis:
         self._guard("hgetall")
         return dict(self.hashes.get(key, {}))
 
+    def hdel(self, key: str, field: str) -> int:
+        """与 Redis 一致：返回真正删掉的字段数（不存在就是 0）。"""
+
+        self._guard("hdel")
+        bucket = self.hashes.get(key, {})
+        if field not in bucket:
+            return 0
+        del bucket[field]
+        return 1
+
     def apply(self, op: tuple[Any, ...]) -> Any:
         name = op[0]
         self._guard(name)
@@ -267,6 +277,34 @@ def test_list_entries_is_sorted_by_key():
         memory.save_entry("a1", _entry(key, f"{key} 的内容"))
 
     assert [entry.key for entry in memory.list_entries("a1")] == ["a", "b", "c"]
+
+
+def test_delete_entry_removes_only_that_key():
+    """长期记忆无 TTL，删除入口是契约的一部分（ADR-036 §5 的 `忘记：`）。"""
+
+    memory = RedisLongTermMemory(FakeRedis())
+    memory.save_entry("a1", _entry("偏好", "简短"))
+    memory.save_entry("a1", _entry("时区", "Asia/Shanghai"))
+
+    assert memory.delete_entry("a1", "偏好") is True
+
+    assert [entry.key for entry in memory.list_entries("a1")] == ["时区"]
+    assert memory.get_entry("a1", "偏好") is None
+
+
+def test_delete_entry_returns_false_for_a_missing_key():
+    memory = RedisLongTermMemory(FakeRedis())
+
+    assert memory.delete_entry("a1", "没有这条") is False
+
+
+def test_delete_entry_degrades_when_redis_fails():
+    client = FakeRedis()
+    client.fail_on.add("hdel")
+    memory = RedisLongTermMemory(client)
+
+    # 记忆层故障不该把调用方拖下水：删除失败返回 False 并记警告（ADR-005 的降级口径）。
+    assert memory.delete_entry("a1", "偏好") is False
 
 
 def test_missing_entry_returns_none():

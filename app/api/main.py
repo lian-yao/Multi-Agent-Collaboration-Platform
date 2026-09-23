@@ -76,8 +76,12 @@ from app.core.provider_config import (
 from app.mcp.registry import tool_catalog
 from app.memory import MessageRole, MessageStatus, SessionMessage
 from app.memory.runtime import conversation_memory
-from app.agents.roles import RoleId
-from app.orchestration.long_term import prefetch as prefetch_preferences
+from app.orchestration.long_term import (
+    USER_MEMORY_ID,
+    apply_directives,
+    list_entries as list_long_term_memory,
+    prefetch as prefetch_preferences,
+)
 from app.observability.logging import get_logger, log_event
 from app.observability.metrics import render_prometheus_metrics
 from app.sandbox import build_sandbox, get_sandbox_settings
@@ -1278,10 +1282,19 @@ def send_message(session_id: str, payload: MessageRequest) -> MessageAcceptedRes
                 status=MessageStatus.RUNNING,
             ),
         )
-        # 长期记忆**后台预取**（ADR-036）：这里是"离阶段执行还有几秒"的唯一位置，
-        # 预取不阻塞受理、失败也不影响这次执行——阶段里只读进程内缓存。
-        # 覆盖全部角色：走到哪个角色由规划在运行期决定，受理时还不知道。
-        prefetch_preferences(role.value for role in RoleId)
+        # 长期记忆的**写入**：只认显式指令（`记住：…` / `忘记：…`，ADR-036 §4），
+        # 确定性字符串规则，没有模型参与——不给"让模型自己决定记什么"的口子。
+        applied = apply_directives(payload.content)
+        if applied:
+            log_event(
+                logger,
+                "memory.long_term_directives",
+                session_id=session_id,
+                actions=[action for action, _, _ in applied],
+            )
+        # **后台预取**（ADR-036 §1）：这里是"离阶段执行还有几秒"的唯一位置，预取不阻塞
+        # 受理、失败也不影响这次执行——阶段里只读进程内缓存。单用户场景只读使用者那一份。
+        prefetch_preferences([USER_MEMORY_ID])
         get_workflow_service().schedule(
             WorkflowTask(
                 workflow_id=workflow_id,
@@ -2479,6 +2492,35 @@ def read_workspace_tree(
         lambda: workspace_service.workspace_tree(workspace_id, path=path, depth=depth)
     )
     return WorkspaceTreeResponse.model_validate(data)
+
+
+class LongTermMemoryEntry(BaseModel):
+    """一条长期记忆（`doc/api.md` §5.22）。"""
+
+    key: str
+    content: str
+    updated_at: datetime | None = None
+
+
+class LongTermMemoryResponse(BaseModel):
+    items: list[LongTermMemoryEntry]
+    total: int
+
+
+@app.get("/api/v1/memory/long-term", response_model=LongTermMemoryResponse)
+def read_long_term_memory() -> LongTermMemoryResponse:
+    """列出使用者长期记忆（`doc/api.md` §5.22、ADR-036 §5）：**只读审计**入口。
+
+    单用户场景下长期记忆只存一份（保留 id `user`）。长期记忆无 TTL，使用者必须能看见
+    平台记住了什么；写入与删除走消息里的显式指令（`记住：…` / `忘记：…`），本接口不开写口。
+    """
+
+    entries = list_long_term_memory(memory_id=USER_MEMORY_ID)
+    items = [
+        LongTermMemoryEntry(key=entry.key, content=entry.content, updated_at=entry.updated_at)
+        for entry in entries
+    ]
+    return LongTermMemoryResponse(items=items, total=len(items))
 
 
 @app.get("/api/v1/host/tree", response_model=HostTreeResponse)

@@ -2098,14 +2098,23 @@ tests/integration/test_workspace_api.py` → **961 passed / 12 failed**（仍是
 缓存通常已热。注入位置在会话历史**之前**（约束 → 上下文 → 本轮任务），渲染函数在
 `app/orchestration/context.py`，静态与动态两条编排共用。
 
-**本轮未做（等使用者拍板，已写进 ADR-036 的"待定"）**：
+**归属与写入按使用场景定了**（使用者的判断依据：「没有登录，默认只有一个用户」）：
 
-1. **记忆归属**——现有键按**角色**存（ADR-005 只定义了两个键），而需求说的是**用户**维度；
-   本轮先按角色读，因为不改数据契约即可落地。要按用户存得先加 `user:{id}:profile` 并让
-   `user_id` 进 Workflow 链路（`sessions.user_id` 目前只在 API 层用）。
-2. **写入触发**——现在**没有任何写入方**，所以读取管道即使就绪也读不到东西；
-   候选是显式「记住这个」交互／独立抽取流程（要额外模型调用与成本控制）／管理接口手工登记。
-3. **审计与删除**——长期记忆无 TTL，必须有查看与删除入口，否则使用者无法收回模型记住的东西。
+1. **归属＝使用者一份**。不新增 `user:{id}:profile`（只有一个用户时多一层前缀换不来区分度，
+   却要改 ADR-005 与数据模型、把 `user_id` 透传进 Workflow），也不按角色各存一份（偏好是
+   使用者的，不是角色的——按角色存会复制 N 份并让各角色的偏好微妙分叉）。采用：**键格式不变
+   （`agent:{id}:memory`），保留 id 固定为 `user`**，所有角色与规划节点读同一份。将来接多用户
+   时把保留 id 换成 `user:{user_id}` 即可，读取端不用动。
+2. **写入＝显式指令**，不做自动抽取（"让模型自己决定记什么"是这类系统最常见的失控点）。
+   `记住：<内容>` / `记住 <名称>：<内容>`（同名覆盖）∪ `忘记：<名称>` / `忘记全部：`；
+   在**消息受理**时按确定性字符串规则解析，**没有模型参与**；写入/删除后**就地刷新进程内
+   缓存**，让紧接着那次执行立刻看到。
+3. **审计＝只读接口** `GET /api/v1/memory/long-term`（`doc/api.md` §5.22）：长期记忆无 TTL，
+   使用者必须能看见平台记住了什么；删除走上面的指令，本接口不开写口。
+
+顺带补上记忆层缺的一块：`LongTermMemory` 协议与 Redis 实现原先**只有 save/get/list、没有删除**
+（`app/memory/store.py`、`redis_store.py` 增加 `delete_entry`）——无 TTL 的存储没有删除入口
+等于使用者收不回记忆，这是 ADR-036 §5 的必要条件。
 
 验证：`tests/unit/test_long_term_memory.py` 新增 **8 例**——预取在存储阻塞时也**立即返回**
 （<0.5s，用闸门 Event 构造慢存储）、缓存冷时不读存储也不报错、读失败降级为空、
@@ -2114,6 +2123,16 @@ tests/integration/test_workspace_api.py` → **961 passed / 12 failed**（仍是
 `tests/unit|integration` 的 autouse fixture 增加长期记忆替身（用例不依赖真实 Redis）。
 全量 `pytest tests/unit tests/integration/test_api.py tests/integration/test_workspace_api.py`
 → **986 passed / 12 failed**（仍是缺 `pypdfium2` 的 PDF 用例）。
+
+写入/删除/审计的验证（同一轮补）：`test_long_term_memory.py` 另加 **5 例**（指令解析认
+`记住`/`记住 <名称>`/`忘记`/`忘记全部`、**句中提到「记住」不算指令**、`remember` 落库并
+**就地刷新缓存**、`apply_directives` 先存后删、`forget_all` 清空）；
+`test_memory_redis_store.py` 加 **3 例**（`delete_entry` 只删指定 key、删不存在返回 False、
+Redis 失败时降级为 False 而不抛）；`test_api.py` 加 **2 例**端到端（发一条含
+`记住 回答长度：尽量简短` 的消息 → 记忆里出现该条 → `GET /api/v1/memory/long-term` 列出它；
+`忘记：回答长度` 之后列表为空）。全量 `pytest tests/unit tests/integration/test_api.py
+tests/integration/test_workspace_api.py` → **996 passed / 12 failed**（仍是缺 `pypdfium2`
+的 PDF 用例）。界面上的「记忆」面板仍未做——本轮只到接口。
 
 **前端容器与服务**：`npm run build` 通过（bundle 441.52 kB，未过告警阈值）；
 `workspace-smoke` **210/210** 未受影响。

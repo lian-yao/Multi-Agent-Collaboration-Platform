@@ -12,9 +12,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import threading
 import time
 from collections.abc import Iterable, Sequence
+from datetime import datetime, timezone
 from typing import Any
 
 from app.memory import MemoryEntry
@@ -26,6 +28,14 @@ logger = get_logger("orchestration.long_term")
 
 DEFAULT_TTL_SECONDS = 300.0
 """缓存有效期。取 5 分钟：偏好不会秒级变化，而执行本身通常几秒到几分钟。"""
+
+USER_MEMORY_ID = "user"
+"""**使用者**长期记忆的保留 id（ADR-036 §3）。
+
+本项目没有登录、默认只有一名使用者，所以长期记忆按使用者存**一份**，所有角色与规划节点
+都读它；键格式仍是 `agent:{id}:memory`（ADR-005 不改），只是把 id 固定成这个保留值。
+将来接多用户时改成 `user:{user_id}` 即可，读取端不用动——它本来就只认一个 id。
+"""
 
 _CACHE: dict[str, tuple[float, str]] = {}
 _INFLIGHT: set[str] = set()
@@ -93,6 +103,130 @@ def clear_cache() -> None:
 
     with _LOCK:
         _CACHE.clear()
+
+
+def remember(key: str, content: str, *, memory_id: str = USER_MEMORY_ID) -> None:
+    """写入一条长期记忆并**就地刷新缓存**——紧接着的那次执行要立刻看到它。"""
+
+    entry = MemoryEntry(
+        key=key,
+        content=content,
+        agent_id=memory_id,
+        updated_at=datetime.now(timezone.utc),
+    )
+    _factory().save_entry(memory_id, entry)
+    _reload(memory_id)
+
+
+def forget(key: str, *, memory_id: str = USER_MEMORY_ID) -> None:
+    """删除一条长期记忆并刷新缓存。长期记忆无 TTL，删除入口是必须的（ADR-036 §5）。"""
+
+    _factory().delete_entry(memory_id, key)
+    _reload(memory_id)
+
+
+def forget_all(*, memory_id: str = USER_MEMORY_ID) -> None:
+    """清空该 id 的全部长期记忆并刷新缓存。"""
+
+    for entry in _factory().list_entries(memory_id):
+        _factory().delete_entry(memory_id, entry.key)
+    _reload(memory_id)
+
+
+def list_entries(*, memory_id: str = USER_MEMORY_ID) -> list[MemoryEntry]:
+    """只读列出（审计入口用；ADR-036 §5）。"""
+
+    return list(_factory().list_entries(memory_id))
+
+
+def parse_directives(text: str) -> list[tuple[str, str, str]]:
+    """解析消息里的记忆指令，返回 `(动作, 名称, 内容)` 三元组。
+
+    确定性规则，**没有模型参与**（ADR-036 §4）。逐行看，只认行首：
+
+    - `记住：<内容>` / `记住:<内容>` / `请记住：<内容>` → `("save", 自动名, 内容)`
+    - `记住 <名称>：<内容>` → `("save", 名称, 内容)`
+    - `忘记：<名称>` / `忘记 <名称>` → `("forget", 名称, "")`
+    - `忘记全部：` / `忘记全部` → `("forget_all", "", "")`
+
+    没给名称时用内容派生一个稳定短名（同一句话重复说会覆盖同一条，而不是越记越多）。
+    """
+
+    directives: list[tuple[str, str, str]] = []
+    for raw in (text or "").splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("忘记全部"):
+            directives.append(("forget_all", "", ""))
+            continue
+        if line.startswith("忘记"):
+            name = _split_name(line[len("忘记") :])
+            if name:
+                directives.append(("forget", name, ""))
+            continue
+        body = None
+        for prefix in ("请记住", "记住"):
+            if line.startswith(prefix):
+                body = line[len(prefix) :]
+                break
+        if body is None:
+            continue
+        name, content = _split_save(body)
+        if content:
+            directives.append(("save", name or _auto_key(content), content))
+    return directives
+
+
+def apply_directives(
+    text: str, *, memory_id: str = USER_MEMORY_ID
+) -> list[tuple[str, str, str]]:
+    """执行消息里的记忆指令；返回实际执行了哪些，便于日志与回执。"""
+
+    applied: list[tuple[str, str, str]] = []
+    for action, name, content in parse_directives(text):
+        if action == "save":
+            remember(name, content, memory_id=memory_id)
+        elif action == "forget":
+            forget(name, memory_id=memory_id)
+        elif action == "forget_all":
+            forget_all(memory_id=memory_id)
+        applied.append((action, name, content))
+    return applied
+
+
+def _split_save(body: str) -> tuple[str, str]:
+    """把 `记住` 之后的部分拆成 `(名称, 内容)`；没写名称时名称为空串。"""
+
+    for separator in ("：", ":"):
+        if separator in body:
+            head, _, tail = body.partition(separator)
+            return head.strip(), tail.strip()
+    # 没有分隔符：整段当内容（例如「记住 回答尽量简短」也算一条）
+    return "", body.strip()
+
+
+def _split_name(body: str) -> str:
+    """`忘记 <名称>` / `忘记：<名称>` 里的名称。"""
+
+    text = body.lstrip("：:").strip()
+    return text
+
+
+def _auto_key(content: str) -> str:
+    """自动名：内容前 12 字 + 内容摘要（同一句话重复说覆盖同一条）。"""
+
+    head = content.strip().replace("\n", " ")[:12]
+    digest = hashlib.sha1(content.strip().encode("utf-8")).hexdigest()[:4]
+    return f"{head}·{digest}"
+
+
+def _reload(memory_id: str) -> None:
+    """写完立刻刷新缓存：下一次取用要看到最新内容，而不是等 TTL 到期。"""
+
+    block = long_term_block(_factory().list_entries(memory_id))
+    with _LOCK:
+        _CACHE[memory_id] = (time.monotonic(), block)
 
 
 def _is_fresh(key: str, now: float, ttl: float) -> bool:

@@ -56,6 +56,22 @@ class FakeLongTermMemory:
             raise self.error
         return list(self.entries.get(agent_id, []))
 
+    def save_entry(self, agent_id: str, entry: MemoryEntry) -> None:
+        self.calls.append(agent_id)
+        bucket = self.entries.setdefault(agent_id, [])
+        for index, existing in enumerate(bucket):
+            if existing.key == entry.key:
+                bucket[index] = entry
+                return
+        bucket.append(entry)
+
+    def delete_entry(self, agent_id: str, key: str) -> bool:
+        self.calls.append(agent_id)
+        bucket = self.entries.get(agent_id, [])
+        remaining = [entry for entry in bucket if entry.key != key]
+        self.entries[agent_id] = remaining
+        return len(remaining) != len(bucket)
+
 
 @pytest.fixture(autouse=True)
 def _clean_cache():
@@ -158,3 +174,75 @@ def test_step_input_puts_preferences_before_task_and_duty():
 
     assert text.index("长期记忆") < text.index("用户任务")
     assert text.index("长期记忆") < text.index("你这一步的职责")
+
+
+# ---------------------------------------------------------------------------------------
+# 写入与删除：只认显式指令（ADR-036 §4）
+# ---------------------------------------------------------------------------------------
+
+
+def test_parse_directives_recognizes_save_and_forget_lines():
+    text = "\n".join(
+        [
+            "帮我看看这个方案",  # 无关行不该被当成指令
+            "记住：回答尽量简短",
+            "记住 称呼：叫我张三",
+            "请记住 时区：Asia/Shanghai",
+            "忘记：称呼",
+            "忘记全部：",
+        ]
+    )
+
+    directives = long_term.parse_directives(text)
+
+    assert [action for action, _, _ in directives] == [
+        "save",
+        "save",
+        "save",
+        "forget",
+        "forget_all",
+    ]
+    assert directives[0][2] == "回答尽量简短"
+    assert directives[0][1].startswith("回答尽量简短"), "没给名称时用内容派生稳定名"
+    assert directives[1][1:] == ("称呼", "叫我张三")
+    assert directives[2][1:] == ("时区", "Asia/Shanghai")
+    assert directives[3][1] == "称呼"
+
+
+def test_parse_directives_ignores_mentions_in_the_middle_of_a_sentence():
+    directives = long_term.parse_directives("请先说明为什么需要记住：这句话不是指令")
+
+    assert directives == [], "只认行首，避免正文里提到「记住」就被当成指令"
+
+
+def test_remember_writes_and_refreshes_the_cache_immediately():
+    memory = FakeLongTermMemory()
+    long_term.set_memory_factory(lambda: memory)
+
+    long_term.remember("回答长度", "尽量简短")
+
+    # 就地刷新：紧接着的那次执行要立刻看到它，而不是等 TTL 到期
+    assert "回答长度: 尽量简短" in long_term.preference_block(long_term.USER_MEMORY_ID)
+    assert [entry.key for entry in memory.entries[long_term.USER_MEMORY_ID]] == ["回答长度"]
+
+
+def test_apply_directives_executes_save_then_forget():
+    memory = FakeLongTermMemory()
+    long_term.set_memory_factory(lambda: memory)
+
+    applied = long_term.apply_directives("记住 称呼：叫我张三\n忘记：称呼")
+
+    assert [action for action, _, _ in applied] == ["save", "forget"]
+    assert memory.entries[long_term.USER_MEMORY_ID] == []
+    assert long_term.preference_block(long_term.USER_MEMORY_ID) == ""
+
+
+def test_forget_all_clears_every_entry():
+    memory = FakeLongTermMemory()
+    long_term.set_memory_factory(lambda: memory)
+    long_term.remember("a", "1")
+    long_term.remember("b", "2")
+
+    long_term.apply_directives("忘记全部：")
+
+    assert memory.entries[long_term.USER_MEMORY_ID] == []

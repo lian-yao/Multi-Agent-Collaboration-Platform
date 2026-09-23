@@ -109,6 +109,20 @@ class MemoryLongTermMemory:
     def list_entries(self, agent_id: str) -> list[Any]:
         return list(self.data.get(agent_id, []))
 
+    def save_entry(self, agent_id: str, entry: Any) -> None:
+        entries = self.data.setdefault(agent_id, [])
+        for index, existing in enumerate(entries):
+            if existing.key == entry.key:
+                entries[index] = entry  # 同 key 覆盖（与 Redis 实现同语义）
+                return
+        entries.append(entry)
+
+    def delete_entry(self, agent_id: str, key: str) -> bool:
+        entries = self.data.get(agent_id, [])
+        remaining = [entry for entry in entries if entry.key != key]
+        self.data[agent_id] = remaining
+        return len(remaining) != len(entries)
+
 
 @pytest.fixture(autouse=True)
 def memory_long_term() -> MemoryLongTermMemory:

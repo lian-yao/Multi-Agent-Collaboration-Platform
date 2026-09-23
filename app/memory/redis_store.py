@@ -137,6 +137,20 @@ class RedisLongTermMemory:
         entries.sort(key=lambda entry: entry.key)
         return entries
 
+    def delete_entry(self, agent_id: str, key: str) -> bool:
+        """删除一条长期记忆；返回是否真的删掉了。
+
+        长期记忆**没有 TTL**（ADR-005），删除入口因此是必须的：使用者要能收回平台记住的
+        东西（ADR-036 §5 的 `忘记：` 指令）。删不存在的 key 不算错误，返回 `False`。
+        """
+
+        try:
+            removed = self._client.hdel(agent_memory_key(agent_id), key)
+        except Exception as exc:
+            _warn("memory.long_term_delete_failed", agent_id=agent_id, key=key, error=exc)
+            return False
+        return bool(removed)
+
 
 def build_redis_client(url: str | None = None) -> Any:
     """按 `REDIS_URL`（默认 `StorageSettings.redis_url`）建立客户端。

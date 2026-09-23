@@ -35,7 +35,6 @@ from app.config import AgentSettings, get_settings
 from app.core.agent_config import resolve_agent_settings
 from app.core.tool_audit import AuditedToolRegistry
 from app.orchestration.dynamic_graph import (
-    PLANNER_MEMORY_ID,
     PLAN_SOURCE_FALLBACK,
     DynamicPipelineState,
     DynamicPlan,
@@ -50,7 +49,7 @@ from app.orchestration.dynamic_graph import (
     run_plan_step,
 )
 from app.orchestration.llm import build_chat_model
-from app.orchestration.long_term import preference_block
+from app.orchestration.long_term import USER_MEMORY_ID, preference_block
 from app.orchestration.pipeline import PipelineStatus
 from app.orchestration.tools import ToolCaller, default_tool_registry
 from app.workflows.pipeline import finalize_activity, session_history
@@ -128,7 +127,7 @@ def dynamic_plan_activity(
             resolve_max_plan_steps(settings),
             workflow_id=workflow_id,
             history=history,
-            preferences=preference_block(PLANNER_MEMORY_ID),
+            preferences=preference_block(USER_MEMORY_ID),
         )
     return {"workflow_id": workflow_id, "plan": plan.model_dump(mode="json")}
 
@@ -175,7 +174,7 @@ def dynamic_step_activity(
             workflow_id,
             attachments,
             session_history(task.get("session_id"), task.get("agent_run_id")),
-            preference_block(step.role.value),
+            preference_block(USER_MEMORY_ID),
         )
     return {"workflow_id": workflow_id, "outcome": outcome.model_dump(mode="json")}
 

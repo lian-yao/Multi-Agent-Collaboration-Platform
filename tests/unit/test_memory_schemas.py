@@ -186,6 +186,9 @@ def test_in_memory_store_satisfies_long_term_memory_protocol():
         def list_entries(self, agent_id: str) -> list[MemoryEntry]:
             return list(self._entries.get(agent_id, {}).values())
 
+        def delete_entry(self, agent_id: str, key: str) -> bool:
+            return self._entries.get(agent_id, {}).pop(key, None) is not None
+
     store = InMemoryLongTerm()
     assert isinstance(store, LongTermMemory)
 
