@@ -96,6 +96,17 @@ def _send_message(client: httpx.Client, session_id: str, content: str) -> str:
     return response.json()["workflow_id"]
 
 
+def _send_dynamic_message(client: httpx.Client, session_id: str, content: str) -> str:
+    """发一条**走自动编排**的消息（单次请求覆盖，见 `doc/api.md` §4.4）。"""
+
+    response = client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"content": content, "orchestration_mode": "dynamic"},
+    )
+    assert response.status_code == 202, response.text
+    return response.json()["workflow_id"]
+
+
 def _wait_for_terminal(
     client: httpx.Client, workflow_id: str
 ) -> tuple[dict[str, Any], float]:
@@ -165,6 +176,86 @@ def test_live_e01_e02_three_stage_pipeline(live_client: httpx.Client) -> None:
     assert report["content"] != f"report: 请分析多智能体协作平台的核心要点并生成一份简报"
     print(f"[E-02] 报告消息长度={len(report['content'])} 字符")
     print(f"[E-02] 报告内容={report['content'][:400]}")
+
+
+def test_live_dynamic_orchestration_shape_and_traces(live_client: httpx.Client) -> None:
+    """E-06（新增）：真实 compose 上的**自动编排**（ADR-038）。
+
+    补的是原先记在 `doc/orchestration.md` §3.3 的缺口：`test_live_e2e.py` 此前只跑静态三步，
+    「动态链路在真实 Dapr + PostgreSQL + 真实模型上跑得通」没有证据。
+
+    断言刻意只针对**结构与可审计性**：路线、`flow`、逐节点轨迹、成本字段、报告落库。
+    「这个任务该不该拆成多 Agent」「子任务怎么分」是模型判断，写成断言等于把模型质量当契约，
+    换一个模型就会红——那不是回归网该管的事。
+    """
+
+    session_id = _create_session(live_client, "d-e2e-dynamic")
+    workflow_id = _send_dynamic_message(
+        live_client, session_id, "对比两套方案在真实环境下的实测数据并生成一份报告"
+    )
+
+    workflow, elapsed = _wait_for_terminal(live_client, workflow_id)
+    print(
+        f"\n[E-06] workflow={workflow_id} status={workflow['status']} 耗时={elapsed}s"
+    )
+    assert workflow["status"] == "completed", workflow
+
+    checkpoint = workflow.get("checkpoint") or {}
+    # 只打**结构**，不打整份 checkpoint：里面的模型正文可能带任意 Unicode 字符，
+    # 在 GBK 控制台上直接 `print` 会把自己的用例搞崩（2026-09-24 实测：U+2212）。
+    print(
+        "[E-06] route={route} flow={kinds} budget={budget} used={used}".format(
+            route=checkpoint.get("route"),
+            kinds=[node.get("kind") for node in checkpoint.get("flow") or []],
+            budget=checkpoint.get("token_budget"),
+            used=checkpoint.get("tokens_used"),
+        )
+    )
+    assert checkpoint.get("mode") == "dynamic", "动态链路必须留下自己的 checkpoint 形态"
+    route = checkpoint.get("route")
+    assert route in {"single", "multi"}, route
+
+    # flow 是整条流程：意图在最前；单 Agent 直答**没有**编排/合成/校验三个平台节点。
+    kinds = [node["kind"] for node in checkpoint.get("flow") or []]
+    assert kinds, "动态链路必须产出 flow（否则画布与 /stages 都是空的）"
+    assert kinds[0] == "intent", kinds
+    if route == "single":
+        assert kinds == ["intent", "worker"], kinds
+        assert len(checkpoint.get("plan") or []) == 1, checkpoint.get("plan")
+    else:
+        assert "plan" in kinds and "synthesize" in kinds, kinds
+        assert checkpoint.get("intent", {}).get("need_multi_subtask") is True
+        waves = {node["id"]: node.get("wave") for node in checkpoint["flow"]}
+        assert len(waves) == len(kinds), "每个 flow 节点都该有波次号"
+
+    # 成本闸门与用量字段一定在（预算 0 = 不限制；用量是下限口径）。
+    assert checkpoint.get("token_budget") in {0, None} or checkpoint["token_budget"] > 0
+    assert int(checkpoint.get("tokens_used") or 0) >= 0
+    assert isinstance(checkpoint.get("partial"), bool)
+
+    # 逐节点轨迹：真实状态存储里读得回来，且覆盖 flow 的每一个节点。
+    trace = live_client.get(f"/api/v1/workflows/{workflow_id}/stages")
+    assert trace.status_code == 200, trace.text
+    body = trace.json()
+    assert body["mode"] == "dynamic"
+    assert body["availability"] == "available", body.get("reason")
+    assert [item["stage"] for item in body["items"]] == [
+        node["id"] for node in checkpoint["flow"]
+    ], "轨迹条目的节点集合必须与 flow 一致"
+    synthesizer_or_worker = next(
+        (item for item in body["items"] if item["stage"] in {"synthesize", "s1"}), None
+    )
+    assert synthesizer_or_worker is not None
+    assert (synthesizer_or_worker.get("output") or "").strip(), "至少有一个节点留下产出"
+
+    # 报告写给用户：动态链路的最终交付物同样经 finalize 落 assistant 消息。
+    messages = live_client.get(f"/api/v1/sessions/{session_id}/messages").json()
+    assert messages["total"] == 2, messages
+    report = messages["items"][-1]
+    assert report["role"] == "assistant"
+    assert report["status"] == "completed"
+    assert report["content"].strip(), "报告消息不应为空"
+    print(f"[E-06] 报告消息长度={len(report['content'])} 字符")
 
 
 def _looks_like_bare_tool_call(content: str) -> bool:

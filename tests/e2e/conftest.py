@@ -128,11 +128,6 @@ class _WorkflowContext:
         attempts = int(getattr(retry_policy, "max_number_of_attempts", 1) or 1)
         return _PendingCall("child_workflow", workflow, input, instance_id, attempts)
 
-    def when_all(self, tasks: list[_PendingCall]) -> _PendingCall:
-        """并行波次：真实 Dapr 会并发驱动这批子工作流；回归网按顺序驱动同一批。"""
-
-        return _PendingCall("when_all", payload=tasks)
-
     def create_timer(self, _delta: Any) -> _PendingCall:
         return _PendingCall("timer")
 
@@ -709,6 +704,13 @@ def e2e_env(
     )
     monkeypatch.setattr(
         workflow_dynamic, "update_workflow_run", memory_checkpoint.update_workflow_run
+    )
+    # `when_all` 是 `dapr.ext.workflow` 的**模块级函数**（真实上下文没有这个方法）：
+    # 回归网把它换成"这一批子工作流"的标记，由驱动按顺序执行同一批。
+    monkeypatch.setattr(
+        workflow_dynamic,
+        "when_all",
+        lambda tasks: _PendingCall("when_all", payload=tasks),
     )
     # 每个模块都从 `app.orchestration.llm` 绑了自己的 `build_chat_model` 名字，
     # 只补一处会漏——动态链路的 intake / 规划 / 步骤 / 合成 / 校验各走一个模块。

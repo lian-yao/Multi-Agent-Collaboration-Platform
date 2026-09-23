@@ -12,6 +12,7 @@
 `when_all` 由假上下文记成「批」，用例据此断言同波的子任务确实是**一起**派发的。
 """
 
+from datetime import timedelta
 from typing import Any
 
 import pytest
@@ -21,6 +22,7 @@ from app.orchestration.dynamic_graph import (
     StepOutcome,
     fallback_plan,
 )
+from app.config import AgentSettings
 from app.workflows.dynamic import (
     DYNAMIC_SUBTASK_WORKFLOW_NAME,
     DYNAMIC_WORKFLOW_NAME,
@@ -34,7 +36,7 @@ from app.workflows.dynamic import (
     dynamic_validate_activity,
     fake_step_outcome,
     intake_activity,
-    subtask_retry_policy,
+    retry_backoff,
 )
 from app.workflows.pipeline import SUBTASK_WORKFLOW_NAME, WORKFLOW_NAME, WorkflowTask
 from app.workflows.service import WorkflowService, resolve_workflow_name
@@ -64,6 +66,10 @@ class _ScriptedWorkflowContext:
         self.calls: list[tuple] = []
         self.batches: list[list[_ScriptedTask]] = []
         self.statuses: list[str] = []
+        # `when_all` 是模块级函数，拿不到 self：这里记下"当前驱动的上下文"，
+        # 由下面的 `when_all` 替身把批次挂到它身上（用例都是单上下文驱动的）。
+        _CURRENT_CONTEXT.clear()
+        _CURRENT_CONTEXT.append(self)
 
     def call_activity(
         self, activity, *, input=None, retry_policy=None, **_kwargs
@@ -80,12 +86,37 @@ class _ScriptedWorkflowContext:
         self.calls.append(("child", task.name, input, instance_id))
         return task
 
-    def when_all(self, tasks: list[_ScriptedTask]) -> _WhenAll:
-        self.batches.append(list(tasks))
-        return _WhenAll(list(tasks))
+    def create_timer(self, delta: Any) -> _ScriptedTask:
+        task = _ScriptedTask("timer", delta)
+        self.calls.append(("timer", "create_timer", delta))
+        return task
 
     def set_custom_status(self, status: str) -> None:
         self.statuses.append(status)
+
+
+_CURRENT_CONTEXT: list[_ScriptedWorkflowContext] = []
+
+
+@pytest.fixture(autouse=True)
+def inline_when_all(monkeypatch):
+    """把 `dapr.ext.workflow.when_all` 换成批记录器。
+
+    **它是模块级函数，不是上下文方法**——真实运行时给工作流的上下文
+    （`_RuntimeOrchestrationContext`）没有 `when_all` 属性。替身若把它假装成方法，
+    单测会全绿而真机上直接崩：2026-09-24 在真实 sidecar 上就是这么暴露的
+    （`AttributeError: '_RuntimeOrchestrationContext' object has no attribute 'when_all'`）。
+    """
+
+    import app.workflows.dynamic as dynamic_module
+
+    def fake_when_all(tasks: list[_ScriptedTask]) -> _WhenAll:
+        if _CURRENT_CONTEXT:
+            _CURRENT_CONTEXT[-1].batches.append(list(tasks))
+        return _WhenAll(list(tasks))
+
+    monkeypatch.setattr(dynamic_module, "when_all", fake_when_all)
+    return fake_when_all
 
 
 def _name(value: Any) -> str:
@@ -113,21 +144,33 @@ def _task(**overrides) -> dict[str, Any]:
     return base
 
 
-def _outcome(step_id: str, role: str, status: PlanStepStatus, content: str = "") -> dict:
+def _outcome(
+    step_id: str,
+    role: str,
+    status: PlanStepStatus,
+    content: str = "",
+    *,
+    tokens: int = 0,
+    attempts: int = 1,
+) -> dict:
     return StepOutcome(
         step_id=step_id,
         role=role,  # type: ignore[arg-type]
         instruction="i",
         status=status,
         content=content,
+        tokens=tokens,
+        attempts=attempts,
     ).model_dump(mode="json")
 
 
-def _plan_payload(steps: list[dict[str, Any]], *, source: str = "llm") -> dict[str, Any]:
+def _plan_payload(
+    steps: list[dict[str, Any]], *, source: str = "llm", tokens: int = 0
+) -> dict[str, Any]:
     return {
         "workflow_id": "wf-1",
         "round": 1,
-        "plan": {"steps": steps, "source": source, "rationale": "测试"},
+        "plan": {"steps": steps, "source": source, "rationale": "测试", "tokens": tokens},
     }
 
 
@@ -537,9 +580,13 @@ def test_checkpoint_activity_writes_the_summary(monkeypatch):
     assert captured["checkpoint"]["round"] == 1
 
 
-def test_subtask_retry_policy_counts_attempts():
-    assert subtask_retry_policy(3).obj.max_number_of_attempts == 3
-    assert subtask_retry_policy(0).obj.max_number_of_attempts == 1
+def test_retry_backoff_follows_the_documented_curve():
+    """退避曲线与原先挂在 `RetryPolicy` 上的参数同口径（首次 1s、系数 2、上限 10s）。"""
+
+    assert retry_backoff(1) == timedelta(seconds=1)
+    assert retry_backoff(2) == timedelta(seconds=2)
+    assert retry_backoff(3) == timedelta(seconds=4)
+    assert retry_backoff(10) == timedelta(seconds=10), "上限封顶，不要指数爆炸"
 
 
 # --------------------------------------------------------------------------------------
@@ -754,6 +801,71 @@ def test_validation_defects_trigger_one_replan_round():
     assert result["output"] == "报告 r2"
 
 
+def test_token_budget_stops_remaining_waves_and_reports_the_gap(monkeypatch):
+    """累计预算用尽：不再派发后续波次，剩余步骤按「预算」原因跳过，仍然交付已知结果。"""
+
+    import app.workflows.dynamic as dynamic_module
+
+    monkeypatch.setattr(
+        dynamic_module, "get_settings", lambda: AgentSettings(token_budget=1000)
+    )
+    ctx = _ScriptedWorkflowContext("wf-1")
+    gen = agent_dynamic_workflow(ctx, _task())
+
+    script: dict[str, Any] = {
+        "intake_activity": {**INTAKE_MULTI, "tokens": 400},
+        "dynamic_plan_activity": _plan_payload(THREE_STEPS, tokens=300),
+        "dynamic_synthesize_activity": {
+            "status": "completed",
+            "content": "部分报告",
+            "tokens": 300,
+        },
+        "dynamic_validate_activity": VALIDATION_OK,
+        "dynamic_checkpoint_activity": {"workflow_id": "wf-1"},
+        "finalize_activity": {"workflow_id": "wf-1", "status": "completed"},
+    }
+
+    def respond(yielded: Any) -> Any:
+        if isinstance(yielded, _WhenAll):
+            # 每一步都报 500：加上 intake+规划已经超过 1000 的预算。
+            return [
+                {
+                    "workflow_id": "wf-1",
+                    "outcome": _outcome(
+                        task.payload["step"]["id"],
+                        task.payload["step"]["role"],
+                        PlanStepStatus.COMPLETED,
+                        "产出",
+                        tokens=500,
+                    ),
+                }
+                for task in yielded.tasks
+            ]
+        return script[yielded.name]
+
+    _drive(gen, respond)
+
+    # s1 跑完之后预算已破：s2、s3 都不该再派发子工作流。
+    child_ids = [call[3] for call in ctx.calls if call[0] == "child"]
+    assert child_ids == ["wf-1:dyn:r1:s1"]
+
+    finalize = [call for call in ctx.calls if call[1] == "finalize_activity"][-1]
+    checkpoint = finalize[2]["checkpoint"]
+    assert finalize[2]["status"] == "completed"
+    assert finalize[2]["report"] == "部分报告"
+    assert checkpoint["budget_exceeded"] is True
+    assert checkpoint["token_budget"] == 1000
+    assert checkpoint["tokens_used"] == 1500
+    assert checkpoint["skipped_steps"] == ["s2", "s3"]
+    assert "Token 预算" in (finalize[2]["error"] or "")
+    statuses = {node["id"]: node["status"] for node in checkpoint["flow"]}
+    assert statuses["s2"] == "skipped" and statuses["s3"] == "skipped"
+    # 实际尝试次数进 checkpoint：这里配了默认 3 次、实际只用 1 次。
+    plan_entry = {entry["id"]: entry for entry in checkpoint["plan"]}["s1"]
+    assert plan_entry["attempts"] == 1
+    assert plan_entry["tokens"] == 500
+
+
 def test_plan_activity_failure_marks_workflow_failed():
     ctx = _ScriptedWorkflowContext("wf-1")
     gen = agent_dynamic_workflow(ctx, _task())
@@ -772,14 +884,27 @@ def test_plan_activity_failure_marks_workflow_failed():
         gen.send(None)
 
 
-def test_subtask_workflow_wraps_step_in_one_activity_with_retry_policy():
+def test_subtask_workflow_records_the_attempt_that_succeeded():
+    """一次成功也算「第 1 次尝试」：`attempts` 是实际次数，不是配置值。"""
+
     ctx = _ScriptedWorkflowContext("wf-1:dyn:r1:s1")
-    activity_input = {"task": _task(), "step": THREE_STEPS[0], "results": {}, "round": 1}
+    activity_input = {
+        "task": _task(),
+        "step": THREE_STEPS[0],
+        "results": {},
+        "round": 1,
+        "max_attempts": 3,
+    }
     gen = dynamic_subtask_workflow(ctx, activity_input)
 
     gen.send(None)
-    assert ctx.calls[0][0:3] == ("activity", "dynamic_step_activity", {**activity_input})
-    assert ctx.calls[0][3] is not None, "重试策略必须挂在活动调用上"
+    # 首次尝试：activity 调用带上 attempt=1；**不再**挂 Dapr 重试策略——
+    # 重试是本子工作流里的显式循环（否则拿不到"第几次"）。
+    call = ctx.calls[0]
+    assert call[0:2] == ("activity", "dynamic_step_activity")
+    assert call[2]["attempt"] == 1
+    assert call[2]["max_attempts"] == 3
+    assert call[3] is None
     assert ctx.statuses == ["dyn:r1:s1"]
 
     with pytest.raises(StopIteration) as stopped:
@@ -788,21 +913,65 @@ def test_subtask_workflow_wraps_step_in_one_activity_with_retry_policy():
     assert stopped.value.value["outcome"]["content"] == "x"
 
 
-def test_subtask_workflow_converts_exhausted_retries_into_failed_outcome():
-    """重试耗尽 → 业务失败结果；不把异常抛给父工作流（否则 when_all 会提前炸）。"""
+def test_subtask_workflow_retries_then_succeeds_and_counts_attempts():
+    """第一次失败 → 退避 → 第二次成功：结果里记 `attempts=2`。"""
 
     ctx = _ScriptedWorkflowContext("wf-1:dyn:r1:s1")
     gen = dynamic_subtask_workflow(
-        ctx, {"task": _task(), "step": THREE_STEPS[0], "results": {}, "round": 1}
+        ctx,
+        {
+            "task": _task(),
+            "step": THREE_STEPS[0],
+            "results": {},
+            "round": 1,
+            "max_attempts": 3,
+        },
     )
     gen.send(None)
+    assert ctx.calls[0][2]["attempt"] == 1
+
+    # 第一次失败：子工作流不该把异常抛出去，而是发一个退避定时器再试。
+    timer = gen.throw(StepAttemptFailed("boom"))
+    assert timer.name == "timer"
+    assert timer.payload == timedelta(seconds=1)
+
+    gen.send(None)
+    assert ctx.calls[-1][2]["attempt"] == 2
 
     with pytest.raises(StopIteration) as stopped:
-        gen.throw(StepAttemptFailed("boom"))
+        gen.send({"outcome": _outcome("s1", "collector", PlanStepStatus.COMPLETED, "x")})
+
+    outcome = stopped.value.value["outcome"]
+    assert outcome["status"] == "completed"
+    assert outcome["attempts"] == 2
+
+
+def test_subtask_workflow_converts_exhausted_retries_into_failed_outcome():
+    """重试耗尽 → 业务失败结果（含**实际尝试次数**），不把异常抛给父工作流。"""
+
+    ctx = _ScriptedWorkflowContext("wf-1:dyn:r1:s1")
+    gen = dynamic_subtask_workflow(
+        ctx,
+        {
+            "task": _task(),
+            "step": THREE_STEPS[0],
+            "results": {},
+            "round": 1,
+            "max_attempts": 2,
+        },
+    )
+    gen.send(None)
+    gen.throw(StepAttemptFailed("boom"))  # 第一次失败 → 退避
+    gen.send(None)
+    assert ctx.calls[-1][2]["attempt"] == 2
+
+    with pytest.raises(StopIteration) as stopped:
+        gen.throw(StepAttemptFailed("boom again"))
 
     outcome = stopped.value.value["outcome"]
     assert outcome["status"] == "failed"
-    assert "boom" in outcome["error"]
+    assert "boom again" in outcome["error"]
+    assert outcome["attempts"] == 2, "耗尽时也要记下真实尝试次数"
     assert ctx.statuses[-1] == "dyn:r1:s1:failed"
 
 

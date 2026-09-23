@@ -555,6 +555,8 @@ def test_checkpoint_summary_lists_plan_with_statuses():
             "expected_output": "",
             "retry": None,
             "timeout_seconds": None,
+            "attempts": 1,
+            "tokens": 0,
             "status": "completed",
         },
         {
@@ -564,9 +566,15 @@ def test_checkpoint_summary_lists_plan_with_statuses():
             "expected_output": "",
             "retry": None,
             "timeout_seconds": None,
+            "attempts": None,
+            "tokens": None,
             "status": "pending",
         },
     ]
+    # 成本闸门（ADR-038 §9）：用量是下限口径，预算 0 = 不限制。
+    assert summary["tokens_used"] == 0
+    assert summary["token_budget"] == 0
+    assert summary["budget_exceeded"] is False
     # flow 是给人看的整条流程：编排、合成节点在（校验没跑就不画）。
     kinds = [node["kind"] for node in summary["flow"]]
     assert kinds[:3] == ["intent", "plan", "worker"]
@@ -1141,3 +1149,103 @@ def test_checkpoint_summary_tolerates_legacy_state_without_new_fields():
     assert summary["plan"][0]["retry"] is None
     assert summary["completed_steps"] == ["s1"]
     assert summary["partial"] is False
+
+
+# --------------------------------------------------------------------------------------
+# ADR-038 §8/§9：实际尝试次数与累计 Token 预算
+# --------------------------------------------------------------------------------------
+
+
+class CountingChatModel(ScriptedChatModel):
+    """带**用量元数据**的假模型：用来验证预算按实际用量累计。"""
+
+    tokens_per_call: int = 100
+
+    @property
+    def _llm_type(self) -> str:
+        return "counting-chat-model"
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        result = super()._generate(messages, stop, run_manager, **kwargs)
+        message = result.generations[0].message
+        message.usage_metadata = {
+            "input_tokens": self.tokens_per_call - 20,
+            "output_tokens": 20,
+            "total_tokens": self.tokens_per_call,
+        }
+        return ChatResult(generations=[ChatGeneration(message=message)])
+
+
+def test_tokens_are_accumulated_from_actual_usage():
+    model = CountingChatModel(
+        replies=[intake_json(), plan_json(COLLECT_STEP), "收集", "合成报告", validation_json()]
+    )
+
+    state = run_dynamic_pipeline("任务", llm=model)
+
+    # intake + 规划 + 1 个子任务 + 合成 + 校验，每次都报 100。
+    assert state.results["s1"].tokens == 100
+    summary = dynamic_checkpoint_summary(state)
+    assert summary["tokens_used"] == 500
+    assert summary["token_budget"] == 0, "默认不限制"
+    assert summary["budget_exceeded"] is False
+
+
+def test_token_budget_stops_new_waves_and_says_so():
+    """预算用尽：不再派发后续步骤，但**照常交付**已完成的部分并写明缺口。"""
+
+    model = CountingChatModel(
+        replies=[
+            intake_json(),
+            plan_json(
+                COLLECT_STEP,
+                {"id": "s2", "role": "analyst", "instruction": "分析", "depends_on": ["s1"]},
+            ),
+            "第一波产出",
+            "合成报告（只有部分）",
+            validation_json(),
+        ],
+        tokens_per_call=1000,
+    )
+
+    state = run_dynamic_pipeline(
+        "任务", llm=model, settings=AgentSettings(token_budget=2500)
+    )
+
+    assert state.budget_exceeded is True
+    assert state.results["s1"].status is PlanStepStatus.COMPLETED
+    assert state.results["s2"].status is PlanStepStatus.SKIPPED
+    assert "Token 预算" in (state.results["s2"].error or ""), "缺口原因要写成预算，不是上游失败"
+    assert state.status is PipelineStatus.COMPLETED, "已有产出照样交付"
+    assert state.partial is True
+    assert state.final_output == "合成报告（只有部分）"
+    assert "Token 预算上限" in (state.error or "")
+
+    summary = dynamic_checkpoint_summary(state)
+    assert summary["budget_exceeded"] is True
+    assert summary["token_budget"] == 2500
+    assert summary["skipped_steps"] == ["s2"]
+
+
+def test_token_budget_blocks_the_replan_round():
+    """校验不达标但预算已用尽 → 不再开第二轮（重编排按定义要再花一份钱）。"""
+
+    model = CountingChatModel(
+        replies=[
+            intake_json(),
+            plan_json(COLLECT_STEP),
+            "第一轮收集",
+            "第一轮报告",
+            validation_json(satisfied=False, defects=["缺少来源"]),
+        ],
+        tokens_per_call=1000,
+    )
+
+    state = run_dynamic_pipeline(
+        "写一份带来源的报告", llm=model, settings=AgentSettings(token_budget=1000)
+    )
+
+    assert state.round == 1, "预算用尽就不该重编排"
+    assert state.validation is not None and state.validation.satisfied is False
+    assert state.budget_exceeded is True
+    assert state.status is PipelineStatus.COMPLETED, "第一轮的交付物仍然给用户"
