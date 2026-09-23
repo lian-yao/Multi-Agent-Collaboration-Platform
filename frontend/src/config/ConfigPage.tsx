@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Settings2, Sliders, Route, Plug, ShieldCheck } from "lucide-react";
+import { Settings2, Sliders, Route, Plug, ShieldCheck, Brain } from "lucide-react";
 import { api } from "../api/client";
 import { PageTabs, type PageTab } from "../components/PageTabs";
 import type { ProviderPresetCatalog } from "../types/api";
@@ -9,9 +9,10 @@ import { DefaultRoutePanel } from "./DefaultRoutePanel";
 import { McpPanel } from "./McpPanel";
 import { SandboxPanel } from "./SandboxPanel";
 import { EgressPanel } from "./EgressPanel";
+import { MemoryPanel } from "./MemoryPanel";
 import "./config.css";
 
-export type ConfigTabId = "providers" | "defaults" | "mcp" | "sandbox";
+export type ConfigTabId = "providers" | "defaults" | "mcp" | "memory" | "sandbox";
 
 /**
  * 四个分区的职责边界（ADR-017 / ADR-018 / doc/api.md §7）：
@@ -19,6 +20,7 @@ export type ConfigTabId = "providers" | "defaults" | "mcp" | "sandbox";
  * - providers：多端点登记、批量引入模型、逐条特化调参
  * - defaults：兜底模型与 legacy 五列
  * - mcp：多 Server 与紧凑工具卡片
+ * - memory：长期记忆（§5.22、ADR-036）——**只列与删**，写入回到对话里的 `记住：…`
  * - sandbox：执行边界 + 出网策略（§5.15 / §5.21），**只读**（都是部署期安全边界）
  *
  * 「工作区」不在这里：它按 `session_id` 生效，入口跟着会话走 —— 工作台顶栏的
@@ -33,6 +35,12 @@ export const CONFIG_TABS: readonly PageTab<ConfigTabId>[] = [
   },
   { id: "defaults", label: "默认路由", icon: Route, title: "兜底模型与 legacy 五列" },
   { id: "mcp", label: "MCP 工具", icon: Plug, title: "多 Server 与紧凑工具卡片" },
+  {
+    id: "memory",
+    label: "记忆",
+    icon: Brain,
+    title: "平台跨会话记住的偏好与信息（看得见、能收回）",
+  },
   {
     id: "sandbox",
     label: "执行边界",
@@ -98,6 +106,7 @@ export function ConfigPage() {
         {tab === "providers" && <ProviderPanel catalog={catalog} />}
         {tab === "defaults" && <DefaultRoutePanel />}
         {tab === "mcp" && <McpPanel />}
+        {tab === "memory" && <MemoryPanel />}
         {tab === "sandbox" && (
           <>
             <SandboxPanel />

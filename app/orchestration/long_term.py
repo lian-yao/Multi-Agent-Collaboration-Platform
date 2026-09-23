@@ -118,11 +118,16 @@ def remember(key: str, content: str, *, memory_id: str = USER_MEMORY_ID) -> None
     _reload(memory_id)
 
 
-def forget(key: str, *, memory_id: str = USER_MEMORY_ID) -> None:
-    """删除一条长期记忆并刷新缓存。长期记忆无 TTL，删除入口是必须的（ADR-036 §5）。"""
+def forget(key: str, *, memory_id: str = USER_MEMORY_ID) -> bool:
+    """删除一条长期记忆并刷新缓存；返回是否真的删掉了（ADR-036 §5）。
 
-    _factory().delete_entry(memory_id, key)
+    长期记忆无 TTL，删除入口是必须的。返回布尔值让**界面**那条路能如实回答"这条还在不在"
+    （删不存在 → 404），而不是假装成功；`忘记：` 指令那条路不看返回值，它只是尽力而为。
+    """
+
+    removed = _factory().delete_entry(memory_id, key)
     _reload(memory_id)
+    return bool(removed)
 
 
 def forget_all(*, memory_id: str = USER_MEMORY_ID) -> None:

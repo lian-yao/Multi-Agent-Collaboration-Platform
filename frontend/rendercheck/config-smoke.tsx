@@ -40,7 +40,9 @@ import { entriesToRecord, recordToEntries, samePairs } from "../src/config/KeyVa
 import { McpImportModal } from "../src/config/McpImportModal";
 import { SandboxBoundary } from "../src/config/SandboxPanel";
 import { EgressBoundary } from "../src/config/EgressPanel";
+import { MemoryBoundary } from "../src/config/MemoryPanel";
 import type { Agent, ProviderRegistryDetail, SandboxStatus } from "../src/types/api";
+import type { LongTermMemoryEntry } from "../src/types/api";
 
 (globalThis as Record<string, unknown>).fetch = async () => ({
   ok: true,
@@ -62,8 +64,10 @@ try {
 }
 
 check(
-  "渲染出 4 个分区入口",
-  ["Provider", "默认路由", "MCP 工具", "执行边界"].every((label) => page.includes(label)),
+  "渲染出 5 个分区入口（含「记忆」）",
+  ["Provider", "默认路由", "MCP 工具", "记忆", "执行边界"].every((label) =>
+    page.includes(label),
+  ),
   page.slice(0, 300),
 );
 check(
@@ -80,8 +84,8 @@ check(
   "配置页与任务记录页必须共用 components/PageTabs",
 );
 check(
-  "副路由带 aria-selected 与 tab 角色（工作区搬走后是 4 个分区）",
-  (page.match(/role="tab"/g) ?? []).length === 4 && page.includes('aria-selected="true"'),
+  "副路由带 aria-selected 与 tab 角色（工作区搬走后 4 个 + 记忆 = 5 个分区）",
+  (page.match(/role="tab"/g) ?? []).length === 5 && page.includes('aria-selected="true"'),
   String((page.match(/role="tab"/g) ?? []).length),
 );
 check(
@@ -791,10 +795,82 @@ check(
 
 const configPageSource = readFileSync(join(process.cwd(), "src", "config", "ConfigPage.tsx"), "utf8");
 check(
-  "工具与配置：执行边界成为第四个分区",
+  "工具与配置：执行边界是第五个分区（记忆排在它前面）",
   page.includes("执行边界") &&
     /id:\s*"sandbox"/.test(configPageSource) &&
-    /<SandboxPanel\s*\/>/.test(configPageSource),
+    /<SandboxPanel\s*\/>/.test(configPageSource) &&
+    // 记忆是全局数据（不属于某个会话），所以归配置页；顺序上排在执行边界之前。
+    /id:\s*"memory"/.test(configPageSource) &&
+    configPageSource.indexOf('id: "memory"') < configPageSource.indexOf('id: "sandbox"'),
+  "",
+);
+
+/* -------------------------------------------------------------------------- */
+/* 长期记忆面板（§5.22、ADR-036）                                              */
+/* -------------------------------------------------------------------------- */
+
+const memoryEntries: LongTermMemoryEntry[] = [
+  {
+    key: "称呼",
+    content: "叫我张三",
+    updated_at: "2026-09-23T10:54:04Z",
+  },
+  {
+    key: "回答长度",
+    content: "尽量简短",
+    updated_at: "2026-09-23T02:00:00Z",
+  },
+];
+const memoryMarkup = renderToStaticMarkup(
+  <MemoryBoundary items={memoryEntries} onDelete={() => {}} onReload={() => {}} />,
+);
+check(
+  "记忆面板：逐条列出 key、正文与更新时间，并给出「忘记」入口",
+  memoryMarkup.includes("称呼") &&
+    memoryMarkup.includes("叫我张三") &&
+    memoryMarkup.includes("回答长度") &&
+    memoryMarkup.includes("忘记") &&
+    memoryMarkup.includes("2 条"),
+  memoryMarkup.slice(0, 200),
+);
+const memoryEmptyMarkup = renderToStaticMarkup(
+  <MemoryBoundary items={[]} onDelete={() => {}} onReload={() => {}} />,
+);
+check(
+  "记忆面板：空态说清「怎么产生」（对话里说「记住：…」），且没有任何写入控件",
+  memoryEmptyMarkup.includes("记住：") &&
+    // 只查**控件**，不查文案：面板正文里正当解释"新增只能在对话里说「记住：…」"，
+    // 用 `/新增/` 去卡会把自己的说明一起卡掉（这类"被自己的注释绊倒"本轮踩过多次）。
+    !/<form|<input|<textarea|<select/.test(memoryEmptyMarkup) &&
+    !/<button[^>]*>\s*(新增|添加|保存)/.test(memoryEmptyMarkup),
+  "",
+);
+check(
+  "记忆面板：失败态可重试，读取中不显示成「没有记忆」",
+  renderToStaticMarkup(
+    <MemoryBoundary items={[]} error="长期记忆读取失败" onReload={() => {}} />,
+  ).includes("重试") &&
+    renderToStaticMarkup(<MemoryBoundary items={[]} loading />).includes("读取中") &&
+    !renderToStaticMarkup(<MemoryBoundary items={[]} loading />).includes("还没有长期记忆"),
+  "",
+);
+const memoryPanelSource = readFileSync(
+  join(process.cwd(), "src", "config", "MemoryPanel.tsx"),
+  "utf8",
+);
+check(
+  "记忆面板：只列与删——写入只走对话里的「记住：…」",
+  /api\.listLongTermMemory\(/.test(memoryPanelSource) &&
+    /api\.deleteLongTermMemory\(/.test(memoryPanelSource) &&
+    // 客户端根本没有写入方法，面板也就不可能凭空造一条记忆
+    !/remember\(|save_entry|createLongTermMemory/.test(memoryPanelSource) &&
+    !/POST|put\(/.test(memoryPanelSource),
+  "",
+);
+check(
+  "记忆面板：按错误码处理「已经不在了」，不把它渲染成故障",
+  /MEMORY_ENTRY_NOT_FOUND/.test(memoryPanelSource) &&
+    /已经是|已经不在了|已为你刷新/.test(memoryPanelSource),
   "",
 );
 

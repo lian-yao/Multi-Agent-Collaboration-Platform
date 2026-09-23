@@ -9,6 +9,7 @@ import type {
   Attachment,
   DataPage,
   EgressStatus,
+  LongTermMemoryList,
   McpCompactToolList,
   McpDiscovery,
   McpServer,
@@ -361,6 +362,18 @@ export const api = {
   /* ---------------------------------------------------------------------- */
   /* §5.20 工作区审批                                                        */
   /* ---------------------------------------------------------------------- */
+
+  /**
+   * 长期记忆（§5.22、ADR-036）：列出使用者被记住的偏好与信息。
+   *
+   * **没有写入方法**——新增条目只能在对话里说 `记住：…`，一条记忆是"使用者说出来的话"，
+   * 不该由界面按钮凭空造。删除是有的：在面板上看着某条却要切到对话里打 `忘记：` 才能收回，
+   * 那是把"看见"和"处置"分到两个地方。
+   */
+  listLongTermMemory: () => json<LongTermMemoryList>("/api/v1/memory/long-term"),
+  /** 删除一条；命中不到返回 404 `MEMORY_ENTRY_NOT_FOUND`（面板按"刷新即可"处理）。 */
+  deleteLongTermMemory: (key: string) =>
+    noContent(`/api/v1/memory/long-term/${encodeURIComponent(key)}`, { method: "DELETE" }),
 
   listApprovals: (sessionId: string, status?: string) =>
     json<ApprovalList>(

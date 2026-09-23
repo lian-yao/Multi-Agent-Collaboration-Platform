@@ -2310,6 +2310,57 @@
 
 
 
+/* 长期记忆列表（`doc/api.md` §5.22、ADR-036）：一条一行，右侧是「忘记」的行内确认。 */
+.cfg-memory-list {
+  list-style:none;
+  margin:0;
+  padding:0;
+  display:flex;
+  flex-direction:column;
+  gap:8px
+}
+
+
+
+.cfg-memory-list li {
+  display:flex;
+  align-items:flex-start;
+  justify-content:space-between;
+  gap:12px;
+  padding:10px 12px;
+  border:1px solid var(--cfg-line-faint);
+  border-radius:var(--cfg-radius-sm);
+  background:var(--cfg-surface-soft)
+}
+
+
+
+.cfg-memory-item {
+  min-width:0;
+  display:flex;
+  flex-direction:column;
+  gap:3px
+}
+
+
+
+.cfg-memory-item b {
+  color:#26444f;
+  overflow-wrap:anywhere
+}
+
+
+
+.cfg-memory-item p {
+  margin:0;
+  color:#43606d;
+  font-size:12px;
+  line-height:1.65;
+  overflow-wrap:anywhere
+}
+
+
+
 .cfg-ws-picker-jumps {
   display:flex;
   flex-wrap:wrap;

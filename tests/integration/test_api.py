@@ -396,6 +396,36 @@ def test_forget_directive_removes_a_long_term_memory(monkeypatch, memory_long_te
     assert client.get("/api/v1/memory/long-term").json()["total"] == 0
 
 
+def test_delete_long_term_memory_endpoint_removes_one_entry(memory_long_term) -> None:
+    """面板逐条收回（ADR-036 §5）：删除返回 204，列表随之少一条，其它条目不受影响。"""
+
+    from app.memory import MemoryEntry
+    from app.orchestration.long_term import USER_MEMORY_ID
+
+    memory_long_term.data[USER_MEMORY_ID] = [
+        MemoryEntry(key="称呼", content="叫我张三", agent_id=USER_MEMORY_ID),
+        MemoryEntry(key="回答长度", content="尽量简短", agent_id=USER_MEMORY_ID),
+    ]
+    client = TestClient(app)
+
+    removed = client.delete("/api/v1/memory/long-term/%E7%A7%B0%E5%91%BC")
+
+    assert removed.status_code == 204
+    remaining = client.get("/api/v1/memory/long-term").json()
+    assert [item["key"] for item in remaining["items"]] == ["回答长度"]
+
+
+def test_delete_missing_long_term_memory_is_404(memory_long_term) -> None:
+    """删一条已经不在的：按语义返回 404，让面板刷新而不是把它当故障（ADR-036 §5）。"""
+
+    client = TestClient(app)
+
+    response = client.delete("/api/v1/memory/long-term/%E4%B8%8D%E5%AD%98%E5%9C%A8")
+
+    assert response.status_code == 404
+    assert response.json()["code"] == "MEMORY_ENTRY_NOT_FOUND"
+
+
 def test_send_message_passes_orchestration_mode(monkeypatch) -> None:
     """单次执行的编排模式覆盖必须原样送到调度器（ADR-019、`doc/api.md` §4.4）。"""
 

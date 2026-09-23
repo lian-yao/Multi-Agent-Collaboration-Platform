@@ -79,6 +79,7 @@ from app.memory.runtime import conversation_memory
 from app.orchestration.long_term import (
     USER_MEMORY_ID,
     apply_directives,
+    forget as forget_long_term_entry,
     list_entries as list_long_term_memory,
     prefetch as prefetch_preferences,
 )
@@ -2521,6 +2522,28 @@ def read_long_term_memory() -> LongTermMemoryResponse:
         for entry in entries
     ]
     return LongTermMemoryResponse(items=items, total=len(items))
+
+
+@app.delete("/api/v1/memory/long-term/{key}", status_code=204)
+def delete_long_term_memory(key: str) -> Response:
+    """删除一条长期记忆（`doc/api.md` §5.22、ADR-036 §5）：供「记忆」面板逐条收回。
+
+    **写入不在这里**——新增条目只能通过在对话里说 `记住：…`；一条记忆是"使用者说出来的话"，
+    不该由界面按钮凭空造。删除则相反：在面板上看着某条却要切到对话里打 `忘记：` 才能收回，
+    那是把"看见"和"处置"分到两个地方。
+    """
+
+    # 路径参数已由 FastAPI 解码，直接用 `key`；再 `unquote` 一次会把键里的 `%` 解错。
+    removed = forget_long_term_entry(key)
+    if not removed:
+        # 按语义分支：这条已经不在了（可能刚在对话里被 `忘记：` 删掉，或另一个窗口删过），
+        # 界面据此刷新列表即可，不该渲染成"故障"。
+        raise ApiError(
+            "MEMORY_ENTRY_NOT_FOUND",
+            f"没有这条长期记忆：{key}（刷新即可看到最新）",
+            status.HTTP_404_NOT_FOUND,
+        )
+    return Response(status_code=204)
 
 
 @app.get("/api/v1/host/tree", response_model=HostTreeResponse)

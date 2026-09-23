@@ -2134,6 +2134,36 @@ Redis 失败时降级为 False 而不抛）；`test_api.py` 加 **2 例**端到�
 tests/integration/test_workspace_api.py` → **996 passed / 12 failed**（仍是缺 `pypdfium2`
 的 PDF 用例）。界面上的「记忆」面板仍未做——本轮只到接口。
 
+**第九轮（同日）：界面「记忆」面板（前后端）**。目标是把上一轮只到接口的能力变成**看得见、
+能收回**的界面，并验收。
+
+后端补一条：`DELETE /api/v1/memory/long-term/{key}`（`doc/api.md` §5.22、ADR-036 §5）——
+命中返回 204，命中不到返回 404 `MEMORY_ENTRY_NOT_FOUND`。**写入仍然不在这里**：一条记忆是
+"使用者说出来的话"，只能通过在对话里说 `记住：…` 产生；而"在面板上看着某条、却要切到对话里
+打一句 `忘记：` 才能收回"是把看见与处置分到两个地方，属于没做完的界面，所以列表与删除成对
+出现在面板上。`long_term.forget()` 相应改为返回布尔值（删不存在的条目不再假装成功）。
+
+前端：`config/MemoryPanel.tsx`（`MemoryBoundary` 纯 props 展示体 + `MemoryPanel` 容器）、
+配置页新增第五个分区「记忆」（Brain 图标，排在「执行边界」之前——记忆是全局数据，不属于某个
+会话或工作区，所以归配置页而不是工作台）；四种状态齐全（读取中 / 空态 / 失败可重试 / 有数据），
+删除走行内确认（`InlineConfirm`），「已经不在了」按**错误码**当作"已为你刷新"而不是故障。
+文案里写清记忆怎么产生（对话里 `记住：…`）以及删除只影响长期记忆、不动会话与消息。
+
+验证：
+
+- `test_api.py` +2（删除返回 204 且只删指定条目、删不存在返回 404 `MEMORY_ENTRY_NOT_FOUND`），
+  全量 `pytest tests/unit tests/integration/test_api.py tests/integration/test_workspace_api.py`
+  → **998 passed / 12 failed**（仍是缺 `pypdfium2` 的 PDF 用例）；
+- `npm run build`（tsc + vite）通过；`config-smoke` **85/85**（分区数 4→5、面板逐条列出
+  key/正文/更新时间与「忘记」入口、**空态没有任何写入控件**、失败态可重试、读取中不显示成
+  "没有记忆"、按错误码处理"已经不在了"）、`workspace-smoke` **228/228**；
+- **真实浏览器验收**（无头 Edge + CDP，独立 user-data-dir）：打开 `localhost:5173` →
+  「工具与配置」→「记忆」→ 面板列出服务端真实存在的条目（key=称呼、正文=叫我张三）→
+  点「忘记」→ 行内「确认」→ 面板回到空态 → 服务端 `GET /memory/long-term` 确认 `total=0`。
+  三步全 PASS，链路是**界面 → HTTP → Redis**（不是静态渲染）。
+  一处探针经验记下：面板**标题先渲染、数据后到**，第一版断言踩在"读取中…"那一刻、把面板
+  误判成空列表——验证脚本要等**数据**到位再断言，别等外壳。
+
 **前端容器与服务**：`npm run build` 通过（bundle 441.52 kB，未过告警阈值）；
 `workspace-smoke` **210/210** 未受影响。
 - **`doc/15` 只加了两条**：模块 3 的工作区与出网边界、第五节的三层边界表；该文件是事实源，
