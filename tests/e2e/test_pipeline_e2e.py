@@ -52,6 +52,18 @@ def _start_session(client: TestClient, content: str) -> tuple[str, str]:
     return session_id, accepted.json()["workflow_id"]
 
 
+def _start_dynamic_session(client: TestClient, content: str) -> tuple[str, str]:
+    """发一条**走自动编排**的消息（单次请求覆盖 `orchestration_mode`，见 doc/api.md §4.4）。"""
+
+    session_id = client.post("/api/v1/sessions", json={"user_id": "e2e"}).json()["id"]
+    accepted = client.post(
+        f"/api/v1/sessions/{session_id}/messages",
+        json={"content": content, "orchestration_mode": "dynamic"},
+    )
+    assert accepted.status_code == 202
+    return session_id, accepted.json()["workflow_id"]
+
+
 def _wait_for_terminal(
     client: TestClient, workflow_id: str, timeout: float = 30.0
 ) -> dict[str, Any]:
@@ -105,7 +117,13 @@ def test_pipeline_runs_three_stages_in_order_with_real_tools(
     assert e2e_env.driver.child_instances == [
         f"{workflow_id}:{stage}" for stage in STAGES
     ]
-    assert e2e_env.driver.activities == ["run_stage_activity"] * 3 + ["finalize_activity"]
+    # 第一阶段之前还有**问题改写**（ADR-037 的前置步骤）——静态与动态链路都跑它，
+    # 断言里漏掉它就会把「改写确实执行过」这件事漏测。
+    assert e2e_env.driver.activities == [
+        "rewrite_activity",
+        *["run_stage_activity"] * 3,
+        "finalize_activity",
+    ]
 
     # 阶段载荷按契约携带 tool_calls（doc/data-model.md §3）；模型每阶段请求不同参数。
     for index, stage in enumerate(STAGES):
@@ -324,3 +342,65 @@ def test_second_message_inherits_session_history(e2e_env) -> None:
         MessageRole.USER,
         MessageRole.ASSISTANT,
     ]
+
+
+def test_dynamic_chain_routes_waves_synthesizes_and_exposes_traces(e2e_env) -> None:
+    """自动编排（ADR-038）的端到端：意图 → 编排 → 波内并行 → 合成 → 校验。
+
+    这条用例覆盖的是**新链路本身**：一次 `orchestration_mode=dynamic` 的消息应当
+    （1）先跑 intake、（2）按计划把同波两个子工作流放进同一批、（3）最后经合成器产出交付物，
+    （4）checkpoint 里能看到路线、波次与每步状态，（5）`/stages` 按节点给出轨迹。
+    """
+
+    client = TestClient(app)
+    session_id, workflow_id = _start_dynamic_session(client, "对比 A 与 B 的实测口径并出报告")
+
+    workflow = _wait_for_terminal(client, workflow_id)
+    assert workflow["status"] == "completed"
+
+    # 1) 前置活动是 intake（改写 + 意图一次调用），随后才是规划。
+    assert e2e_env.driver.activities[:2] == ["intake_activity", "dynamic_plan_activity"]
+
+    # 2) s1 / s2 无依赖 → 同一波：实例 ID 带轮次，s3 依赖两者 → 下一波。
+    assert e2e_env.driver.child_instances == [
+        f"{workflow_id}:dyn:r1:s1",
+        f"{workflow_id}:dyn:r1:s2",
+        f"{workflow_id}:dyn:r1:s3",
+    ]
+
+    # 3) 交付物来自**合成器**，而不是最后一个子任务的正文。
+    assert e2e_env.driver.activities[-1] == "finalize_activity"
+    assert "dynamic_synthesize_activity" in e2e_env.driver.activities
+    assert "dynamic_validate_activity" in e2e_env.driver.activities
+    messages = client.get(f"/api/v1/sessions/{session_id}/messages").json()
+    report = messages["items"][-1]
+    assert report["role"] == "assistant"
+    assert report["content"] == "合成后的对比报告"
+
+    # 4) checkpoint 带着路线、意图、流程序列与逐步状态。
+    checkpoint = workflow["checkpoint"]
+    assert checkpoint["mode"] == "dynamic"
+    assert checkpoint["route"] == "multi"
+    assert checkpoint["intent"]["need_multi_subtask"] is True
+    assert checkpoint["partial"] is False
+    assert [node["id"] for node in checkpoint["flow"]] == [
+        "intent",
+        "plan",
+        "s1",
+        "s2",
+        "s3",
+        "synthesize",
+        "validate",
+    ]
+    waves = {node["id"]: node["wave"] for node in checkpoint["flow"]}
+    assert waves["s1"] == waves["s2"] < waves["s3"], "同波并行、波间串行"
+    assert checkpoint["validation"]["satisfied"] is True
+
+    # 5) `/stages` 对动态链路可用：按 flow 节点逐个给出输入/产出。
+    trace = client.get(f"/api/v1/workflows/{workflow_id}/stages").json()
+    assert trace["availability"] == "available"
+    trace_by_stage = {item["stage"]: item for item in trace["items"]}
+    assert trace_by_stage["intent"]["output"].startswith("类型：report")
+    assert trace_by_stage["s1"]["output"] == f"第 1 阶段结论：已采纳工具观察结果。"
+    assert trace_by_stage["synthesize"]["output"] == "合成后的对比报告"
+    assert trace_by_stage["validate"]["output"].startswith("是否满足原始意图：是")

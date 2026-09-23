@@ -168,6 +168,118 @@ def test_dynamic_mode_says_not_integrated_instead_of_pretending_empty():
     assert "不落盘" in result["reason"]
 
 
+def _dynamic_checkpoint() -> dict:
+    """ADR-038 的 checkpoint：flow 是节点清单，plan 仍只装子任务。"""
+
+    return {
+        "mode": "dynamic",
+        "status": "completed",
+        "route": "multi",
+        "round": 1,
+        "rewritten_task": "对比 A 与 B 的实测数据并出报告",
+        "flow": [
+            {"id": "intent", "kind": "intent", "role": None, "depends_on": [], "status": "completed", "wave": 0},
+            {"id": "plan", "kind": "plan", "role": None, "depends_on": ["intent"], "status": "completed", "wave": 1},
+            {"id": "s1", "kind": "worker", "role": "collector", "depends_on": ["plan"], "status": "completed", "wave": 2},
+            {"id": "s2", "kind": "worker", "role": "collector", "depends_on": ["plan"], "status": "failed", "wave": 2},
+            {"id": "s3", "kind": "worker", "role": "analyst", "depends_on": ["plan", "s1", "s2"], "status": "skipped", "wave": 3},
+            {"id": "synthesize", "kind": "synthesize", "role": "reporter", "depends_on": ["s1", "s2", "s3"], "status": "completed", "wave": 4},
+        ],
+        "plan": [],
+    }
+
+
+def _dynamic_payloads() -> dict[str, dict]:
+    """动态节点在状态存储里的载荷：字段与静态阶段载荷同形。"""
+
+    return {
+        "dyn:r1:intent": {
+            "step": "intent",
+            "status": "completed",
+            "content": "类型：report\n目标：出一份对比报告",
+            "previous": None,
+            "tool_calls": [],
+        },
+        "dyn:r1:s1": {
+            "step": "s1",
+            "status": "completed",
+            "content": "A 方案实测口径",
+            "previous": None,
+            "tool_calls": [
+                {
+                    "call_id": "call-s1",
+                    "tool_name": "web_search",
+                    "input": {"query": "A"},
+                    "output": "ok",
+                    "status": "succeeded",
+                    "error": None,
+                }
+            ],
+        },
+        "dyn:r1:s2": {
+            "step": "s2",
+            "status": "failed",
+            "content": "",
+            "previous": None,
+            "tool_calls": [],
+            "error": "RuntimeError: provider exploded",
+        },
+        "dyn:r1:synthesize": {
+            "step": "synthesize",
+            "status": "completed",
+            "content": "对比报告：A 与 B 的结论如下……",
+            "previous": {"step": "s1,s2,s3", "content": "【s1】\nA 方案实测口径"},
+            "tool_calls": [],
+        },
+    }
+
+
+def test_dynamic_trace_reads_every_flow_node_by_round():
+    result = read_stage_traces(
+        "w1",
+        checkpoint=_dynamic_checkpoint(),
+        read_step=_reader(_dynamic_payloads()),
+    )
+
+    assert result["availability"] == "available"
+    assert result["mode"] == "dynamic"
+    assert result["task"] == "对比 A 与 B 的实测数据并出报告"
+    items = _items(result)
+
+    # 六个节点一个不少：意图 / 编排 / 三个 Worker / 合成。
+    assert [item["stage"] for item in result["items"]] == [
+        "intent",
+        "plan",
+        "s1",
+        "s2",
+        "s3",
+        "synthesize",
+    ]
+    assert items["intent"]["output"].startswith("类型：report")
+    assert items["s1"]["output"] == "A 方案实测口径"
+    assert [call["tool_name"] for call in items["s1"]["tool_calls"]] == ["web_search"]
+    assert items["synthesize"]["output"].startswith("对比报告")
+    assert items["synthesize"]["input_from"] == "s1,s2,s3"
+
+
+def test_dynamic_trace_explains_missing_failed_and_skipped_nodes():
+    """没有载荷时按节点状态给不同的原因：失败、跳过、已清理是三件不同的事。"""
+
+    result = read_stage_traces(
+        "w1",
+        checkpoint=_dynamic_checkpoint(),
+        read_step=_reader(_dynamic_payloads()),
+    )
+    items = _items(result)
+
+    # 失败的节点：载荷在（错误原因原样透出）。
+    assert "provider exploded" in (items["s2"]["reason"] or "")
+    # 跳过的节点：没有载荷，但要说清是被跳过的，而不是"还在排队"。
+    assert "被跳过" in (items["s3"]["reason"] or "")
+    # 没有载荷的已完成节点：状态可能已被清理。
+    assert "已被清理" in (items["plan"]["reason"] or "")
+
+
 def test_long_output_is_truncated_and_flagged():
     states = _states()
     states["report"]["results"]["report"] = {
