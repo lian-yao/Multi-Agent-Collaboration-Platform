@@ -46,78 +46,78 @@
 
 
 .tint-blue {
-  --tint-bg: #e8f1f7;
-  --tint-fg: #2c6480
+  --tint-bg: var(--t-bg-e8f1f7);
+  --tint-fg: var(--t-ink-2c6480)
 }
 
 
 
 .tint-indigo {
-  --tint-bg: #eaecf8;
-  --tint-fg: #414f9b
+  --tint-bg: var(--t-bg-eaecf8);
+  --tint-fg: var(--t-ink-414f9b)
 }
 
 
 
 .tint-purple {
-  --tint-bg: #f1eaf8;
-  --tint-fg: #6a4694
+  --tint-bg: var(--t-bg-f1eaf8);
+  --tint-fg: var(--t-ink-6a4694)
 }
 
 
 
 .tint-rose {
-  --tint-bg: #fbeaef;
-  --tint-fg: #a14464
+  --tint-bg: var(--t-bg-fbeaef);
+  --tint-fg: var(--t-ink-a14464)
 }
 
 
 
 .tint-amber {
-  --tint-bg: #fdf3e2;
-  --tint-fg: #8f6a29
+  --tint-bg: var(--t-bg-fdf3e2);
+  --tint-fg: var(--t-ink-8f6a29)
 }
 
 
 
 .tint-orange {
-  --tint-bg: #fdeee3;
-  --tint-fg: #a15f2c
+  --tint-bg: var(--t-bg-fdeee3);
+  --tint-fg: var(--t-ink-a15f2c)
 }
 
 
 
 .tint-teal {
-  --tint-bg: #e4f4f2;
-  --tint-fg: #2b7069
+  --tint-bg: var(--t-bg-e4f4f2);
+  --tint-fg: var(--t-ink-2b7069)
 }
 
 
 
 .tint-green {
-  --tint-bg: #e8f4ec;
-  --tint-fg: #3c7355
+  --tint-bg: var(--t-bg-e8f4ec);
+  --tint-fg: var(--t-ink-3c7355)
 }
 
 
 
 .tint-pink {
-  --tint-bg: #fbeaf3;
-  --tint-fg: #9c416f
+  --tint-bg: var(--t-bg-fbeaf3);
+  --tint-fg: var(--t-ink-9c416f)
 }
 
 
 
 .tint-ink {
-  --tint-bg: #e9edf0;
-  --tint-fg: #35454e
+  --tint-bg: var(--t-bg-e9edf0);
+  --tint-fg: var(--t-ink-35454e)
 }
 
 
 
 .tint-slate {
-  --tint-bg: #eef2f4;
-  --tint-fg: #5c707b
+  --tint-bg: var(--t-bg-eef2f4);
+  --tint-fg: var(--t-ink-5c707b)
 }
 
 
@@ -128,8 +128,8 @@
   gap:4px;
   padding:3px 7px;
   border-radius:5px;
-  background:var(--tint-bg, #eef2f4);
-  color:var(--tint-fg, #5c707b);
+  background:var(--tint-bg, var(--t-bg-eef2f4));
+  color:var(--tint-fg, var(--t-ink-5c707b));
   font-size:9.5px;
   line-height:1.5;
   white-space:nowrap
@@ -142,8 +142,8 @@
   flex:0 0 auto;
   place-items:center;
   border-radius:9px;
-  background:var(--tint-bg, #eef2f4);
-  color:var(--tint-fg, #5c707b);
+  background:var(--tint-bg, var(--t-bg-eef2f4));
+  color:var(--tint-fg, var(--t-ink-5c707b));
   font-weight:700;
   letter-spacing:.02em
 }
@@ -155,19 +155,19 @@
   display:grid;
   flex:0 0 auto;
   place-items:center;
-  border:1px solid var(--cfg-line-soft, #e8f0f3);
+  border:1px solid var(--cfg-line-soft, var(--t-bd-e8f0f3));
   border-radius:9px;
-  background:#fff;
-  color:var(--cfg-ink, #33505d)
+  background:var(--t-bg-ffffff);
+  color:var(--cfg-ink, var(--t-ink-33505d))
 }
 
 /* 「自定义端点」占位（providerIcons.tsx 的 ProviderMark）：没有品牌可画，
  * 用加号表达「自己填一个」，同时把描边改虚线，和品牌白底方块区分开。 */
 .cfg-mark-add {
   border-style:dashed;
-  border-color:var(--cfg-accent-soft, #b9d4dd);
-  background:var(--cfg-surface-hover, #f4f9fa);
-  color:var(--cfg-accent, #4a7d8c)
+  border-color:var(--cfg-accent-soft, var(--t-bd-b9d4dd));
+  background:var(--cfg-surface-hover, var(--t-bg-f4f9fa));
+  color:var(--cfg-accent, var(--t-ink-4a7d8c))
 }
 
 
@@ -210,7 +210,7 @@
 
 .cfg-block h3 {
   margin:0;
-  color:#40606e;
+  color:var(--t-ink-40606e);
   font-size:13.5px;
   font-weight:600
 }
@@ -223,7 +223,7 @@
   align-items:center;
   gap:7px;
   margin:0;
-  color:#40606e;
+  color:var(--t-ink-40606e);
   font-size:12.5px;
   font-weight:600
 }
@@ -232,7 +232,7 @@
 
 .cfg-block-head p {
   margin:5px 0 0;
-  color:#8499a2;
+  color:var(--t-ink-8499a2);
   font-size:10.5px;
   line-height:1.6
 }
@@ -243,8 +243,8 @@
 .cfg-block p code {
   padding:1px 4px;
   border-radius:4px;
-  background:#f2f6f8;
-  color:#4d6b78;
+  background:var(--t-bg-f2f6f8);
+  color:var(--t-ink-4d6b78);
   font-size:10px
 }
 
@@ -272,14 +272,14 @@
 
 
 .cfg-facts dt {
-  color:#8b9da5
+  color:var(--t-ink-8b9da5)
 }
 
 
 
 .cfg-facts dd {
   margin:0;
-  color:#577583;
+  color:var(--t-ink-577583);
   text-align:right;
   overflow-wrap:anywhere
 }
@@ -307,56 +307,56 @@
   align-items:center;
   gap:5px;
   padding:7px 13px;
-  border:1px solid #3f7f93;
+  border:1px solid var(--t-bd-3f7f93);
   border-radius:6px;
-  background:#3f7f93;
-  color:#fff;
+  background:var(--t-bg-3f7f93);
+  color:var(--t-ink-ffffff);
   font-size:11px
 }
 
 
 
 .cfg-primary:hover {
-  background:#346c7e
+  background:var(--t-bg-346c7e)
 }
 
 
 
 .cfg-primary:disabled {
-  border-color:#cfdde1;
-  background:#cfdde1;
-  color:#f6fafb
+  border-color:var(--t-bd-cfdde1);
+  background:var(--t-bg-cfdde1);
+  color:var(--t-ink-f6fafb)
 }
 
 
 
 .cfg-quiet {
   padding:6px 10px;
-  border:1px solid #dce7ea;
+  border:1px solid var(--t-bd-dce7ea);
   border-radius:6px;
-  background:#f8fafb;
-  color:#456572;
+  background:var(--t-bg-f8fafb);
+  color:var(--t-ink-456572);
   font-size:10.5px
 }
 
 
 
 .cfg-quiet:hover {
-  border-color:#bcd3da;
-  background:#eff5f7
+  border-color:var(--t-bd-bcd3da);
+  background:var(--t-bg-eff5f7)
 }
 
 
 
 .cfg-quiet.danger {
-  color:#a1554b
+  color:var(--t-ink-a1554b)
 }
 
 
 
 .cfg-quiet.danger:hover {
-  border-color:#e2c7c0;
-  background:#fdf3f1
+  border-color:var(--t-bd-e2c7c0);
+  background:var(--t-bg-fdf3f1)
 }
 
 
@@ -366,17 +366,17 @@
   width:26px;
   height:26px;
   place-items:center;
-  border:1px solid #dce7ea;
+  border:1px solid var(--t-bd-dce7ea);
   border-radius:6px;
-  background:#f8fafb;
-  color:#6b838f;
+  background:var(--t-bg-f8fafb);
+  color:var(--t-ink-6b838f);
   font-size:11px
 }
 
 
 
 .cfg-icon-button:hover {
-  background:#eff5f7
+  background:var(--t-bg-eff5f7)
 }
 
 
@@ -428,7 +428,7 @@
 
 .cfg-label,
 .cfg-field label {
-  color:#8499a2;
+  color:var(--t-ink-8499a2);
   font-size:10px
 }
 
@@ -443,10 +443,10 @@
 .cfg-param-row select {
   width:100%;
   padding:8px 10px;
-  border:1px solid #e1eaed;
+  border:1px solid var(--t-bd-e1eaed);
   border-radius:7px;
-  background:#f8fafb;
-  color:#55707d;
+  background:var(--t-bg-f8fafb);
+  color:var(--t-ink-55707d);
   font:inherit;
   font-size:11px
 }
@@ -466,7 +466,7 @@
 .cfg-field input::placeholder,
 .cfg-field textarea::placeholder,
 .cfg-import-toolbar input::placeholder {
-  color:#a9b6bb
+  color:var(--t-ink-a9b6bb)
 }
 
 
@@ -477,29 +477,29 @@
 .cfg-import-toolbar input:focus-visible,
 .cfg-param-row input:focus-visible,
 .cfg-param-row select:focus-visible {
-  outline:2px solid #39839c;
+  outline:2px solid var(--t-bd-39839c);
   outline-offset:1px;
-  border-color:#a8c6d1
+  border-color:var(--t-bd-a8c6d1)
 }
 
 
 
 .cfg-field input:disabled,
 .cfg-field select:disabled {
-  background:#f1f4f5;
-  color:#9aaab0
+  background:var(--t-bg-f1f4f5);
+  color:var(--t-ink-9aaab0)
 }
 
 
 
 .cfg-field input[aria-invalid=true] {
-  border-color:#dcb6ab
+  border-color:var(--t-bd-dcb6ab)
 }
 
 
 
 .cfg-field small {
-  color:#9aaab0;
+  color:var(--t-ink-9aaab0);
   font-size:9.5px;
   line-height:1.6
 }
@@ -508,7 +508,7 @@
 
 .cfg-hint {
   margin:8px 0 0;
-  color:#99a9af;
+  color:var(--t-ink-99a9af);
   font-size:10px;
   line-height:1.7
 }
@@ -518,10 +518,10 @@
 .cfg-alert {
   margin:10px 0 0;
   padding:9px 11px;
-  border:1px solid #e6cfc8;
+  border:1px solid var(--t-bd-e6cfc8);
   border-radius:7px;
-  background:#fdf5f3;
-  color:#93564c;
+  background:var(--t-bg-fdf5f3);
+  color:var(--t-ink-93564c);
   font-size:10.5px;
   line-height:1.7
 }
@@ -529,7 +529,7 @@
 
 
 .cfg-count {
-  color:#8b9da5;
+  color:var(--t-ink-8b9da5);
   font-size:10px;
   white-space:nowrap
 }
@@ -549,7 +549,7 @@
   display:inline-flex;
   align-items:center;
   gap:6px;
-  color:#607b86;
+  color:var(--t-ink-607b86);
   font-size:10.5px;
   cursor:pointer
 }
@@ -568,7 +568,7 @@
   align-items:center;
   gap:9px;
   padding:6px 0;
-  color:#8499a2;
+  color:var(--t-ink-8499a2);
   font-size:10.5px
 }
 
@@ -580,9 +580,10 @@
   width:34px;
   height:19px;
   padding:0;
-  border:1px solid #cfdde1;
+  border:1px solid var(--t-bd-cfdde1);
   border-radius:999px;
-  background:#eef2f4;
+  background:var(--t-bg-eef2f4);
+  color:inherit; /* 不落到 UA 的 buttontext：那颜色主题管不到，见 ADR-038 */
   transition:background .16s,border-color .16s
 }
 
@@ -595,16 +596,16 @@
   width:13px;
   height:13px;
   border-radius:50%;
-  background:#fff;
-  box-shadow:0 1px 2px #253b452e;
+  background:var(--t-bg-ffffff);
+  box-shadow:0 1px 2px var(--t-shadow-253b452e);
   transition:transform .16s
 }
 
 
 
 .cfg-switch.on {
-  border-color:#5f9aad;
-  background:#5f9aad
+  border-color:var(--t-bd-5f9aad);
+  background:var(--t-bg-5f9aad)
 }
 
 
@@ -624,25 +625,25 @@
 
 
 .cfg-notice.idle {
-  color:#9aaab0
+  color:var(--t-ink-9aaab0)
 }
 
 
 
 .cfg-notice.ok {
-  color:#3c7355
+  color:var(--t-ink-3c7355)
 }
 
 
 
 .cfg-notice.bad {
-  color:#a1554b
+  color:var(--t-ink-a1554b)
 }
 
 
 
 .cfg-notice.info {
-  color:#40606e
+  color:var(--t-ink-40606e)
 }
 
 
@@ -652,14 +653,14 @@
   justify-items:start;
   gap:6px;
   margin:20px 0;
-  color:#9aabb2;
+  color:var(--t-ink-9aabb2);
   font-size:10.5px
 }
 
 
 
 .cfg-empty b {
-  color:#607b86;
+  color:var(--t-ink-607b86);
   font-size:11.5px;
   font-weight:500
 }
@@ -716,6 +717,7 @@
   border-left:2px solid transparent;
   border-radius:var(--cfg-radius-sm);
   background:transparent;
+  color:inherit; /* 不落到 UA 的 buttontext：那颜色主题管不到，见 ADR-038 */
   text-align:left;
   transition:background-color var(--cfg-ease),border-color var(--cfg-ease)
 }
@@ -732,7 +734,7 @@
 .cfg-provider-item.active {
   border-color:var(--cfg-line-soft);
   border-left-color:var(--cfg-accent);
-  background:#f0f6f8
+  background:var(--t-bg-f0f6f8)
 }
 
 
@@ -747,7 +749,7 @@
 
 
 .cfg-provider-text b {
-  color:#40606e;
+  color:var(--t-ink-40606e);
   font-size:11.5px;
   font-weight:600
 }
@@ -755,7 +757,7 @@
 
 
 .cfg-provider-text small {
-  color:#94a5ac;
+  color:var(--t-ink-94a5ac);
   font-size:9.5px;
   overflow:hidden;
   text-overflow:ellipsis;
@@ -792,10 +794,10 @@
 .cfg-preset-toolbar input {
   width:190px;
   padding:7px 10px;
-  border:1px solid #e1eaed;
+  border:1px solid var(--t-bd-e1eaed);
   border-radius:7px;
-  background:#f8fafb;
-  color:#55707d;
+  background:var(--t-bg-f8fafb);
+  color:var(--t-ink-55707d);
   font:inherit;
   font-size:11px
 }
@@ -820,7 +822,7 @@
   padding:8px 10px;
   border:1px solid var(--cfg-line-soft);
   border-radius:var(--cfg-radius-sm);
-  background:#fbfdfd;
+  background:var(--t-bg-fbfdfd);
   text-align:left;
   transition:border-color var(--cfg-ease),background-color var(--cfg-ease),box-shadow var(--cfg-ease)
 }
@@ -836,9 +838,9 @@
 
 
 .cfg-preset.selected {
-  border-color:#8fb8c6;
-  background:#eef6f8;
-  box-shadow:inset 0 0 0 1px #8fb8c6
+  border-color:var(--t-bd-8fb8c6);
+  background:var(--t-bg-eef6f8);
+  box-shadow:inset 0 0 0 1px var(--t-shadow-8fb8c6)
 }
 
 
@@ -852,7 +854,7 @@
 
 
 .cfg-preset-text b {
-  color:#40606e;
+  color:var(--t-ink-40606e);
   font-size:11px;
   font-weight:600
 }
@@ -860,7 +862,7 @@
 
 
 .cfg-preset-text small {
-  color:#94a5ac;
+  color:var(--t-ink-94a5ac);
   font-size:9px;
   overflow:hidden;
   text-overflow:ellipsis;
@@ -875,9 +877,9 @@
   gap:11px;
   margin-top:14px;
   padding:11px 13px;
-  border:1px solid #e4ecef;
+  border:1px solid var(--t-bd-e4ecef);
   border-radius:9px;
-  background:#fafcfd
+  background:var(--t-bg-fafcfd)
 }
 
 
@@ -892,21 +894,21 @@
 
 
 .cfg-provider-preview b {
-  color:#40606e;
+  color:var(--t-ink-40606e);
   font-size:12px
 }
 
 
 
 .cfg-provider-preview small {
-  color:#94a5ac;
+  color:var(--t-ink-94a5ac);
   font-size:9.5px
 }
 
 
 
 .cfg-provider-preview a {
-  color:#3f7f93;
+  color:var(--t-ink-3f7f93);
   font-size:10px;
   text-decoration:none;
   white-space:nowrap
@@ -963,7 +965,7 @@
 
 
 .cfg-model-main:focus-visible {
-  outline:2px solid #39839c;
+  outline:2px solid var(--t-bd-39839c);
   outline-offset:-2px
 }
 
@@ -976,7 +978,7 @@
 
 .cfg-model-chevron {
   flex:0 0 auto;
-  color:var(--cfg-ink-4,#a4b2b8);
+  color:var(--cfg-ink-4,var(--t-ink-a4b2b8));
   transition:transform var(--cfg-ease,.16s cubic-bezier(.4,0,.2,1))
 }
 
@@ -1023,7 +1025,7 @@
 
 
 .cfg-model-meta {
-  color:#a4b2b8;
+  color:var(--t-ink-a4b2b8);
   font-size:9px;
   white-space:nowrap
 }
@@ -1058,7 +1060,7 @@
 .cfg-tuning-head code {
   padding:1px 4px;
   border-radius:4px;
-  background:#fff;
+  background:var(--t-bg-ffffff);
   color:var(--cfg-ink-3);
   font-size:10px;
   font-weight:400
@@ -1085,7 +1087,7 @@
   gap:7px;
   margin-top:4px;
   padding-top:10px;
-  border-top:1px dashed #e2ecef
+  border-top:1px dashed var(--t-bd-e2ecef)
 }
 
 
@@ -1095,7 +1097,7 @@
   align-items:center;
   justify-content:space-between;
   gap:10px;
-  color:#8499a2;
+  color:var(--t-ink-8499a2);
   font-size:10px
 }
 
@@ -1122,7 +1124,7 @@
   padding:13px;
   border:1px solid var(--cfg-line-soft);
   border-radius:var(--cfg-radius-sm);
-  background:#fbfdfd
+  background:var(--t-bg-fbfdfd)
 }
 
 
@@ -1139,7 +1141,7 @@
   align-items:center;
   justify-content:space-between;
   gap:10px;
-  color:#40606e;
+  color:var(--t-ink-40606e);
   font-size:11.5px;
   font-weight:600
 }
@@ -1226,7 +1228,7 @@
 
 
 .cfg-discover-name b {
-  color:#40606e;
+  color:var(--t-ink-40606e);
   font-size:11px;
   font-weight:500;
   overflow-wrap:anywhere
@@ -1235,7 +1237,7 @@
 
 
 .cfg-discover-name code {
-  color:#94a5ac;
+  color:var(--t-ink-94a5ac);
   font-size:9px;
   overflow-wrap:anywhere
 }
@@ -1243,7 +1245,7 @@
 
 
 .cfg-discover-owner {
-  color:#a4b2b8;
+  color:var(--t-ink-a4b2b8);
   font-size:9px;
   white-space:nowrap
 }
@@ -1256,7 +1258,7 @@
   margin:0;
   padding:0;
   list-style:none;
-  color:#607b86;
+  color:var(--t-ink-607b86);
   font-size:10px
 }
 
@@ -1313,6 +1315,141 @@
 }
 
 
+
+/* 角色工具授权面板（ADR-035）。行样式复用下面的 .cfg-tool-card / .cfg-tool-list，
+   这里只补「分组小标题 + 表头开关 + 复选框」三样。 */
+
+.cfg-tools {
+  display:grid;
+  gap:10px;
+  margin-top:14px;
+  padding-top:14px;
+  border-top:1px solid var(--cfg-line-faint)
+}
+
+
+
+.cfg-tools-head {
+  display:flex;
+  flex-wrap:wrap;
+  align-items:flex-start;
+  justify-content:space-between;
+  gap:10px
+}
+
+
+
+.cfg-tools-head > div:first-child {
+  display:grid;
+  flex:1;
+  gap:4px;
+  min-width:220px
+}
+
+
+
+.cfg-tools-head b {
+  display:flex;
+  align-items:baseline;
+  gap:8px;
+  color:var(--cfg-ink);
+  font-size:12px;
+  font-weight:600
+}
+
+
+
+.cfg-tools-head small {
+  color:var(--cfg-ink-3);
+  font-size:10px;
+  line-height:1.7
+}
+
+
+
+.cfg-tools-actions {
+  display:flex;
+  flex-wrap:wrap;
+  align-items:center;
+  gap:7px
+}
+
+
+
+.cfg-tools-actions small {
+  color:var(--cfg-ink-4);
+  font-size:10px;
+  line-height:1.6
+}
+
+
+
+/* 空名单不是「提示」而是「保存后这个角色就废了」，所以它比普通 hint 重一档。 */
+.cfg-tools-warn {
+  display:flex;
+  align-items:center;
+  gap:5px;
+  color:var(--t-ink-93564c)
+}
+
+
+
+.cfg-tool-group {
+  display:grid;
+  gap:0
+}
+
+
+
+.cfg-tool-group.warn {
+  padding:10px 11px;
+  border:1px solid var(--t-bd-e6cfc8);
+  border-radius:7px;
+  background:var(--t-bg-fdf5f3)
+}
+
+
+
+.cfg-tool-group-head {
+  display:flex;
+  align-items:center;
+  gap:6px;
+  padding:6px 0 2px;
+  color:var(--cfg-ink-3);
+  font-size:10.5px
+}
+
+
+
+.cfg-tool-group-head b {
+  color:var(--cfg-ink-2);
+  font-weight:600
+}
+
+
+
+/* 复选框与 Switch 同高（19px），一行里两种控件不会一高一低。 */
+.cfg-tool-check {
+  flex:0 0 auto;
+  width:15px;
+  height:15px;
+  margin:0 2px 0 0;
+  accent-color:var(--t-ink-4d7f92);
+  cursor:pointer
+}
+
+
+
+.cfg-tool-check:disabled {
+  cursor:default;
+  opacity:.45
+}
+
+
+
+.cfg-tool-group.warn .cfg-tool-list {
+  margin-top:6px
+}
 
 .cfg-tool-list {
   display:grid;
@@ -1397,7 +1534,7 @@
 
 
 .cfg-tool-schema summary {
-  color:#6b838f;
+  color:var(--t-ink-6b838f);
   font-size:10px;
   cursor:pointer
 }
@@ -1414,10 +1551,10 @@
   max-height:240px;
   margin:0;
   padding:10px;
-  border:1px solid #e6eef1;
+  border:1px solid var(--t-bd-e6eef1);
   border-radius:7px;
-  background:#f8fafb;
-  color:#55707d;
+  background:var(--t-bg-f8fafb);
+  color:var(--t-ink-55707d);
   font-family:Cascadia Mono,Consolas,monospace;
   font-size:10px;
   line-height:1.6;
@@ -1430,8 +1567,81 @@
 
 .cfg-agent-grid {
   display:grid;
-  grid-template-columns:repeat(auto-fill,minmax(320px,1fr));
-  gap:12px
+  /* 380px 起步：卡片装得下「名称 + 状态 + 模型 + 授权摘要」两行摘要而不折行，
+     视觉上是卡片而不是砖块。 */
+  grid-template-columns:repeat(auto-fill,minmax(380px,1fr));
+  gap:14px
+}
+
+/* 分区互斥（`hidden` 属性）必须真的隐藏：作者样式里的 `display` 优先级高于 UA 样式表的
+ * `[hidden]{display:none}`，而「设定」「调度」两个分区挂着 `.cfg-form-grid{display:grid}`
+ * —— 少这一条，两个分区会一直同时可见，副路由看起来像完全没生效。
+ * `!important` 是为了压过同为类选择器、且声明更靠后的 `.cfg-agent-detail .cfg-form-grid`。 */
+[hidden] {
+  display:none !important
+}
+
+/* —— 角色弹窗的副路由（设定 / 调度 / 工具，ADR-036）—— */
+.cfg-agent-tabs {
+  display:flex;
+  gap:4px;
+  border-bottom:1px solid var(--cfg-line);
+  margin-bottom:14px
+}
+
+.cfg-agent-tab {
+  appearance:none;
+  background:none;
+  border:none;
+  border-bottom:2px solid transparent;
+  padding:7px 12px;
+  font:inherit;
+  font-size:13px;
+  color:var(--cfg-ink-3);
+  cursor:pointer
+}
+
+.cfg-agent-tab:hover {
+  color:var(--cfg-ink)
+}
+
+.cfg-agent-tab.active {
+  color:var(--cfg-accent);
+  border-bottom-color:var(--cfg-accent);
+  font-weight:600
+}
+
+/* 图标选择器（弹窗头部的头像浮层内）：一键一格，选中的描 accent 边。 */
+.cfg-agent-icons {
+  display:flex;
+  flex-wrap:wrap;
+  gap:6px;
+  margin-top:6px
+}
+
+.cfg-agent-icon {
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  width:30px;
+  height:30px;
+  border:1px solid var(--cfg-line);
+  border-radius:8px;
+  background:transparent;
+  color:var(--cfg-ink-3);
+  cursor:pointer;
+  transition:border-color var(--cfg-ease),background-color var(--cfg-ease),color var(--cfg-ease)
+}
+
+.cfg-agent-icon:hover {
+  border-color:var(--cfg-accent-soft);
+  color:var(--cfg-ink)
+}
+
+.cfg-agent-icon.active {
+  border-color:var(--cfg-accent);
+  color:var(--cfg-accent);
+  background:var(--cfg-accent-soft)
 }
 
 
@@ -1507,9 +1717,9 @@
 
 
 .cfg-agent-delete:hover {
-  border-color:var(--cfg-danger-soft,#f1c9c9);
-  background:#fdeeee;
-  color:#b0483f
+  border-color:var(--cfg-danger-soft,var(--t-bd-f1c9c9));
+  background:var(--t-bg-fdeeee);
+  color:var(--t-ink-b0483f)
 }
 
 
@@ -1518,8 +1728,8 @@
   flex:0 0 auto;
   padding:2px 6px;
   border-radius:999px;
-  background:#f5f0e6;
-  color:#8a7a52;
+  background:var(--t-bg-f5f0e6);
+  color:var(--t-ink-8a7a52);
   font-size:9px;
   font-style:normal;
   line-height:1.5
@@ -1535,7 +1745,7 @@
   padding:10px 12px;
   border:1px solid var(--cfg-line-faint);
   border-radius:var(--cfg-radius);
-  background:var(--cfg-surface-muted,#f7fafb)
+  background:var(--cfg-surface-muted,var(--t-bg-f7fafb))
 }
 
 
@@ -1556,8 +1766,8 @@
 
 
 .cfg-agent-card.active {
-  border-color:#b3d4be;
-  background:linear-gradient(180deg,#f5fbf7 0,var(--cfg-surface) 60px)
+  border-color:var(--t-bd-b3d4be);
+  background:linear-gradient(180deg,var(--t-bg-f5fbf7) 0,var(--cfg-surface) 60px)
 }
 
 
@@ -1580,7 +1790,15 @@
 /* 角色图标位（agentGlyph.tsx 的 AgentGlyph）：底与色仍走 .cfg-monogram 的 tint，
  * 内容从「显示名首字」换成按 role 解析的角色图标。font-size 是给文字用的，现在只放
  * svg 故一并去掉；svg 再单列 display:block，免得踩 lucide 默认 vertical-align:baseline
- * 那处基线偏移（同一坑在侧栏会话菜单与全屏画布头上都栽过）。 */
+ * 那处基线偏移（同一坑在侧栏会话菜单与全屏画布头上都栽过）。
+ *
+ * 弹窗头部那个头像还兼作图标入口：点它弹出浮层挑图标（原先是一整行 15 格常驻在
+ * 「设定」里，把该分区最该显眼的职责说明挤到了下面）。 */
+.cfg-agent-avatar-slot {
+  position:relative;
+  flex:0 0 auto
+}
+
 .cfg-agent-avatar {
   width:34px;
   height:34px
@@ -1588,6 +1806,44 @@
 
 .cfg-agent-avatar svg {
   display:block
+}
+
+/* 卡片网格里也有一个同名的 `.cfg-agent-avatar`（纯展示），所以「可点」这套只挂在
+ * 弹窗头部的槽位上 —— 否则卡片头像会跟着起手型、并在 hover 卡片时多出一圈环。 */
+.cfg-agent-avatar-slot .cfg-agent-avatar {
+  padding:0;
+  border:none;
+  font:inherit;
+  cursor:pointer
+}
+
+.cfg-agent-avatar-slot .cfg-agent-avatar:hover,
+.cfg-agent-avatar-slot .cfg-agent-avatar[aria-expanded="true"] {
+  box-shadow:0 0 0 3px var(--cfg-accent-soft)
+}
+
+/* 图标浮层：贴着头像向下展开；点外面或按 Esc 收起（见 AgentPanel 的 iconPickerOpen）。 */
+.cfg-agent-icon-popover {
+  position:absolute;
+  top:calc(100% + 8px);
+  left:0;
+  z-index:5;
+  display:grid;
+  gap:6px;
+  width:max-content;
+  max-width:min(320px,72vw);
+  padding:10px 12px;
+  border:1px solid var(--cfg-line);
+  border-radius:var(--cfg-radius);
+  background:var(--cfg-surface);
+  box-shadow:var(--cfg-shadow-lg)
+}
+
+.cfg-agent-icon-popover small {
+  max-width:284px;
+  color:var(--cfg-ink-3);
+  font-size:12px;
+  line-height:1.5
 }
 
 
@@ -1625,8 +1881,8 @@
   flex:0 0 auto;
   padding:2px 6px;
   border-radius:999px;
-  background:#e8f5ec;
-  color:#3c7355;
+  background:var(--t-bg-e8f5ec);
+  color:var(--t-ink-3c7355);
   font-size:9px;
   font-style:normal;
   line-height:1.5
@@ -1698,7 +1954,7 @@
   align-items:center;
   gap:7px;
   margin:0;
-  color:#40606e;
+  color:var(--t-ink-40606e);
   font-size:12.5px;
   font-weight:600
 }
@@ -1730,19 +1986,19 @@
 
 .cfg-flag {
   padding:3px 7px;
-  border:1px solid #e4ecef;
+  border:1px solid var(--t-bd-e4ecef);
   border-radius:5px;
-  background:#f8fafb;
-  color:#9aaab0;
+  background:var(--t-bg-f8fafb);
+  color:var(--t-ink-9aaab0);
   font-size:9.5px
 }
 
 
 
 .cfg-flag.on {
-  border-color:#e6d5b4;
-  background:#fdf5e6;
-  color:#8f6a29
+  border-color:var(--t-bd-e6d5b4);
+  background:var(--t-bg-fdf5e6);
+  color:var(--t-ink-8f6a29)
 }
 
 
@@ -1753,7 +2009,7 @@
   z-index:60;
   display:flex;
   padding:24px 16px;
-  background:#14232d61;
+  background:var(--t-bg-14232d61);
   overflow-y:auto
 }
 
@@ -1785,14 +2041,14 @@
   justify-content:space-between;
   gap:14px;
   padding:16px 18px;
-  border-bottom:1px solid #eaf0f2
+  border-bottom:1px solid var(--t-bd-eaf0f2)
 }
 
 
 
 .cfg-modal-head h2 {
   margin:0;
-  color:#33505d;
+  color:var(--t-ink-33505d);
   font-size:14px;
   font-weight:600
 }
@@ -1801,7 +2057,7 @@
 
 .cfg-modal-head p {
   margin:6px 0 0;
-  color:#8499a2;
+  color:var(--t-ink-8499a2);
   font-size:10.5px;
   line-height:1.6
 }
@@ -1811,7 +2067,7 @@
 .cfg-modal-head code {
   padding:1px 4px;
   border-radius:4px;
-  background:#f2f6f8;
+  background:var(--t-bg-f2f6f8);
   font-size:10px
 }
 
@@ -1830,7 +2086,7 @@
   justify-content:flex-end;
   gap:9px;
   padding:13px 18px;
-  border-top:1px solid #eaf0f2
+  border-top:1px solid var(--t-bd-eaf0f2)
 }
 
 
@@ -1893,7 +2149,7 @@
   display:inline-flex;
   align-items:center;
   gap:6px;
-  color:#8499a2;
+  color:var(--t-ink-8499a2);
   font-size:10px
 }
 
@@ -1902,8 +2158,8 @@
 .cfg-kv-required {
   padding:0 5px;
   border-radius:99px;
-  background:#fdf3e2;
-  color:#8f6a29;
+  background:var(--t-bg-fdf3e2);
+  color:var(--t-ink-8f6a29);
   font-size:9.5px
 }
 
@@ -1911,7 +2167,7 @@
 
 .cfg-kv-hint {
   margin:3px 0 0;
-  color:#99a9af;
+  color:var(--t-ink-99a9af);
   font-size:10px;
   line-height:1.7
 }
@@ -1920,7 +2176,7 @@
 
 .cfg-kv-empty {
   margin:0;
-  color:#a9b8bd;
+  color:var(--t-ink-a9b8bd);
   font-size:10px
 }
 
@@ -1939,10 +2195,10 @@
   width:100%;
   min-width:0;
   padding:8px 10px;
-  border:1px solid #e1eaed;
+  border:1px solid var(--t-bd-e1eaed);
   border-radius:7px;
-  background:#f8fafb;
-  color:#55707d;
+  background:var(--t-bg-f8fafb);
+  color:var(--t-ink-55707d);
   font:inherit;
   font-size:11px
 }
@@ -1950,15 +2206,15 @@
 
 
 .cfg-kv-row input:focus-visible {
-  outline:2px solid #39839c;
+  outline:2px solid var(--t-bd-39839c);
   outline-offset:1px;
-  border-color:#a8c6d1
+  border-color:var(--t-bd-a8c6d1)
 }
 
 
 
 .cfg-kv-eq {
-  color:#a9b8bd;
+  color:var(--t-ink-a9b8bd);
   font-size:11px
 }
 
@@ -1971,7 +2227,7 @@
   border:1px solid transparent;
   border-radius:6px;
   background:transparent;
-  color:#a9b8bd;
+  color:var(--t-ink-a9b8bd);
   font-size:11px;
   line-height:1;
   cursor:pointer;
@@ -1982,8 +2238,8 @@
 
 .cfg-kv-remove:hover,
 .cfg-kv-remove:focus-visible {
-  background:#fdf5f3;
-  color:#9c3a2e
+  background:var(--t-bg-fdf5f3);
+  color:var(--t-ink-9c3a2e)
 }
 
 
@@ -2015,7 +2271,7 @@
   border:1px solid var(--cfg-line-soft);
   border-radius:7px;
   background:var(--cfg-surface-soft);
-  color:#55707d;
+  color:var(--t-ink-55707d);
   font-size:10.5px
 }
 
@@ -2023,7 +2279,7 @@
 
 .cfg-mcp-import-section {
   margin:14px 0 6px;
-  color:#8499a2;
+  color:var(--t-ink-8499a2);
   font-size:10px;
   font-weight:600;
   letter-spacing:.04em
@@ -2055,7 +2311,7 @@
 
 /* 与已有条目的 ID 撞车：提交会失败，用淡黄底提前标出来。 */
 .cfg-mcp-import-item.dup {
-  background:#fdf7ec
+  background:var(--t-bg-fdf7ec)
 }
 
 
@@ -2079,7 +2335,7 @@
 
 .cfg-mcp-import-item-meta {
   margin:0;
-  color:#456572;
+  color:var(--t-ink-456572);
   font-size:10.5px;
   line-height:1.6;
   overflow-wrap:anywhere
@@ -2089,7 +2345,7 @@
 
 .cfg-mcp-import-item-facts {
   margin:0;
-  color:#a9b8bd;
+  color:var(--t-ink-a9b8bd);
   font-size:9.5px
 }
 
@@ -2109,7 +2365,7 @@
   display:flex;
   align-items:baseline;
   gap:8px;
-  color:#55707d;
+  color:var(--t-ink-55707d);
   font-size:10.5px
 }
 
@@ -2129,16 +2385,16 @@
 .cfg-mcp-import-outcome {
   margin-top:14px;
   padding:10px 11px;
-  border:1px solid #e6cfc8;
+  border:1px solid var(--t-bd-e6cfc8);
   border-radius:7px;
-  background:#fdf5f3
+  background:var(--t-bg-fdf5f3)
 }
 
 
 
 .cfg-mcp-import-outcome p {
   margin:0;
-  color:#93564c;
+  color:var(--t-ink-93564c);
   font-size:10.5px;
   line-height:1.7
 }
@@ -2147,7 +2403,7 @@
 
 .cfg-mcp-import-outcome .cfg-hint {
   margin-top:6px;
-  color:#b08379
+  color:var(--t-ink-b08379)
 }
 
 
@@ -2216,7 +2472,7 @@
 
 .cfg-ws-open b {
   font-size:12px;
-  color:#26444f;
+  color:var(--t-ink-26444f);
   overflow-wrap:anywhere
 }
 
@@ -2262,20 +2518,20 @@
 
 
 .cfg-ws-tree li.outside {
-  color:#8b9da5
+  color:var(--t-ink-8b9da5)
 }
 
 
 
 .cfg-ws-tree-name {
-  color:#26444f;
+  color:var(--t-ink-26444f);
   overflow-wrap:anywhere
 }
 
 
 
 .cfg-ws-tree-facts {
-  color:#8b9da5
+  color:var(--t-ink-8b9da5)
 }
 
 /* 「选择文件夹位置」的根内目录浏览器（ADR-033 §1）。 */
@@ -2305,7 +2561,7 @@
   flex-wrap:wrap;
   gap:2px;
   min-width:0;
-  color:#8b9da5
+  color:var(--t-ink-8b9da5)
 }
 
 
@@ -2398,7 +2654,7 @@
   border:0;
   border-radius:var(--cfg-radius-sm);
   background:transparent;
-  color:#26444f;
+  color:var(--t-ink-26444f);
   overflow-wrap:anywhere;
   text-align:left
 }
@@ -2412,7 +2668,7 @@
 
 
 .cfg-ws-picker-list button:disabled {
-  color:#9fb0b7;
+  color:var(--t-ink-9fb0b7);
   cursor:not-allowed
 }
 
@@ -2430,7 +2686,7 @@
 .cfg-egress-blocked {
   margin-top:14px;
   font-size:11px;
-  color:#577583
+  color:var(--t-ink-577583)
 }
 
 

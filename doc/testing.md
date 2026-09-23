@@ -2439,7 +2439,697 @@ Agent 的回答里写着「**本会话工具列表中不存在文件类工具**�
 - **`doc/15` 只加了两条**：模块 3 的工作区与出网边界、第五节的三层边界表；该文件是事实源，
   其余表述未动。
 
+### 4.17 运行期实时进度的两处连带缺陷：dynamic 不写 `current_step`、画布没有规划节点（2026-09-22，成员 D）
+
+**1. 怎么发现的**
+
+不是新需求，是**逐条回查上一轮已完成的工作**（用户要求「以上内容都完成了吗」）。回查方式：
+不凭记忆，按「读方 → 写方」对照表走一遍 `grep`。产出的对照表如下——
+
+| 字段 | 谁读 | 谁写 | 结论 |
+| --- | --- | --- | --- |
+| `checkpoint.plan` / `plan_rationale` | 对话流卡片、画布 | `dynamic_plan_activity`、`dynamic_progress_activity` | 有写有读 ✅ |
+| `checkpoint.completed_steps` / `plan[].status` | 同上 | 同上 | 有写有读 ✅ |
+| `workflow_runs.current_step` | **`RunActivity.tsx:164`（两处判定的唯一输入）**、`App.tsx`、记录页、`collaboration.ts` | 静态：`_record_checkpoint`；**动态：无人** | ❌ **所有人都读、动态没人写** |
+| `plan_rationale` 在画布上 | —— | —— | ❌ 画布根本没读它 |
+
+第二行是根因，第三行是需求缺口。`current_step` 缺席让两处判定永远为假：
+
+| 判定 | 落点 | 实际后果 |
+| --- | --- | --- |
+| `isLiveStep` | `RunActivity.tsx:246` | §5.22 第四条「轮询即可让工具调用逐条长出」**一条都不显示** |
+| `isOpen` | `RunActivity.tsx:174` | ADR-031 §4「正在跑的那一步默认摊开」**不生效** |
+
+上一轮按 `dynamic_graph.py:118` 的 docstring「不设单值指针、改用 `plan[].status`」实现。
+那个说法对**步骤状态**成立，但 `current_step` 问的是「**现在轮到谁**」——而
+`plan[].status` 里没有这一位（进度活动只写已完成步骤，正在跑的那一步仍是 `pending`）。
+**「实现存在」被当成了「功能生效」**：桥接的字段没人写，代码审查与单测都照不到
+（单测断言的是「活动写了什么」，而出问题的是「前端读的字段有没有值」）。
+
+**2. 改了什么**
+
+| 文件 | 内容 |
+| --- | --- |
+| `doc/api.md` §5.22 | 三条契约 → 四条，新增「`current_step` 指现在轮到谁」；「每步完成即推进」补 `plan[].status`；「工具调用即落库」与指针显式挂钩 |
+| `app/workflows/dynamic.py` | `dynamic_plan_activity` 写首步（行 + checkpoint）；`dynamic_progress_activity` 写「第一个还没出结果的步骤」。**不新增活动调用**——口径照静态链路：上一步落盘时就把指针推到下一步 |
+| `frontend/src/workspace/collaboration.ts` | 新增 `CollabPlanner` / `CollabAssignment`；`CollabGraph` 增 `planner`（静态链路为 `null`，不是空壳） |
+| `frontend/src/workspace/GraphCanvas.tsx` | `PlacedNode` 增 `planner` kind 与字段；布局多一行（`rows + 1`、`waveRow(i)=i+2`）；新增 `PlannerDetail` 浮层；`NodeGlyph` 增规划分支 |
+| `frontend/src/workspace/workspace.css` | `.cv-node.kind-planner`：虚线边 + 中性石板灰，**不跟角色节点抢蓝色**；`.kind-planner.visited` 必须一并写（与 `.visited` 同权重，不显式提一级会被蓝边盖掉） |
+| `doc/decisions/032-*.md` | 新增 ADR，冻结「指针语义」「规划节点不进波次」「静态链路不画」三条 |
+| `tests/unit/test_workflow_dynamic.py` | 新增「全部跑完指针归零」一例；两例加 `current_step` 断言（首步 / 下一步） |
+| `rendercheck/workspace-smoke.tsx` | +9 条断言；另修正一条既有断言（并行用例现在多一条「任务→分配」的亮边，4 → 5） |
+
+**3. 验证**
+
+```bash
+.venv/Scripts/python.exe -m pytest tests/unit/test_workflow_dynamic.py \
+  tests/unit/test_dynamic_pipeline.py tests/unit/test_stage_trace.py \
+  tests/integration/test_session_workflows_api.py -q
+# 79 passed（其中动态三文件 73 → 74，本文件另加一例）
+```
+
+- `rendercheck/workspace-smoke.tsx` → **210/210**（201 → 210，+9）
+- `tsc --noEmit`（`frontend/`）→ 通过
+- 新增断言覆盖三层：模型带出 `planner`（理由 + 逐条分工）、布局只多一行且波次不变
+  （`height === 44 + 74 + 5 * 96` 且 `waves.length === 3`）、渲染里出现
+  `cv-node kind-planner` 与浮层文案（理由 + 「找到权威数据源」）。
+
+**4. 实渲取证（客户端渲染 + headless Chrome 出图）**
+
+`renderToStaticMarkup` 量不到宽度、也不跑 effect，验证不了布局几何与浮层版式（同 §4.15）。
+用一份临时入口（`esbuild --platform=browser` + `createRoot`，用完即删）挂
+`CollaborationCanvas` 走**客户端渲染**，数据形状与 `dynamic_checkpoint_summary` 一致
+（`s1` 已完成、`s2`/`s3` 待跑），Chrome `--headless=new --screenshot` 出图后逐项核对：
+
+| 断言 | 实测 |
+| --- | --- |
+| 规划节点位置 | 图上自上而下：`任务` → **`任务分配`** → 信息收集 Agent → 数据分析 Agent → 报告生成 Agent → `交付` |
+| 规划节点的形 | **虚线**圆（中性石板灰），不是角色节点那种实线蓝；圆面是 `ListChecks`（与配置页 `plan` 键一致） |
+| 规划节点的状态 | 画的是图标而不是转圈 / 告警 → 恒 `completed`，没走进 ADR-029 §4 的状态优先分支 |
+| 浮层内容 | 标题「任务分配」+ 右上「规划决策」；「分配理由」= `plan_rationale` 原文；「分给谁」三条各带角色显示名（信息收集 / 数据分析 / 报告生成）与 `instruction` |
+| 连线点亮数 | 此 fixture（只有 s1 完成）点亮 **3 条**：`任务→任务分配`、`任务分配→s1`、`s1→s2`；`s2→s3` 与 `s3→交付` 为灰虚线 —— 与布局函数算出的 `active` 集合逐条一致 |
+| 版式 | 浮层贴节点右侧（`is-right`），不压住链路；无横向溢出 |
+
+出图存于 `.workbuddy/memory/2026-09-22-planner-node.png`（**不入库**：`doc/` 下没有图片资源的
+先例，历轮取证都以可复算的测量值落进本文档，而不是贴图）。
+
+**5. 边界（如实记录）**
+
+- **容器里的代码是旧版**：镜像无 volume，`dist` 与 `app/` 都烤进镜像 → 核代码只能用本机
+  `.venv` 与工作区源码；要看到效果需 `docker compose up -d --build frontend backend`。
+- **未跑全量 pytest**（与前几轮同样的原因）。上一轮全量是 754 passed / 8 failed，
+  8 个失败全在 `test_agent_config` / `test_config_api` / `test_inspection_api`，与本轮无关。
+- **`workflow_runs.current_step` 终态不清零**：`update_workflow_run` 忽略 `None`。
+  与静态链路一致，前端两条判定都要求运行态，故无影响。要真清零得改 B 的
+  `update_workflow_run` 语义（哨兵值区分「不改」与「置空」），不值当。
+- **跨线改动已登记**：`app/workflows/dynamic.py` 属 **B** 线，见 `分工.md` §4；
+  按仓库规矩先改 `doc/api.md` §5.22 再动代码。
+
+### 4.18 对话流执行过程改成内联折叠，不再是一张卡片（2026-09-22，成员 D）
+
+**1. 用户反馈与病根**
+
+用户看过 ADR-031 那版实现后的反馈是「效果不太对」，要的是网页 AI 那种**思维链观感**：
+只有一行文本可以展开/收起、融合在输出里、不突兀。回头看，「突兀」有三个具体来源：
+
+| 来源 | 具体是什么 |
+| --- | --- |
+| 外壳 | 边框 + 圆角 + 底色让这块内容看起来像「另一个面板」插在对话中间 |
+| 重复 | 「任务分配」块与协作画布的 planner 节点画的是同一份数据（ADR-032 之后画布已承载） |
+| 层层折叠 | 默认状态下就已经是一张满是分隔线与三段小标题的卡片，比正文还重 |
+
+**2. 改了什么**
+
+| 文件 | 内容 |
+| --- | --- |
+| `frontend/src/workspace/RunActivity.tsx` | 形态重写：外层一行 `.run-chain-head`（跑完写「已执行 N 步 · T 次工具调用 · 用时 X」、运行中写「{角色名} 正在执行…」），展开后才逐步列出；删除「任务分配」块；`current_step` + 实时工具调用的逻辑不变 |
+| `frontend/src/components/Disclosure.tsx` | 外观压平（无边框 / 无底色），删除已无人使用的 `tone` 属性 |
+| `frontend/src/styles.css` | 新增 `.run-chain-*` 与 `.run-step-state`；删除卡片外壳（`.run-activity-head`、`.run-activity-mark`）、`.run-assignment` 整组、`.disclosure.tone-*` 整组 |
+| `doc/decisions/033-conversation-stream-inline-trace.md` | 新增 ADR：修订 ADR-031 §4 的呈现形态 |
+| `doc/api.md` §7 | 对话流细则同步 |
+| `doc/decisions/031-conversation-stream-rendering.md` | §4 加 ADR-033 修订指引 |
+
+**3. 验证**
+
+```bash
+node frontend/node_modules/typescript/bin/tsc --noEmit   # src，0 报错
+node frontend/node_modules/vite/bin/vite.js build
+# ✓ 3424 modules；index-DAePFTaP.css 91.76 kB / index-CmQjw6Rh.js 427.92 kB
+# / markdown-pr2ruGPi.js 166.03 kB（未越 500 kB 警戒线）
+```
+
+- `rendercheck/workspace-smoke.tsx` → **214/214**（210 → 214）。本轮改写的断言：
+  - `跑完收成一行：步数 / 工具次数 / 用时` —— fixture 的 `created_at` = `10:00:00Z`、
+    `completed_at` = `10:00:30Z`，**正好 30 秒**，所以这条钉的是字符串 `用时 30 秒` 而不是关键词。
+  - `不足一秒写「< 1 秒」而不是「0 秒」` —— 见边界 1，库里确有零耗时的历史行。
+  - `跑完默认收起，正文一步都不铺开` —— `.run-steps` 与 `.disclosure-body` 一个都不该出现。
+  - `收起态不写指向空正文的 aria-controls` —— 与折叠块同一条口径。
+  - `内联形态没有卡片外壳，也不再重复画布上的任务分配` —— 断言 `run-activity-head`、
+    `run-assignment`、`任务分配` 三个串**都不出现**（最后一个是防止有人把分配块加回来）。
+  - `执行中自动摊开外层那一行` / `每步那一行仍写清阶段名、工具次数与状态`。
+- `rendercheck/config-smoke.tsx` → **77/77**（无回归）。
+- 产物样式完整性（按**出现次数**核：压缩后只有一行，`grep -c` 恒为 1 会假绿）——
+  `.run-chain-head` 3、`.run-chain-glyph` 7、`.run-step-state` 7、`.run-chain-body` 1、
+  `.disclosure-body` 1、`disclosure.is-open` 1、`.run-activity` 10、`.run-note` 1；
+  `\.run-assignment`、`\.run-activity-head`、`\.disclosure\.tone` **各 0** ——
+  新规则都存活、旧卡片规则确实清干净了。
+
+**4. 实渲取证（CDP + 真实浏览器，打的是**线上容器**而不是离线预览页）**
+
+先核「线上到底刷新没」：新 chunk 文件名 `index-CmQjw6Rh.js` 本身就是版本指纹，
+`docker exec ... ls /usr/share/nginx/html/assets/` 与工作区 `dist/assets/` **逐名一致**
+（`index-CmQjw6Rh.js` / `index-DAePFTaP.css` / `markdown-pr2ruGPi.js`）。
+再用 CDP 驱动 headless Chrome（1440×1000）打开 `http://localhost:5173`，从侧栏历史下拉
+点进会话后取证：
+
+| 断言 | 实测 |
+| --- | --- |
+| 折叠态文本（9月9日那条已完成会话） | `已执行 3 个阶段 · 用时 < 1 秒` |
+| **没有卡片外壳** | `.run-activity` 的 `border: 0px none`、`border-radius: 0px`、`background: rgba(0,0,0,0)`、`margin-bottom: 12px` |
+| 折叠态几何 | **760×41** —— 就是一行；无横向溢出 |
+| 折叠态内容 | `.run-chain-body` / `.run-steps` / `.disclosure` **各 0 个**（真的只留了一行） |
+| 可达性语义 | `aria-expanded=false`，且**不写 `aria-controls`** |
+| 配色 | 那一行字色 `rgb(132,153,162)`（灰）、状态图标绿 `rgb(47,143,107)`（终态） |
+| 点开后 | `aria-expanded=true` + `aria-controls` 出现；`.run-chain-body` 1 个（`border-left 1px solid`，**755×60**）；步骤行 3 个，行首「信息收集 Agent 信息收集 已完成」，单行 **743×18**，行的 `border-top: 0px`、`background: rgba(0,0,0,0)` —— 纯文本行，没有框；整块 **760×106** |
+| 点开单个步骤 | `.disclosure-body` 1 个，小标题「执行轨迹」（这条会话的该步既无输入原文也无产出，故只有一段） |
+| 失败态（今天 22:20 那条） | `任务执行失败 · 已完成 0 步 · 用时 1 分 5 秒`，与接口给的 `created_at 14:20:38 → completed_at 14:21:43`（65 秒）**逐秒吻合**；图标红 `rgb(192,86,79)`；仍是 **760×41** 一行 |
+| 页面报错 | **0** |
+
+**5. 边界（如实记录）**
+
+- **「用时」的退化数据**：库里 27 条 workflow 里有 **11 条** `created_at == completed_at`
+  （都是 9月9日那批早期会话），所以折叠行会显示 `< 1 秒`。前端如实转述，不改写也不圆成
+  别的数；新跑的 workflow 时间戳正常（实测 65 秒 / 4 秒各一）。要修得先确认那批行是怎么
+  写进去的——属数据侧，不在本轮范围。
+- **措辞刻意不叫「思考」**：落盘的只有 ReAct 链里的行动与结论，模型隐藏推理没有落盘
+  （§5.17）。形态照搬网页 AI、**措辞不照搬**，避免被读成模型推理过程。
+- **本机 `npm run build` 仍报 `tsc` / `vite` 不在 PATH**（`npm run` 的 `.bin` 注入失效，老账），
+  沿用 node 直接调 `node_modules/.../bin` 绕过。冒烟同理先 esbuild 打包再跑，且**必须
+  `--format=esm`**：`--format=cjs` 会在 react-dom 服务端渲染时报
+  `Element type is invalid ... got: object`（外部化的 packages 走 CJS 互操作时导出被包成对象）。
+- **未跑全量 pytest**：本轮纯前端形态调整，未触后端、接口字段与数据契约
+  （「用时」三个字段都是既有字段）。
+- **运行态未在线上抓到实拍**：这轮库里没有正在跑的 workflow，运行中的「自动摊开」由冒烟
+  断言（`执行中自动摊开外层那一行`）覆盖，未取到线上实渲。
+
+### 4.19 计划未落盘不画链路、减动画下加载指示器保留动感（2026-09-22，成员 D）
+
+**1. 用户反馈与病根**
+
+用户第二轮反馈两条：一是**加载图标是静止的**（「效果不好，需要体现动感」），二是
+**「画布任务编排似乎是默认绘制经过 3 步」**——单 agent 问题也先画了 3 步 agent 链路才更新。
+第二条是实质问题：**界面在事实产生之前先给了一版假事实**（用户原话：「按理来说没有规划之前，
+应该没有画布，而是应该显示正在规划」）。两条各自一个病根，互不相干：
+
+| 症状 | 病根 |
+| --- | --- |
+| 加载图标不动 | `styles.css` 的 `@media (prefers-reduced-motion: reduce)` 用通配符把全站 `animation` 一刀切（`animation:none!important`），把功能性动画 `.spin` 也一起杀了 |
+| 先画 3 步再更新 | `buildCollaboration` 在 `checkpoint.plan` 缺席时退回 `STAGE_META` 固定三步——那是给**静态链路**写的；动态编排在规划节点产出计划之前 `checkpoint` 恰为 `null`，被同一条退回逻辑顶上 |
+
+关键事实：动态链路的 `checkpoint` 是**规划成功后一次性写入**的（计划与 `mode` 同一次落盘），
+在那之前 `create_workflow_run` 只建行、`checkpoint` 为 `null`——所以「没有 `plan`」这一件事
+同时对应「静态链路（该照画）」与「动态链路还没规划（不该画）」两种实情，前端此前读成了同一种。
+
+**2. 改了什么**
+
+| 文件 | 内容 |
+| --- | --- |
+| `frontend/src/workspace/collaboration.ts` | 新增 `isPlanning(workflow, requestedMode)`（三条判据：声明动态 + `checkpoint` 为空 + 状态仍非终态）与 `CollabGraph.planning`；`buildCollaboration` 接 `requestedMode`，规划窗口内返 `{planning: true, nodes: []}` |
+| `frontend/src/workspace/CollaborationGraph.tsx` | 规划窗口渲染 `.cv-planning`（转圈图标 + 「正在规划：任务分配还没产出，链路等计划落盘后再画」），不再走空状态 |
+| `frontend/src/workspace/CollabCanvas.tsx` | 同上；底部一行在规划窗口报「链路未定」 |
+| `frontend/src/workspace/RunActivity.tsx` | 规划窗口内过程无步骤可铺开，那一行改成**不可展开**的「正在规划任务分配 + 用时」 |
+| `frontend/src/App.tsx` | 三处接线：侧栏画布传 `requestedMode: mode`、全屏画布传 `requestedMode: isLive ? mode : undefined`、执行台在规划窗口不预填卡片改报「正在规划」 |
+| `frontend/src/styles.css` | `@media (prefers-reduced-motion: reduce)` 内给 `.spin` 开例外（`@keyframes spin-breathe`，呼吸式透明度）；新增 `.run-chain-head.is-planning` |
+| `frontend/src/workspace/workspace.css` | 新增 `.cv-planning` |
+| `doc/decisions/034-no-chain-until-plan-lands.md` | 新增 ADR |
+
+**3. 验证**
+
+```bash
+node frontend/node_modules/typescript/bin/tsc --noEmit   # src，0 报错
+node frontend/node_modules/vite/bin/vite.js build
+# ✓ 3424 modules；index-DrH437Ql.css 92.10 kB / index-Cnar73sG.js 429.17 kB
+# / markdown-pr2ruGPi.js 166.03 kB（均未越 500 kB 警戒线）
+```
+
+- `rendercheck/workspace-smoke.tsx` → **224/224**（**214 → 224**）。本轮新增 / 改写的断言：
+  - `还在规划时不画链路，也不拿固定三步顶上` —— fixture `draftWorkflow`（`status: running`、
+    `checkpoint: null`）声明 `dynamic` 时 `planning === true` 且 `nodes.length === 0`。
+  - `静态链路照旧画固定三步` / `没声明编排模式时不误判成规划窗口` —— 相邻两条反例，防止判据
+    放宽后把静态老任务读成「正在规划」。
+  - `规划窗口三处都报「正在规划」`（侧栏画布 / 全屏画布 / 执行过程）与
+    `全屏画布在规划窗口不显示空态`。
+  - `减动画偏好下加载指示器仍有动感` —— 静态断言要求
+    `@media (prefers-reduced-motion:reduce)` 块内 `.spin` 带 `spin-breathe`（正则要求二者同块，
+    防止例外被挪到块外而失效）。
+  - `规划判据接上了提交时声明的编排模式` —— 替换此前恒真的 `collaborationWaves` 断言。
+- `rendercheck/config-smoke.tsx` → **77/77**（无回归）。
+- 产物完整性（按**出现次数**核，`grep -c` 压缩后恒为 1 会假绿）——`.spin` 2、`spin-breathe` 2、
+  `.cv-planning` 1、`.run-chain-head.is-planning` 2；JS（压缩后）里 `正在规划` 6、
+  `requestedMode` 5、`planning:!0` 1（`isPlanning` 标识符被压缩改名，故按 `planning:!0` 核）。
+- **线上容器确已刷新**：`docker exec ... ls /usr/share/nginx/html/assets/` 与工作区
+  `dist/assets/` **逐名逐字节一致**（`index-Cnar73sG.js` 429165 B、`index-DrH437Ql.css` 92100 B、
+  `markdown-pr2ruGPi.js` 166027 B），容器 `index.html` 引用的也是同一批文件名。
+
+**4. 实渲取证（CDP + 真实浏览器，打的是线上容器）**
+
+**(a) 加载指示器**
+
+用 `Emulation.setEmulatedMedia` 切换媒体特性，读 `.spin` 的 `getComputedStyle(el).animationName`：
+
+| 模拟媒体 | 修复前 | 修复后 |
+| --- | --- | --- |
+| 不覆盖（`no-preference`） | `spin` | `spin` |
+| `prefers-reduced-motion: reduce` | **`none`**（图标静止） | **`spin-breathe`** |
+
+修复前 `reduce` 下为 `none`，正是「图标一动不动」的直接原因——`reduce` 是不少环境（含减动画
+设置）的默认偏好，用户报的就是这个形态。
+
+**(b) 规划窗口**
+
+起一个真实的**动态**单 agent 任务，全程按 0.5 秒采样：
+
+| 断言 | 实测 |
+| --- | --- |
+| 规划窗口内画布节点数 | 全程 **0**（采样 31 次全为 0） |
+| 规划窗口内执行台卡片数 | 全程 **0**（同上） |
+| 规划窗口文案 | 「正在规划」出现在 **0.2s – 29.5s** 之间 |
+| 计划落盘后 | 节点数跳到 **4**（`start` + `end` + `planner` + 规划出的 `s1`），执行台 **1** 张卡 |
+| 节点数序列 | `[0×31, 4, 4, …]`；执行台 `[0×31, 1, 1, …]` |
+| 页面报错 | **0** |
+
+即「先画一版错的、再换成对的」已经消失：链路只在计划落盘之后**第一次**出现，且一出现就是
+真实数据。
+
+**5. 边界（如实记录）**
+
+- **判据一依赖提交方，不依赖服务端**：规划窗口内服务端没有任何字段能说明「这次走的是动态
+  编排」（`mode` 随 `checkpoint` 一起写），所以只能用**提交时声明的** `orchestration_mode`
+  （`doc/api.md` §4.4，既有字段）。历史工作流不传这个值（全屏画布只在跟随实时任务时传），
+  避免把静态老任务读成「正在规划」。要让服务端自己说得清，得让 `create_workflow_run` 就落
+  `mode`——属数据契约变更，不在本轮。
+- **本轮那条动态任务后端最终 FAILED**（`48b5c26e`）：日志显示规划节点成功
+  （`plan=[s1 reporter]`、`source=llm`）、该步也执行完成，编排却在收尾时失败。前端行为是对的
+  （「正在规划」→「报告生成 Agent 正在执行」→「任务执行失败」如实反映），但**失败本身属后端 /
+  模型侧，未在本轮定位**，不要当成前端问题查。
+- **`prefers-reduced-motion: reduce` 的通配规则仍然保留**：本轮只给 `.spin` 开一个口子，
+  正文渐进揭示等仍按原样降级。例外只此一处（ADR-034 决策 4）。
+- **未跑全量 pytest**：本轮纯前端呈现与一个 CSS 例外，未触后端、接口字段与数据契约
+  （`orchestration_mode`、`checkpoint` 都是既有字段 / 既有语义）。
+
+### 4.20 角色工具授权、运行记录就地展开日志、指标按序列归集（2026-09-22，成员 D）
+
+**1. 三条用户反馈与病根**
+
+| 反馈 | 病根 |
+| --- | --- |
+| 「只有 MCP 工具，缺少 agent 内置工具的启动」——参考项目（`Multi-Agent-Playground`、`obsidian-yolo-reference`）的 agent 配置都有工具配置 | 平台只有**全局**工具目录，没有**按角色**的授权。`ToolRegistry` 能列出全部工具，但执行期每个角色拿到的都是同一份全量注册表——「这个角色能用哪些工具」这件事在数据模型里**不存在** |
+| 「运行记录应该记录相关日志信息，而不是点击卡片导航到工作台位置」 | 运行记录整张卡就是一个「跳到工作台」的按钮，日志要跳过去看；跳走之后还得自己找回来 |
+| 「当前执行失败似乎缺少报错信息」 | `workflow_runs.error` 这一列一直存在、`finalize_activity` 也一直在写，但**响应模型里没有它**——于是「执行失败」在界面上只剩一个红标签，说不出失败在哪 |
+| 「优化采样指标的 ui」 | 指标视图是**一行一次采样**：同一个指标采样 20 次就是 20 行重复标题，趋势完全看不出来，Token 与耗时也混在同一个列表里 |
+
+**2. 改了什么**
+
+| 文件 | 内容 |
+| --- | --- |
+| `app/core/checkpoint.py` | `AgentConfigRecord` 新增 `tool_names`（JSONB，可空）；迁移表 `_REGISTRY_COLUMN_MIGRATIONS["agent_configs"]` 增列（ADR-017 模式） |
+| `app/core/agent_config.py` | 新增 `TOOL_NAME_MAX_LENGTH` / `TOOL_NAMES_MAX_ITEMS`、`_validate_tool_names`、`resolve_agent_tools`；`OVERRIDE_FIELDS` 增 `tool_names`（并写明它**不参与**层级合并） |
+| `app/orchestration/tools.py` | 新增 `ToolNotAuthorizedError`、`ToolAllowlistRegistry`、`restricted_registry`（纯新增，插在 `_REGISTRY_FACTORY` 之前） |
+| `app/workflows/pipeline.py`（静态链路） | `advance_pipeline_stage` 增 `allowed_tools`；在 `session_scoped_registry` **之前**收窄；`_run_stage_activity` 一次读出覆盖行后同时传 `settings` 与 `allowed_tools` |
+| `app/workflows/dynamic.py`（动态链路） | 新增 `_role_tools(role)`；`dynamic_step_activity` 按**本步骤分配到的角色**收窄 |
+| `app/api/main.py` | `AgentConfigPatchRequest` 增 `tool_names` 与形状校验；`AgentResponse` 增 `tool_names`；**`WorkflowResponse` 增 `error`**（此前缺此字段，失败原因被接口静默丢弃） |
+| `frontend/src/config/AgentTools.tsx` | 新增。角色工具授权面板：不受限 / 按名单双模式、全选与全不选、孤儿名单单列、按「内置 / 各 MCP Server」分组；行样式复用既有 `.cfg-tool-card` |
+| `frontend/src/config/AgentPanel.tsx` | 卡片增工具授权摘要 `ToolScopeChip`；弹窗挂载授权分区；`buildToolPatch` 收口三态；「清除全部覆盖」一并清 `tool_names`；工具目录惰性加载 + 全量翻页 |
+| `frontend/src/records/RecordsPage.tsx` | `RunRecords` 由「整卡导航」改为「就地展开」：展开开关 + 阶段日志（§5.17）+ **折叠区之外**的失败原因 |
+| `frontend/src/records/Inspection.tsx` | 新增 `groupMetrics` / `MetricSeries` / `Sparkline`；`RuntimeSampling` 改为取全量再按「指标名 + 标签组」归集 |
+| `frontend/src/records/records.css`、`frontend/src/config/config.css` | 新增工具授权与指标序列的样式 |
+| `frontend/rendercheck/build-preview.py` | 补 8 条路由（路由表 45 → 53）：两个历史会话的 `/stages` 与工具调用、失败会话 `wf-history-2` 的工作流 / 轨迹，以及它所属会话的会话、消息与工作流列表。就地展开把 `/stages` 从「没人请求过」变成「点开就请求」，不补就只会看到「预览未收录」 |
+| `doc/decisions/035-agent-tool-allowlist.md` | 新增 ADR（工具白名单的接缝为什么在注册表层） |
+
+**3. 验证**
+
+```bash
+uv run pytest -q                     # 790 passed / 8 failed / 7 skipped
+node frontend/node_modules/typescript/bin/tsc --noEmit          # src，0 报错
+node frontend/node_modules/vite/bin/vite.js build               # ✓ 3425 modules
+# index-BPScqFkw.css 95.35 kB / index-DVnOlxPH.js 444.84 kB / markdown-pr2ruGPi.js 166.03 kB
+# 冒烟（务必 --format=esm，cwd 在 frontend/）：
+#   config-smoke    98/98 PASS（本轮新增 20 条）
+#   workspace-smoke 224/224 PASS
+
+```
+
+真浏览器实拍（预览页 + CDP 驱动 headless Chrome）：三块新 UI 都按**真实几何**核过——
+角色卡片的三态摘要（`工具 4 个` / `工具 0 个` / `工具不受限`）、弹窗里授权的三态（6/6 全勾且**锁定** / 0/6 全不勾 / 4/6 带孤儿分组）、
+运行记录折叠态 130px → 展开 527px、失败态在**未展开**时就有 `1050x59` 的红色原因块（且不属于 `.record-run-body` 子树）、指标序列的 132x26 火花线。
+
+新增用例：`tests/unit/test_pipeline_tools.py` 7 例（白名单收窄、越权落 failed 记录、`None` 原样返回、
+空白名单）、`tests/unit/test_agent_config.py` 5 例（三态区分、非列表回退、去重、非法值）、
+`tests/integration/test_config_api.py` 2 例（三态写入、空名 422）；迁移与表契约用例同步加列。
+
+**4. 结论与遗留**
+
+- **8 个失败与本轮无关，是这台机器的环境问题**。判据可复现：测试用
+  `AgentSettings(_env_file=None, llm_provider="ollama", ollama_model="env:7b")` 打桩环境层，
+  但 `resolve_agent_settings` → `resolve_provider_settings` 走「Redis → PostgreSQL → 环境回退」，
+  **这一层测试没打桩**。本机库里有一条真实 Provider 配置（`gpt-5.5` / `openai`），
+  于是断言 `env:7b` 的用例全部读到 `gpt-5.5`。用同一份环境配置直接跑解析即可复现。
+  涉及 `test_agent_config.py`（3）、`test_config_api.py`（2）、`test_inspection_api.py`（3）。
+  要修得让这些用例把 Provider 层也打桩，属测试基础设施改动，不在本轮。
+- **CSS 必须核 dist 里的出现次数**：压缩后只有一个换行，`grep -c` 恒为 1 会假绿。
+  本轮按 `str.count()` 核了 `cfg-tool-check` / `record-series-latest` / `record-spark` 等 9 个类。
+- **`tsconfig.include` 只有 `src`**，rendercheck 的类型不随构建一起过。本轮为 `Agent` 加
+  `tool_names`、为 `Workflow` 加 `error` 之后，`workspace-smoke.tsx` 的 4 处夹具与
+  `config-smoke.tsx` 的 2 处调用都缺字段——**只有单独跑 tsc 才暴露**（缺 `@types/node` 是既有噪音）。
+- **`WorkflowResponse.error` 的补入是「读方有、写方有、中间断了」的又一例**：列在写、列在库里，
+  只有响应模型漏了，于是前端无论如何都拿不到。与 ADR-032 那次的形态同源。
+- **JSX 文本里不能写 markdown**：`AgentTools.tsx` 的孤儿分组提示里留了一句「保存时`**原样保留**`」，
+  星号被当字面量渲染出来了。docstring 里写惯了 markdown，抄进 JSX 文本就成了可见的脏字符——
+  **SSR 冒烟照不到**（它断言的是「这段字在不在」，而脏字符恰好也在其中）。
+  这类只有真看页面才能发现；可行的一遍扫描是对文本节点找 `**` 与反引号。
+- **预览种子的「没人请求过」不等于「不需要种」**：就地展开把历史会话的 `/stages` 变成必请求项，
+  漏种只会得到一句「预览未收录」——而**预览缺口会被读成产品缺陷**（「历史任务没有阶段日志」）。
+  新增读取点时顺手核一遍预览种子还答不答得上，比事后去查便宜得多。
+- **别用类名反推「样式丢没丢」**：`.record-spark` 是 `<svg>` 自身（不是容器，
+  `querySelector('svg')` 取不到自己）；`.record-stage` 只是 TSX 里的标记类、源码里**没有**对应规则，
+  dist 里出现 0 次是预期的。核 dist 之前先确认这个类在源码里确实有规则，
+  否则会把「本来就没有」误判成「被压缩器丢了」。
+- **未做**：工具白名单只在**执行期**收敛工具集，`GET /api/v1/tools` 仍是全局目录；
+  「白名单里的名字是不是拼错了」这种校验刻意不做（Server 可离线），代价是错名字会以
+  「配置成功但工具没出现」的形式潜伏。自定义角色仍不进固定三步流水线（既有约束）。
+
+### 4.21 动态链路活动漏注册：两份清单漂移，整条链路在第一步之后静默失败（2026-09-22，成员 D）
+
+**1. 现象与病根**
+
+反馈是「最新两个关于幂等的单 Agent 问题似乎都执行失败了」。两条运行（`f0117f3f` / 22:20:38、`48b5c26e` / 22:52:09，本地时间）的观察点完全一致：
+
+| 观察点 | 实测 |
+| --- | --- |
+| `GET /api/v1/workflows/{id}` | `status=failed`、`current_step=s1`，会话里只有 1 条 user 消息、没有 assistant 消息 |
+| `workflow_runs.error` | `Activity task #3 failed: Activity function named 'dynamic_progress_activity' was not registered!` |
+| `docker logs \| grep -E "ERROR\|Traceback"` | **空** |
+| 第一步本身 | 是成功的（`dynamic.step.finish … chars=28`、模型 200、子工作流 `:dyn:s1` COMPLETED） |
+
+病根是**两份互不校验的清单**：工作流体里的 `ctx.call_activity(dynamic_progress_activity, ...)`（每跑完一步落一次进度、并把指针推到下一步）与 `WorkflowService.register()` 里的 `register_activity(...)` 是两处独立清单。ADR-032 那一轮把活动加进了 `app/workflows/dynamic.py`——定义、调用点、`__all__` 全都在——**却漏了 `app/workflows/service.py` 的注册**，改动只落地了一半。Dapr 对这种漏注册在**导入期与启动期都不报错**，只有真跑到那一步才炸；而 `agent_dynamic_workflow` 的 `except` 只把原因写进 `workflow_runs.error`、不落日志，于是「日志干净、界面只说失败」。**不是单 Agent 特有的**：任何 `dynamic` 任务都在第一步跑完后死在同一处。
+
+判据（确认是这一轮引入，不是历史遗留）：容器内 `/app/app/workflows/dynamic.py` 有该活动、`/app/app/workflows/service.py` 没有；`git diff --stat` 只有 `dynamic.py` 变动，`service.py` 与 HEAD 一致。时间线也对得上——后端镜像 22:11:10 重建，此后两次运行全挂，此前最后一次成功在 01:32:19。
+
+**2. 改了什么**
+
+| 文件 | 内容 |
+| --- | --- |
+| `app/workflows/service.py`（B 线，跨线登记见 `分工.md` §4） | import 增 `dynamic_progress_activity`；`register()` 增一行 `register_activity`。既有七个活动的注册、两个工作流的注册与调度顺序**未动** |
+| `tests/unit/test_workflow_dynamic.py` | 新增两条**扫描式守卫**：扫 `app/workflows/*.py` 里所有 `call_activity(...)` / `call_child_workflow(...)` 的名字（剥掉行尾注释），断言每一个都在已注册集合内。既有的 `"dynamic_plan_activity" in runtime.activities` 拦不住这类问题——它检查的是「我认识的这几个在不在」，不是「被调用到的都注册了没」 |
+
+**3. 验证**
+
+```bash
+.venv/Scripts/python.exe -m pytest tests/unit/test_workflow_dynamic.py -q   # 19 passed
+docker compose -f deploy/compose.yaml up -d --build backend                 # 依赖层全 CACHED，14s
+```
+
+守卫的**有效性是双向核过的**：修复前跑它必红，报 `工作流体调用了但没注册的活动：['dynamic_progress_activity']`；修复后 19 例全绿。
+
+真实链路（重建后的容器，`orchestration_mode=dynamic`，非打桩）：
+
+| 用例 | 计划 | 结果 |
+| --- | --- | --- |
+| 「用一句话解释什么是幂等。」 | 1 步（`plan_source=llm`） | `completed` / `error=null`，`stages` 1 项有正文，助手消息 1 条 |
+| 三家向量数据库「先收集 → 再对比 → 写结论」 | 5 步（s1–s5） | `completed` / `error=null`，`completed_steps=['s1'…'s5']`，指针按 s1→s2→s3→s4→s5 **逐跳推进**，助手消息 557 字 |
+
+5 步那条是关键证据：`dynamic_progress_activity` 被**连续执行 5 次**且每次都推进了指针——正是修复前必然炸的那一处。重建后容器内 `service.py` 第 67–75 行可见八个 `register_activity`。
+
+**4. 结论与遗留**
+
+- 这是「读方有、写方有、中间断了」的第三种形态：ADR-032 是**响应模型**漏字段，本轮是**注册清单**漏一条，都是两端都在、中间接线断了，而且**都不报错**。共同的止血手段是加一条**按源码反推的守卫**，而不是再补一条 `in` 断言。
+- **失败原因现在看得见了**：ADR-035 补的 `WorkflowResponse.error` 随这次重建进入了运行镜像，同一类失败以后会直接显示原因文本，不再只有一个红标签。
+- **一处小不一致（未改）**：`doc/api.md` §5.22 的 completed 响应示例把**行上的** `current_step` 画成 `null`，实测行上仍留着最后一步（如 `s5`）——因为 `update_workflow_run(current_step=None)` 是**空操作**（`app/core/checkpoint.py:1905` 判 `is not None`）。真正归零的是 `checkpoint.current_step`（§5.19 第三条原文也只对 `checkpoint.current_step` 承诺）。前端 `stageStatus` / `isLiveStep` 都额外要求状态属于 `running/paused/failed`，所以**不构成可见缺陷**；失败时残留的指针反而正好标出「死在哪一步」。只是示例容易让人误读。
+- **另一个观察（与本轮无关）**：5 步那条里 `s2`、`s3` 的 `output` 长度为 0，但计划里标记为 `completed`——「空产出也算完成」会让最终结论缺依据（本次最终答案通篇在说「证据不足」）。属内容质量，不是接线问题，未处理。
+
+### 4.22 Agent 模块化：目录驱动调度、人设/图标可配置、目录字段分端点（2026-09-23，成员 D）
+
+口径：ADR-036、`doc/api.md` §5.7 / §5.7.1。
+
+| 验收点 | 结果 |
+| --- | --- |
+| 后端全量 `pytest` | 通过：908 passed, 7 skipped（含新增 profile 契约用例：三态映射、
+  null name/enabled 拒绝、icon 形状校验、未知角色 404、自定义角色可写覆盖端点） |
+| planner 候选集 | 目录驱动：`generate_plan(candidates=...)` 进提示词与 `parse_plan(allowed=...)`；
+  候选之外的角色整份计划丢弃（单元测试覆盖） |
+| 人设解析 | `resolve_step_prompt` 三级回退（目录 > `ROLE_DEFINITIONS` > 通用兜底），单测覆盖 |
+| 前端 tsc / vite build | 通过（0 错误，7.77s） |
+| rendercheck 冒烟 | config-smoke **98/98**、workspace-smoke **224/224** 通过；
+  分区数断言 4→5（内部工具升一等分区） |
+| 数据层迁移 | `agent_registry.icon VARCHAR(32)` 进 `_REGISTRY_COLUMN_MIGRATIONS`（第 7 条，
+  `IF NOT EXISTS` 幂等），迁移测试同步为 7 条 |
+
+
+### 4.23 把远端 22 个提交拉进带在途改动的工作树（2026-09-23，成员 D）
+
+**1. 起点与判据**
+
+`member-d/chat-stream-render` 的 HEAD **就是**与 `origin/master` 的分叉点
+（`git merge-base HEAD origin/master` == HEAD，本地独有提交 0 条）→ **纯落后 22 个提交**，
+没有需要保护的本地提交；工作区压着 44 个已改文件与 ADR-032~036 等未跟踪产物。
+
+**2. 步骤（`git stash` 在本仓库不可用）**
+
+先把在途改动整体落快照（`git diff HEAD --binary` + `status --porcelain` + 未跟踪文件逐个复制 →
+`.workbuddy/memory/_snapshot-20260923-1810/`），再走三步：
+
+1. 把 15 个「本地改过 ∩ 远端也改过」的文件退回基线（`git checkout HEAD -- <paths>`，改动已存于补丁）；
+2. `git merge --ff-only origin/master` 快进——29 个不重叠的在途改动**原样保留**；
+3. `git apply -3 <补丁>` 把 15 个文件的三路合并放回来 → **9 个干净、6 个共 8 块冲突**。
+
+**`git stash push` 在这台机器上不能用**：它被沙箱 SIGTERM 打断，并**删掉了 `.git/refs/` 整个目录**，
+之后 git 对任何命令都报 `not a git repository`。恢复只差一步——把空目录补回来即可，
+因为 `packed-refs` 完好，本地分支、`refs/remotes/origin/*` 与 `refs/stash` 逐条都在里面。
+同一原因还波及过第二个工作树 `macp-pw` 的 `.git/worktrees/macp-pw/`：补回 `gitdir` / `commondir` /
+`HEAD` 三份元数据再用 `git reset` 重建 index 即恢复（该树工作区与 HEAD 逐字节一致，无内容损失）。
+**结论：这棵树上的 git 写操作要在关闭沙箱隔离的前提下执行。**
+
+**3. 冲突与解决（6 份文件 8 块）**
+
+| 文件 | 冲突 | 解决 |
+| --- | --- | --- |
+| `doc/api.md` | 两侧各自追加 §5.19 | 远端 §5.19–§5.21（工作区 / 审批 / 出网）保号；在途那节顺延为 **§5.22** |
+| `doc/testing.md` | 两侧各自追加 §4.16 | 远端 §4.16（工作区沙箱）保号；在途 4.16–4.21 顺延为 **§4.17–§4.22** |
+| `frontend/src/App.tsx` | 远端按 `reportIndex` 贴活动卡 + 审批卡；在途按 `agent_run_id` 贴（含历史） | 并集：活动卡走 `activityByRunId`（当前 + 历史），审批卡只贴 `index === reportIndex` 那一处，未跑完时随尾部那张卡一起出 |
+| `frontend/src/styles.css` | 远端审批卡片样式 vs 在途 `.run-chain-head` | 并集；在途那一轮已删掉的旧外壳 `.run-activity-head` **不**保留 |
+| `frontend/rendercheck/config-smoke.tsx` | import 语句；分区数 4 vs 5 | import 取并集；分区数取 **5**（工作区入口搬走后 4 个，加上 ADR-036 的内部工具） |
+| `tests/unit/test_registry_schema_migration.py` | 文档串；迁移条数 6 vs 7 | 并集；条数断言取**实测的 8**（两条 ADR-017 之外，多出 `default_llm_model_id`、`workspaces.updated_by`、`tool_names`、`icon`） |
+
+**4. 编号顺延的连带引用**
+
+顺延只改了**在途自己写的**文件：`app/workflows/dynamic.py`（5）、`tests/unit/test_workflow_dynamic.py`（5）、
+`frontend/src/workspace/collaboration.ts`（2）、`frontend/src/types/api.ts`（1）、`doc/api.md`（2）、
+`doc/testing.md`（4）、ADR-032/033/034/035 各 1、`分工.md`（4）。
+**工作区语义的同名引用（§5.19 的路径守卫、§4.16 的验收表）逐处未动**——它们指的是远端那两节。
+
+**5. 验证**
+
+```bash
+.venv\Scripts\python.exe -m pytest tests/unit tests/integration -q
+# 1137 passed, 5 failed
+node frontend/node_modules/typescript/bin/tsc --noEmit     # 0 报错
+node frontend/node_modules/vite/bin/vite.js build          # ✓ 3429 modules
+# 冒烟（必须 --format=esm）：config-smoke 101/101、workspace-smoke 249/249
+```
+
+5 条失败**已用干净的 `origin/master` 在隔离工作树里原样复现**，属本机环境，与本次合并无关：
+4 条依赖符号链接夹具（本机 `os.symlink` 建出来不是符号链接），1 条依赖 `getproxies()` 为空
+（本机走注册表代理，删掉环境变量仍返回 `127.0.0.1:7897`）。
+冒烟条数正是「两侧断言都在」的旁证：`98 + 3 = 101`、`224 + 25 = 249`。
+
+**6. 边界**
+
+- 只做了**工作区合并**，未提交；44 个在途改动的内容与合并前逐字节一致（文件名集合也不多不少），
+  但暂存/未暂存的分界被合并过程统一成「全部已暂存」——内容未变，只是 index 状态变了。
+- 上一轮遗留的 `stash@{0}`（ADRs 032-035 + 前端 + 动态活动注册修复）仍在，内容与本轮在途改动同源，
+  确认无用后可用 `git stash drop stash@{0}` 清掉。
+- 运行中的容器仍是合并前的代码（镜像 `COPY` 源码、无挂载），要生效需
+  `docker compose -f deploy/compose.yaml up -d --build backend frontend`。
+- 快照目录 `.workbuddy/memory/_snapshot-20260923-1810/` 在 `.workbuddy/`（未被 git 跟踪）下，
+  确认无误后可删。
+
+### 4.24 角色弹窗副路由真的分区、图标改由头像浮层选择（2026-09-23，成员 D）
+
+**1. 现象与根因**
+
+用户报「agent 设置根本没有按照副路由区分，只有工具是多了」。根因是 `hidden` 属性**完全没生效**：
+「设定」`<section>` 与「调度」`<form>` 都挂着 `.cfg-form-grid{display:grid}`，而作者样式里的 `display`
+优先级高于 UA 样式表的 `[hidden]{display:none}`，于是两区**一直同时可见**；只有「工具」那段没挂这个类，
+才真的会隐藏 —— 所以点「工具」看起来「多了一块」。
+
+**2. 改动**
+
+- `config.css` 补一条 `[hidden]{display:none!important}`（`!important` 用来压过同为类选择器、但声明更靠后的
+  `.cfg-agent-detail .cfg-form-grid`）。三个分区仍用 `hidden` 而非条件挂载：保存按钮在 footer、靠
+  `form="agent-tuning-form"` 关联到「调度」那份 `<form>`，条件卸载会让「在设定页点保存」直接失效。
+- 图标选择器从「设定」里 15 格常驻，搬成**点弹窗头部头像弹出的浮层**（`AgentPanel` 的 `iconPickerOpen` /
+  `iconPickerRef` / `pickIcon`）：点外面或 Esc 收起，选完即收起；头像画的是**待保存**的 `profileForm.icon`，
+  挑完立刻可见。样式只挂在 `.cfg-agent-avatar-slot` 槽位下。
+- 顺带修掉三个**从未定义**的令牌：`--cfg-border` / `--cfg-text` / `--cfg-text-dim`（真令牌是 `--cfg-line` /
+  `--cfg-ink` / `--cfg-ink-3`）。引用未定义变量会让**整条声明**失效，所以 tab 的静默色、tab 底线与图标格
+  边框一直没生效。
+
+**3. 验证（全部实测）**
+
+| 判据 | 结果 |
+| --- | --- |
+| `tsc --noEmit`（src） | 0 错 |
+| `rendercheck` 单跑 tsc | 0 错（滤掉 `node:fs` / `process` 这类环境报错） |
+| `vite build` | 3429 modules，通过 |
+| `config-smoke` | **101 → 105**（本轮 +4） |
+| `workspace-smoke` | 249/249，无回归 |
+
+新增的 4 条断言：副路由只有当前分区不带 `hidden`；图标选择器不再常驻「设定」；`[hidden]` 压得住
+`.cfg-form-grid` 的 display；`config.css` 不引用从未定义的令牌。
+
+CDP 实证（headless Chrome 打真浏览器、点真交互）：
+
+| 用例 | 实测 |
+| --- | --- |
+| 初始「设定」 | `display:grid` h=353；「调度」「工具」均 `display:none` h=0 |
+| 切「调度」 | 「调度」h=418，「设定」`display:none` |
+| 切「工具」 | 只有「工具」可见（h=321） |
+| 点头像 | 浮层出现，`320×156`，16 格（自动 + 15），展在头像下方，`aria-expanded=true` |
+| 按 Esc | 浮层收起，**弹窗仍开着**（未被连带关掉） |
+| 选 `media` | 头像 `lucide-code` → `lucide-image`，浮层自动收起 |
+| 作用域 | 卡片头像只匹配到 `.cfg-agent-avatar`；弹窗头像另匹配 `.cfg-agent-avatar-slot .cfg-agent-avatar` |
+
+**4. 边界与坑**
+
+- 卡片网格里**也有一个同名的 `.cfg-agent-avatar`**（纯展示），`querySelector('.cfg-agent-avatar')` 拿到的
+  是它 —— 取证脚本必须用 `.cfg-agent-avatar-slot .cfg-agent-avatar` 限定；样式同理，「可点」那套只能挂在
+  槽位下。
+- **`cursor` 是可继承属性**：卡片头像的 `pointer` 来自外层 `<button>` 的继承，不能用它判断作用域是否溢出，
+  要看 `CSS.getMatchedStylesForNode` 的匹配规则。
+- 本轮这版 headless Chrome 上，`CSS.forcePseudoState{forcedPseudoClasses:["hover"]}` **没有**让
+  `box-shadow` 生效（卡片侧「期望 none」还会假绿），hover 类结论不要只靠它。
+
+### 4.25 固定链降级为计划来源、策略控件改单按钮 + 浮层（2026-09-23，成员 D）
+
+**1. 起因与勘察**
+
+用户报「固定三步是不符合多 agent 协作、动态调度的」，要求把固定流水线**普通化为动态路径的一种**。
+勘察发现真正的特例化不在按钮上，而在数据契约：
+
+- 静态链路的 `checkpoint` **没有 `plan`**（`pipeline_checkpoint_summary` 只写 status / current_step /
+  completed_steps / updated_at），动态链路才有 `mode` / `plan` / `plan_source`；
+- 于是前端必须自己知道「静态 = 收集 → 分析 → 报告」：`App.tsx` 的 `stages` 常量 +
+  `buildCollaboration` 在没有 `plan` 时按它拼链；
+- 画布与记录页**各写了一份** `mode === "dynamic" ? … : …` 的三目，同一件事有两套说法。
+
+**2. 改动（本轮，全部 D 线）**
+
+- `collaboration.ts`：新增 `PlanSourceKey` / `PLAN_SOURCE_TEXT` / `PLAN_SOURCE_HINT` /
+  `planSourceKey()`，把「计划从哪来」收敛成一条口径；
+- `CollabCanvas.tsx` 角标与 `RecordsPage.tsx` 的 chip 改走它，不再各自三目；
+- `App.tsx`：策略控件由「自动编排 / 固定三步」两个平级分段按钮，改为**单按钮 + 浮层**——
+  主项「按任务规划」，固定链降到浮层的兜底分组（`secondary: true` + `is-secondary`）；
+  浮层状态（`strategyOpen` / `strategyRef`）放在 `Workspace`（输入区在这里），不放 `App`；
+- `styles.css`：`.composer-mode*` → `.composer-strategy*`；
+- `doc/api.md` §4.4 补口径：本字段选的是「**计划从哪来**」，不是「用哪种编排架构」。
+
+执行层**未动**：两条 Dapr workflow 仍在（合并会让静态运行的逐阶段轨迹变空），属 ADR-037 决策 4。
+
+**3. 验证（全部实测）**
+
+| 判据 | 结果 |
+| --- | --- |
+| `tsc --noEmit`（src） | 0 错 |
+| `rendercheck` 单跑 tsc | 7 条报错，**全部是既有环境噪声**（`node:fs` / `node:path` / `process`，本机未装 `@types/node`）；对照 git HEAD 版本为 10 条同型 → 本轮**零新增** |
+| `vite build` | 3429 modules，通过 |
+| `workspace-smoke` | 249 → **255**，全通过 |
+| `config-smoke` | 105/105，无回归 |
+| 前端容器 | 重建后 Healthy（连带 Recreate 了 backend） |
+
+新增 6 条断言：策略控件是单按钮 + 浮层（且 `composer-mode` 已消失）；固定链降级为 `is-secondary`
+且该样式已落盘；浮层按需挂载；`aria-controls` 只在展开时指向真实元素；`planSourceKey` 四条判据
+（含 `fallback` 不被读成 `planned`）；画布与记录页共用同一条口径（两处都不再有 `mode` 三目）。
+
+CDP 实证（headless Chrome 打 `http://localhost:5173`、点真交互，**17/17 通过**）：
+
+| 用例 | 实测 |
+| --- | --- |
+| 初始 | 按钮存在且可见（144×26，字号 12px），`aria-expanded=false` 且**不写** `aria-controls`，浮层未挂载，`.composer-mode` 查询为 null |
+| 点按钮 | 浮层挂载，`230×161` @(911,475)，展在按钮**上方**、完全在视口内；`aria-controls` = 浮层 id |
+| 防裁剪 | `elementFromPoint(浮层中心)` 命中浮层自身——被祖先 `overflow` 裁掉的元素不会被命中 |
+| 两条策略项 | 第 1 条 `is-active`（名称色 `rgb(61,104,122)`、底 `rgb(233,242,246)`），第 2 条 `is-secondary`（名称色 `rgb(130,152,162)`）——**降级在计算样式上可见**，不只是文案客气 |
+| 点「固定链」 | 按钮回显「策略 固定链」，浮层收起、`aria-expanded` 复位 |
+| Esc / 外点 | 均只收浮层；Esc **不** `stopPropagation`，工作区抽屉的 Esc 不受影响 |
+| 欢迎区文案 | 跟着策略变：切到固定链后显示「当前策略：固定链 — 计划恒为 收集 → 分析 → 报告，不经过规划 Agent」 |
+
+**4. 边界与坑**
+
+- **状态要放在 `Workspace` 而不是 `App`**：输入区在 `Workspace` 里（`App` 只持有 `mode`）。
+  第一版放进 `App`，`tsc` 立刻报 7 条 `Cannot find name 'strategyOpen' / 'strategyRef'`。
+- `.composer-strategy` 必须有 `position:relative`，浮层才能相对按钮定位；浮层要**向上**展开
+  （`bottom:calc(100% + 6px)`），向下会被贴着底部的输入区吃掉。
+- 判「次要项样式有没有落盘」不能只看 `CSS.getMatchedStylesForNode` 落在**条目节点**上的规则：
+  那里只会列出 `.composer-strategy-item`，而那条 `… .is-secondary .composer-strategy-name` 命中的是
+  **子节点**。正解是读子节点的计算样式比颜色——两条路径的数量级差异（#3d687a vs #8298a2）才是证据。
+
+### 4.26 暗色模式：颜色令牌层、三态偏好与全站计算样式扫描（2026-09-23，成员 D）
+
+**1. 起因**
+
+用户要求「增加一个暗色模式，默认与系统保持一致，可切换，切换按钮替换放在
+`class="lucide lucide-settings2"`」（页脚那个不通向任何设置的图标）。
+
+动手前先量成本：6 个样式表里的颜色是散落字面量，共 **826 处 / 459 个不同的（角色, 色值）组合**
+（`styles.css` 519、`config.css` 180、`workspace.css` 66、`records.css` 44、两个组件 css 17）。
+直接写第二份暗色样式表，等于让人的注意力去兜完备性 —— 漏一处就是一块死色，且没有可跑的判据。
+
+**2. 做法（全部 D 线，细节见 ADR-038）**
+
+先收敛再变色：
+
+- 新增 `frontend/src/theme.css`（**脚本生成，不手改**）：459 个 `--t-{角色}-{色值}` ——
+  `:root` 浅色块（恒等映射：`--t-bg-ffffff` 的浅色取值就是 `#ffffff`）+
+  `:root[data-theme="dark"]` 暗色块；
+- 6 个样式表 826 处字面量 → `var(--t-…)`；
+- 新增 `frontend/src/theme/theme.ts`：用户态 `system | light | dark` 存 `localStorage["macp-theme"]`
+  （**`system` 就是不写这个键**），生效态写 `<html data-theme>`；循环 `system → dark → light → system`；
+  跟随系统期间订阅 `matchMedia` 的 change，系统外观变了实时跟；
+- `frontend/index.html`：样式表**之前**一段同步脚本先落
+  `data-theme` / `color-scheme` / `meta[theme-color]`，防首屏闪白；
+- `frontend/src/App.tsx`：页脚 `Settings2` 图标 → `.theme-toggle`（`Monitor`/`Moon`/`Sun` + 文案）；
+- `frontend/rendercheck/theme-tokens.py`：`preview` / `apply` / `regenerate` / `verify` 四个子命令。
+
+**3. 验证（全部实测）**
+
+| 判据 | 结果 |
+| --- | --- |
+| `theme-tokens.py verify` | 令牌闭合（每个 `var(--t-*)` 在浅色/暗色两块都有声明、且浅色取值与令牌名恒等）通过；暗色对比度通过 |
+| `tsc --noEmit`（src） | 0 错 |
+| `vite build` | 3431 modules，通过 |
+| 前端容器 | 重建后 Healthy |
+
+CDP 实证（headless Chrome 打 `http://127.0.0.1:5173`，用 `Emulation.setEmulatedMedia` 显式指定
+系统外观，四个视图 × 两个主题，**21/21 通过**）：
+
+| 用例 | 实测 |
+| --- | --- |
+| 默认跟随系统（系统浅色） | `data-theme=light`；`localStorage` 里**没有** `macp-theme` 键 |
+| 页脚控件 | `.theme-toggle` 存在；`.sidebar-footer .lucide-settings2` 查询为 0 |
+| 浅色全站计算样式 | 四个视图共 222 种计算颜色，**全部命中令牌的浅色取值**，0 例外 |
+| **浅色零变化** | 与改动前基线逐像素比：差异 **448 px，其中页脚外 0 px**；差异矩形 `[144,864,207,875]` 完全落在页脚 `[21,862,209,877]` 内 |
+| 跟随系统（系统转深色） | 页面**实时**跟着变；期间仍不落盘偏好 |
+| 显式切深色 | `data-theme=dark` 且落盘 `dark`；按钮文案「深色」 |
+| 暗色全站计算样式 | 四个视图共 223 种计算颜色，全部命中暗色取值，0 例外 |
+| 暗色无浅色泄漏 | 402 个「只在浅色块出现」的取值，在暗色下命中 **0** |
+| 暗色正文对比度 | 最差 5.56:1（`.topbar-title`），≥ 4.5 |
+| 刷新 | 仍是深色、按钮文案恢复 —— 首屏脚本先于样式，无闪白 |
+| 循环 | 深色 → 浅色（落盘）→ 跟随系统（删键），按钮文案同步 |
+| 显式优先 | 显式选了深色后，系统转浅色**不**跟随 |
+
+**4. 边界与坑**
+
+- **页脚高度是 15px，不是随便定的。** 按钮第一版带 `padding:2px 6px`，页脚从 15px 长到 20px；
+  侧栏是纵向 flex 且底部锚定，于是「运行时」卡被整体顶上去 5px —— 浅色下与基线差 5188 px。
+  把页脚高度从 12 扫到 28，差异在 **N=15** 取到最小值（448 px），据此确认原高就是 15px。
+  现在 `.theme-toggle` 是 `height:15px; padding:0 6px`。
+- **最隐蔽的漏网颜色是浏览器给的默认值，不是写死的十六进制。** `<button>` 没有被作者样式指定
+  `color` 时吃 UA 的 `buttontext`：浅色黑、暗色白。暗色下它"看着对"，主题却根本没管到它。
+  只有扫计算样式才抓得到（`grep` 字面量一条都抓不到）。已给 `.suggestion` /
+  `.cfg-provider-item` / `.cfg-switch` 三处显式 `color:inherit`，扫描随即归零。
+- **扫描要显式指定系统外观。** headless Chrome 的 `prefers-color-scheme` 默认是 **dark**；
+  不设 `Emulation.setEmulatedMedia` 的话，「默认跟随系统」这条用例会得到 `dark`，
+  看起来像功能错了，其实是环境默认值。
+- **每次跑都要清 CDP 的 profile 目录。** 复用同一个 `user-data-dir` 会命中磁盘缓存，
+  测的还是上一版 bundle（表现为 `.theme-toggle` 查不到、`data-theme` 为 null）。
+  还要配 `Network.setCacheDisabled` + `Page.reload(ignoreCache=True)`。
+- **`Runtime.evaluate` 不能直接序列化 DOM 元素**（报 `Object reference chain is too long`）——
+  取存在性要写 `!!document.querySelector(...)`。
+- **「逐字节相同」不是好判据。** 页脚本来就该变（图标 → 带标签的按钮），所以改用
+  **像素差分 + 差异区域定位**：证明差异全部落在页脚矩形内，比"整张图字节相同"更能说明问题 ——
+  它同时容忍了预期内的改动、又不放过预期外的。
+
 ## 5. 失败处理约定
+
 - 任一用例失败：先复现，再定位，修复后将失败模式固化为新的测试或本文档约束；
 - 对 Dapr/编排等共享行为，先写测试或同步补测试，不允许“看起来正确”代替；
 - 每次里程碑结束时在报告记录：运行命令、通过数/失败数、失败原因。

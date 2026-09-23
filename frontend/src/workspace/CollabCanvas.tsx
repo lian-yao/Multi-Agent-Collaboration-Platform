@@ -11,11 +11,15 @@
  *
  * 文案只留必要的那几处：标题、编号、任务原文一行、底部当前节点一行。画布自己的图例
  * 一律不写——连线是虚是实、节点是灰是蓝，图上已经看得见，再用一段话解释一遍只是噪声。
+ *
+ * 计划还没落盘时不画任何节点（ADR-034）：那时连「几步、派给谁」都还没有，摆出来的只会
+ * 是写死的固定三步，而这次它可能压根不参与。宁可只报「正在规划」。
  */
 import { useEffect } from "react";
-import { GitBranch, X } from "lucide-react";
+import { GitBranch, LoaderCircle, X } from "lucide-react";
 import { Status } from "../components/Status";
 import { CollaborationCanvas, useElementSize } from "./GraphCanvas";
+import { PLAN_SOURCE_HINT, PLAN_SOURCE_TEXT, planSourceKey } from "./collaboration";
 import type { CollabGraph } from "./collaboration";
 import "../config/config.css";
 import "./workspace.css";
@@ -70,13 +74,24 @@ export function CollabCanvas({
     (node) => node.status === "pending" || node.status === "failed",
   );
   const lastDone = [...graph.nodes].reverse().find((node) => node.status === "completed");
-  const line = running
-    ? `当前节点：${running.name}`
-    : waiting
-      ? `下一步：${waiting.name}`
-      : lastDone
-        ? `全部阶段已完成：${lastDone.name}`
-        : "等待任务开始";
+  // 计划没落盘时整张图是空的，「跑到哪了」无从谈起——先如实说在规划。
+  const line = graph.planning
+    ? "正在规划：等待任务分配产出"
+    : running
+      ? `当前节点：${running.name}`
+      : waiting
+        ? `下一步：${waiting.name}`
+        : lastDone
+          ? `全部阶段已完成：${lastDone.name}`
+          : "等待任务开始";
+
+  // 画布角标只说「计划从哪来」这一件事：固定链是动态路径的退化情形，不是并列的
+  // 第二种编排方式（ADR-037）。长解释挂 `title`，角标本身保持短。
+  const planSource = planSourceKey({
+    mode: graph.mode,
+    planning: graph.planning,
+    source: graph.planner?.source,
+  });
 
   return (
     <div className="collab-overlay" role="dialog" aria-modal="true" aria-label="协作工作流画布">
@@ -84,7 +99,7 @@ export function CollabCanvas({
         <span className="collab-canvas-title">
           <GitBranch size={16} />
           <b>协作工作流</b>
-          <small>{graph.mode === "dynamic" ? "自动编排" : "固定流水线"}</small>
+          <small title={PLAN_SOURCE_HINT[planSource]}>{PLAN_SOURCE_TEXT[planSource]}</small>
         </span>
         <button type="button" className="cfg-quiet" onClick={onClose}>
           <X size={13} />
@@ -117,13 +132,19 @@ export function CollabCanvas({
           </p>
         )}
         {graph.traceReason && <p className="cv-note">{graph.traceReason}</p>}
+        {graph.planning && (
+          <p className="cv-planning">
+            <LoaderCircle size={13} className="spin" />
+            正在规划：任务分配还没产出，画布等计划落盘后再画。
+          </p>
+        )}
         {loading && !graph.nodes.length && <p className="cfg-hint">正在读取这次对话的工作流…</p>}
         {error && (
           <p className="cfg-alert" role="alert">
             {error}
           </p>
         )}
-        {!loading && !error && !graph.nodes.length && (
+        {!loading && !error && !graph.nodes.length && !graph.planning && (
           <p className="cv-empty">这次对话还没有可画的协作节点。</p>
         )}
         {graph.nodes.length > 0 && (
@@ -136,7 +157,11 @@ export function CollabCanvas({
       <footer className="cv-terminal">
         <span>&gt; {line}</span>
         <span className="cv-terminal-mode">
-          {graph.waves.some((wave) => wave.length > 1) ? "含并行波次" : "串行流水线"}
+          {graph.planning
+            ? "链路未定"
+            : graph.waves.some((wave) => wave.length > 1)
+              ? "含并行波次"
+              : "串行流水线"}
         </span>
       </footer>
     </div>

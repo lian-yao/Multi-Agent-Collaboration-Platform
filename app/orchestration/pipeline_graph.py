@@ -203,7 +203,7 @@ def _invoke_role(
     caller: ToolCaller | None,
     *,
     stage: PipelineStage | str,
-    role: RoleId,
+    role: RoleId | str,
 ) -> Any:
     """执行角色节点：接入注册表时按模型请求调用工具，否则单次调用模型。"""
 
@@ -249,7 +249,7 @@ def _invoke_role(
             "stage.tool_iteration_limit",
             level=logging.WARNING,
             stage=stage_label,
-            role=role.value,
+            role=_role_key(role),
             iterations=TOOL_CALL_MAX_ITERATIONS,
             pending_tool_calls=len(pending),
         )
@@ -262,7 +262,7 @@ def _ensure_text_response(
     response: Any,
     *,
     stage: str,
-    role: RoleId,
+    role: RoleId | str,
 ) -> Any:
     """保证阶段有文字产出：空输出补一次文字提示，仍为空则告警并继续（F-07）。
 
@@ -280,7 +280,7 @@ def _ensure_text_response(
             "stage.empty_content",
             level=logging.WARNING,
             stage=stage,
-            role=role.value,
+            role=_role_key(role),
             attempt=attempt,
             action="retry",
         )
@@ -293,7 +293,7 @@ def _ensure_text_response(
         "stage.empty_content",
         level=logging.WARNING,
         stage=stage,
-        role=role.value,
+        role=_role_key(role),
         attempt=MAX_EMPTY_CONTENT_RETRIES,
         action="continue_with_empty",
     )
@@ -433,13 +433,23 @@ def content_with_tools(content: str | list[Any]) -> str:
     return _content_text(content)
 
 
+def _role_key(role: RoleId | str) -> str:
+    """角色的日志/观测键：枚举取值，普通字符串原样返回。
+
+    ADR-036 之后动态图传的是角色目录 id（``PlanStep.role`` 已是自由文本），
+    静态图仍传 ``RoleId``。两处日志字段都要的是字符串值，收拢到这一个辅助里。
+    """
+
+    return role.value if isinstance(role, RoleId) else role
+
+
 def invoke_role_messages(
     messages: list[Any],
     llm: BaseChatModel,
     caller: ToolCaller | None = None,
     *,
     stage: PipelineStage | str = PipelineStage.COLLECT,
-    role: RoleId = RoleId.COLLECTOR,
+    role: RoleId | str = RoleId.COLLECTOR,
 ) -> str:
     """公开的单次角色调用入口：执行 ReAct 工具回填循环并返回正文。
 

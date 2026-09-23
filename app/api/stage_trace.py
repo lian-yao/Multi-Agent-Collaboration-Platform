@@ -1,14 +1,17 @@
 """阶段执行轨迹：把状态存储里的阶段状态还原成弹窗可渲染的形态（`doc/api.md` §5.17）。
 
-数据来源是 `app.workflows.pipeline::_record_checkpoint` 在**每个阶段完成后**写入的
-Workflow 状态（key `agentrun:workflow:{workflow_id}:{stage}`）。那份状态里的
-`results[stage]` 就是该阶段的执行载荷：`content` 是产出正文、`previous` 是本阶段收到的
-上游正文、`tool_calls` 是本阶段内产生的工具调用（结构见
-`app.orchestration.pipeline_graph::_stage_result`）。
+数据来源是编排层在**每个阶段（或计划步骤）完成后**写入的状态：
+
+- 静态链路：`app.workflows.pipeline::_record_checkpoint` 写
+  `agentrun:workflow:{workflow_id}:{stage}`，其 `results[stage]` 即该阶段的执行载荷
+  （`content` 产出、`previous` 上游正文、`tool_calls` 工具调用）；
+- 动态链路：`app.workflows.dynamic::_persist_step_outcome` 写
+  `agentrun:workflow:{workflow_id}:dyn:{step_id}`，载荷即 ``StepOutcome``
+  （`content` / `tool_calls` / `status`），步骤顺序与角色取自 ``checkpoint.plan``。
 
 **本模块只读**：不写状态存储、不建表、不改任何 Workflow 数据。读不到就如实说读不到——
-「没有轨迹」有四种互不相同的原因（还没轮到、正在跑、跑完了但状态已被清理、动态链路
-根本不落盘），把它们混成一句「暂无数据」等于让用户去猜自己的任务执行到哪一步了。
+「没有轨迹」有互不相同的原因（还没轮到、正在跑、跑完了但状态已被清理、计划尚未落盘），
+把它们混成一句「暂无数据」等于让用户去猜自己的任务执行到哪一步了。
 
 模型内部的隐藏推理（reasoning / thinking 块）**不在本接口的范围内**：编排层只把
 「推理 → 行动 → 观察 → 结论」里的行动与结论落盘，本模块不伪造中间过程。
@@ -41,13 +44,139 @@ STAGE_TRACE_MAX_TOOL_PAYLOAD_CHARS = 4_000
 经由这条只读接口再传一遍。
 """
 
-DYNAMIC_TRACE_REASON = (
-    "本次执行走的是动态编排链路，它当前不落盘逐步骤执行轨迹（ADR-019）；"
-    "可执行到的替代信息是各步骤的阶段状态与「任务记录」里的工具调用链路。"
-)
-
 ReadStep = Callable[[str, str], dict[str, Any] | None]
 """``(workflow_id, stage) -> 状态载荷`` 的读取函数签名；测试可注入替身，不连 Dapr。"""
+
+
+def _read_dynamic_traces(
+    workflow_id: str,
+    summary: dict[str, Any],
+    reader: ReadStep,
+) -> dict[str, Any]:
+    """动态链路的逐步骤轨迹（`doc/api.md` §5.17 的 `mode=dynamic` 分支）。
+
+    步骤顺序与角色来自 ``checkpoint.plan`` 的声明顺序（不是静态 ``PIPELINE_STEPS``）；
+    每个步骤的载荷读状态存储 key ``dyn:{step_id}``（``_persist_step_outcome`` 写入的
+    ``StepOutcome``）。上游输入按 ``depends_on`` 从已完成步骤的 ``content`` 拼出。
+
+    与静态链路唯一的分歧在「顺序的权威来源」：静态靠固定阶段名，动态靠计划声明顺序——
+    其余（input / output / tool_calls / reason 语义）完全对齐，前端无需区分两套规则。
+    """
+
+    plan = summary.get("plan")
+    if not isinstance(plan, list) or not plan:
+        # 计划尚未落盘（规划活动还没跑到）：如实说「还没规划」，而不是伪装成空轨迹。
+        return {
+            "workflow_id": workflow_id,
+            "mode": "dynamic",
+            "task": None,
+            "availability": "not_integrated",
+            "reason": "本次执行还在规划阶段，计划尚未落盘。",
+            "items": [],
+        }
+
+    completed = {str(step) for step in (summary.get("completed_steps") or [])}
+    current = summary.get("current_step")
+
+    # 先读一遍所有步骤载荷，产出「步骤 id → content」映射，供拼上游输入。
+    outcomes: dict[str, dict[str, Any]] = {}
+    for raw in plan:
+        if not isinstance(raw, dict):
+            continue
+        step_id = str(raw.get("id") or "")
+        if not step_id:
+            continue
+        payload = reader(workflow_id, f"dyn:{step_id}")
+        outcome = _load_outcome(payload)
+        if outcome is not None:
+            outcomes[step_id] = outcome
+
+    items: list[dict[str, Any]] = []
+    for raw in plan:
+        if not isinstance(raw, dict):
+            continue
+        step_id = str(raw.get("id") or "")
+        if not step_id:
+            continue
+        role = str(raw.get("role") or "")
+        depends_on = [str(dep) for dep in (raw.get("depends_on") or [])]
+        outcome = outcomes.get(step_id)
+
+        item: dict[str, Any] = {
+            "stage": step_id,
+            "role": role,
+            "input": None,
+            "input_from": None,
+            "output": None,
+            "tool_calls": [],
+            "truncated": False,
+            "reason": None,
+        }
+
+        if outcome is None:
+            # 载荷还没写：四种原因（已跳过 / 正在跑 / 已完成但状态被清 / 还没轮到）。
+            status = str(raw.get("status") or "")
+            if status == "skipped":
+                item["reason"] = "上游步骤未成功完成，本步骤已跳过。"
+            elif status in ("completed", "failed"):
+                item["reason"] = "该步骤已完成，但它的执行状态已不在状态存储中（状态可能已被清理）。"
+            elif current == step_id or status == "running":
+                item["reason"] = (
+                    "该步骤正在执行：轨迹在步骤完成后写入状态存储，完成后再打开即可看到；"
+                    "当下想跟进工具调用可以走「任务记录」页。"
+                )
+            else:
+                item["reason"] = "该步骤尚未开始。"
+            items.append(item)
+            continue
+
+        # 上游输入：按 depends_on 从已完成步骤的 content 拼出（多依赖用分节标注）。
+        upstream = [
+            (dep, outcomes[dep].get("content") or "")
+            for dep in depends_on
+            if isinstance(outcomes.get(dep, {}).get("content"), str)
+        ]
+        if upstream:
+            joined = "\n\n".join(f"【{dep}】\n{content}" for dep, content in upstream)
+            item["input"], cut = _clip_text(joined, STAGE_TRACE_MAX_OUTPUT_CHARS)
+            item["truncated"] = cut
+            item["input_from"] = ", ".join(dep for dep, _ in upstream)
+
+        content = outcome.get("content")
+        if isinstance(content, str):
+            item["output"], cut = _clip_text(content, STAGE_TRACE_MAX_OUTPUT_CHARS)
+            item["truncated"] = item["truncated"] or cut
+
+        item["tool_calls"], cut = _tool_calls(outcome)
+        item["truncated"] = item["truncated"] or cut
+        items.append(item)
+
+    return {
+        "workflow_id": workflow_id,
+        "mode": "dynamic",
+        "task": None,
+        "availability": "available",
+        "reason": None,
+        "items": items,
+    }
+
+
+def _load_outcome(payload: dict[str, Any] | None) -> dict[str, Any] | None:
+    """把动态步骤载荷（``save_step_result`` 写入的 ``StepOutcome``）解析成 dict。
+
+    ``save_step_result`` 包了一层 ``{"workflow_id", "step", "result": ...}``；``result``
+    就是 ``StepOutcome.model_dump()``（字段：content / tool_calls / status / error）。
+    解析失败返回 ``None``，由调用方按「还没写」处理。
+    """
+
+    if payload is None:
+        return None
+    result = payload.get("result")
+    if not isinstance(result, dict):
+        return None
+    if "content" not in result and "tool_calls" not in result:
+        return None
+    return result
 
 
 def _clip_text(text: str, limit: int) -> tuple[str, bool]:
@@ -207,17 +336,10 @@ def read_stage_traces(
     """
 
     summary = checkpoint or {}
-    if summary.get("mode") == "dynamic":
-        return {
-            "workflow_id": workflow_id,
-            "mode": "dynamic",
-            "task": None,
-            "availability": "not_integrated",
-            "reason": DYNAMIC_TRACE_REASON,
-            "items": [],
-        }
-
     reader: ReadStep = read_step or read_step_result
+    if summary.get("mode") == "dynamic":
+        return _read_dynamic_traces(workflow_id, summary, reader)
+
     completed = [str(step) for step in (summary.get("completed_steps") or [])]
     current = summary.get("current_step")
     current_stage = str(current) if current else None

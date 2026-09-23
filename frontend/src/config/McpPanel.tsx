@@ -674,40 +674,14 @@ export function McpPanel() {
       <section className="cfg-block">
         <div className="cfg-block-head">
           <div>
-            <h3>完整工具目录</h3>
-            <p>编排层当前可调用的内置工具；完整 Schema 默认折叠。</p>
+            <h3>平台内置工具</h3>
+            <p>内置工具不归 MCP 管，已移到「内部工具」分区查看。</p>
           </div>
-          <button type="button" className="cfg-quiet" onClick={() => void loadCatalog()}>
-            读取目录
-          </button>
         </div>
-        {catalogError && (
-          <p role="alert" className="cfg-alert">
-            {catalogError}
-          </p>
-        )}
-        {!catalog && !catalogError && (
-          <p className="cfg-hint">尚未读取。点「读取目录」或展开任一工具卡片的 Schema。</p>
-        )}
-        {catalog && (
-          <div className="cfg-tool-list">
-            {Object.values(catalog).map((tool) => (
-              <article className="cfg-tool-card" key={tool.name}>
-                <div className="cfg-tool-main">
-                  <div className="cfg-tool-text">
-                    <b>{tool.name}</b>
-                    <small title={tool.description}>{truncate(tool.description, 110)}</small>
-                  </div>
-                  <Chip tone="slate">{tool.status}</Chip>
-                </div>
-                <details className="cfg-tool-schema">
-                  <summary>输入 Schema</summary>
-                  <pre>{JSON.stringify(tool.input_schema, null, 2)}</pre>
-                </details>
-              </article>
-            ))}
-          </div>
-        )}
+        <p className="cfg-hint">
+          本页只负责 MCP Server 的登记、发现与逐工具开关；平台自带工具的清单与 Schema
+          在「内部工具」分区，角色级授权在「Agent 团队」页的角色弹窗里配置。
+        </p>
       </section>
 
       <NoticeBar notice={notice} />

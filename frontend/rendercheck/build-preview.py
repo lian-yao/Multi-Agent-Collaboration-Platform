@@ -130,6 +130,19 @@ def flatten() -> dict:
     history = S.session_workflows(SESSION_ID)["items"]
     early_id = history[0]["id"]
 
+    # 失败态的那条历史工作流。单独拎成变量：它同时被「单条 workflow」「会话的
+    # workflow 列表」两处引用，内联进 dict 就得抄两份，抄歪了没人看得出来。
+    wf_history_2 = {
+        "id": "wf-history-2", "session_id": "s-history-2", "agent_run_id": "run-h2",
+        "status": "failed", "current_step": "analyze",
+        "checkpoint": {"status": "failed", "current_step": "analyze",
+                       "completed_steps": ["collect"], "updated_at": S.iso(-172700)},
+        "created_at": S.iso(-172800), "updated_at": S.iso(-172700), "completed_at": None,
+        "error": "步骤 analyze 失败：工具调用 code_execution 被只读沙箱拒绝"
+                 "（SandboxViolation: charts/ 不在允许的写入范围），链路按失败终止，"
+                 "未进入 report。",
+    }
+
     table: dict = {
         "POST /api/v1/sessions": session,
         # 编号就是这个列表的下标 + 1，顺序必须与真实接口同口径（创建时间升序）。
@@ -146,7 +159,7 @@ def flatten() -> dict:
                  "created_at": S.iso(-86400), "updated_at": S.iso(-86300)},
                 {"id": "s-history-2", "user_id": "demo-user", "status": "paused",
                  "title": "整理本周需求评审会议纪要",
-                 "latest_workflow_status": "paused", "latest_workflow_id": "wf-history-2",
+                 "latest_workflow_status": "failed", "latest_workflow_id": "wf-history-2",
                  "created_at": S.iso(-172800), "updated_at": S.iso(-172700)},
             ],
             "page": 1, "page_size": 20, "total": 3,
@@ -180,6 +193,32 @@ def flatten() -> dict:
                            "completed_steps": ["collect", "analyze", "report"],
                            "updated_at": S.iso(-86300)},
             "created_at": S.iso(-86300), "updated_at": S.iso(-86300), "completed_at": S.iso(-86200)},
+        # 运行记录改成「就地展开逐阶段日志」之后（§5.18），这两个历史会话的 `/stages`
+        # 从「没人请求过」变成了「点开卡片就会请求」。不种上，展开区只会显示
+        # 「预览未收录」——那会把一个预览缺口误读成「历史任务没有阶段日志」。
+        "GET /api/v1/workflows/wf-history-1/stages":
+            S.stage_traces("wf-history-1", done=S.STEPS),
+        "GET /api/v1/workflows/wf-history-1/tool-calls": S.page([]),
+        # 失败态也要有一份：用户报的正是「执行失败看不出原因」。这条会话给成 failed
+        # + error，预览里就能直接看到「失败原因在折叠区之外、不用先点开」。
+        # 轨迹只给到 collect：analyze 是中止的那一步，reason 照 `stage_traces` 的
+        # 三态口径给「正在执行」——与后端 `read_stage_traces` 同口径，不额外美化。
+        "GET /api/v1/workflows/wf-history-2": wf_history_2,
+        "GET /api/v1/workflows/wf-history-2/tool-calls": S.page([]),
+        "GET /api/v1/workflows/wf-history-2/stages":
+            S.stage_traces("wf-history-2", done=("collect",), current="analyze"),
+        # 切到这条会话时这几条也得答得上：少了会话本身，侧栏标题会退回「新建协作任务」；
+        # 少了 workflow 列表，运行记录整块空掉——那「切过去看失败态」在预览里就做不到。
+        # （s-history-1 早就种全了，s-history-2 是这次新加的失败演示，别只种一半。）
+        "GET /api/v1/sessions/s-history-2": {
+            "id": "s-history-2", "user_id": "demo-user", "status": "paused",
+            "created_at": S.iso(-172800), "updated_at": S.iso(-172700)},
+        "GET /api/v1/sessions/s-history-2/messages": {
+            "items": [{"id": "mh-2", "session_id": "s-history-2", "role": "user",
+                       "content": "整理本周需求评审会议纪要", "agent_run_id": None,
+                       "status": "done", "created_at": S.iso(-172800)}]},
+        "GET /api/v1/sessions/s-history-2/workflows": {
+            "items": [wf_history_2], "total": 1},
         f"GET /api/v1/workflows/{WORKFLOW_ID}": workflow,
         f"GET /api/v1/workflows/{WORKFLOW_ID}/tool-calls": S.page(tool_calls),
         # 「对话 1」是种子里补出来的更早一次对话：切过去时这三条得答得上，

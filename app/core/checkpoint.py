@@ -256,6 +256,7 @@ class AgentConfigRecord(Base):
     top_p: Mapped[float | None] = mapped_column(Float, nullable=True)
     max_output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     reasoning_type: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    tool_names: Mapped[list[str] | None] = mapped_column(JSONB, nullable=True)
     updated_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
@@ -282,6 +283,11 @@ class AgentRegistryRecord(Base):
     role: Mapped[str] = mapped_column(String(50), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     system_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 显式图标键（`frontend/src/components/AgentGlyph.tsx` 的 `AgentIconKey`）。
+    # NULL = 未指定，由 `AgentGlyph` 按 role / 显示名推断——保留推断是为了让新增
+    # 角色不至于因为没挑图标就画成一个问号。只校验字符形状、不查枚举白名单：
+    # 图标集在前端，后端跟着它一起发版会把「加一个图标」变成两处改动（ADR-036）。
+    icon: Mapped[str | None] = mapped_column(String(32), nullable=True)
     builtin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
@@ -569,6 +575,7 @@ def _agent_config_to_dict(row: AgentConfigRecord) -> dict[str, Any]:
         "top_p": row.top_p,
         "max_output_tokens": row.max_output_tokens,
         "reasoning_type": row.reasoning_type,
+        "tool_names": list(row.tool_names) if row.tool_names is not None else None,
         "updated_by": row.updated_by,
         "updated_at": row.updated_at,
     }
@@ -601,18 +608,21 @@ BUILTIN_AGENT_SEED: tuple[dict[str, Any], ...] = (
         "name": "信息收集 Agent",
         "role": "collector",
         "description": "收集、检索并整理任务主题相关的事实与要点，输出结构化信息清单。",
+        "icon": "search",
     },
     {
         "id": "analyst",
         "name": "数据分析 Agent",
         "role": "analyst",
         "description": "基于信息清单进行归纳、对比与提炼，识别关键结论、趋势与风险。",
+        "icon": "chart",
     },
     {
         "id": "reporter",
         "name": "报告生成 Agent",
         "role": "reporter",
         "description": "整合分析摘要，生成结构清晰、可读的正式报告。",
+        "icon": "report",
     },
 )
 
@@ -624,6 +634,7 @@ def _agent_registry_to_dict(row: AgentRegistryRecord) -> dict[str, Any]:
         "role": row.role,
         "description": row.description,
         "system_prompt": row.system_prompt,
+        "icon": row.icon,
         "builtin": row.builtin,
         "enabled": row.enabled,
         "created_at": row.created_at,
@@ -656,6 +667,7 @@ def create_agent_registry(
     role: str,
     description: str | None = None,
     system_prompt: str | None = None,
+    icon: str | None = None,
     enabled: bool = True,
 ) -> dict[str, Any]:
     """插入自定义角色；id 重复抛 `IntegrityError`（上层转 409）。"""
@@ -666,11 +678,58 @@ def create_agent_registry(
         role=role,
         description=description,
         system_prompt=system_prompt,
+        icon=icon,
         builtin=False,
         enabled=enabled,
     )
     with get_session_factory()() as session:
         session.add(row)
+        session.commit()
+        session.refresh(row)
+        return _agent_registry_to_dict(row)
+
+
+def update_agent_registry(
+    agent_id: str,
+    *,
+    name: Any = UNSET,
+    description: Any = UNSET,
+    system_prompt: Any = UNSET,
+    icon: Any = UNSET,
+    enabled: Any = UNSET,
+) -> dict[str, Any] | None:
+    """更新角色**目录**字段（名称 / 描述 / 系统提示 / 图标 / 启停），返回更新后的条目。
+
+    与 `upsert_agent_config`（覆盖数值）的关系：这是同一条目录行的两半，所以分成两个
+    入口而不是挤进同一个 PATCH —— 见 ADR-036「`null` 的两种含义必须由结构分开」。
+
+    三态照 `UNSET` 哨兵惯例：
+
+    - **缺省** = 不动该字段；
+    - **显式 `None`** = 清空，只对可空列（description / system_prompt / icon）成立；
+      `name` 与 `enabled` 不可空，传 `None` 在这里被忽略而不是写空——一次误调用不该
+      把角色名清成空串（上层另做 422）。
+    - **值** = 写入。
+
+    角色不存在返回 ``None``（上层转 404）。**内置角色也允许改**：ADR-036 把三个内置
+    角色降级成普通种子，允许改 prompt 与停用；只有删除仍受保护（删掉会破坏固定三步的
+    拓扑），所以这里不设 `builtin` 门槛。
+    """
+
+    with get_session_factory()() as session:
+        row = session.get(AgentRegistryRecord, agent_id)
+        if row is None:
+            return None
+        if name is not UNSET and name is not None:
+            row.name = name
+        if enabled is not UNSET and enabled is not None:
+            row.enabled = bool(enabled)
+        if description is not UNSET:
+            row.description = description
+        if system_prompt is not UNSET:
+            row.system_prompt = system_prompt
+        if icon is not UNSET:
+            row.icon = icon
         session.commit()
         session.refresh(row)
         return _agent_registry_to_dict(row)
@@ -698,25 +757,48 @@ def delete_agent_registry(agent_id: str) -> bool:
 
 
 def seed_builtin_agents() -> int:
-    """把三个内置角色写入目录（幂等：已存在则跳过），返回新增条数。"""
+    """把三个内置角色写入目录并补齐默认 prompt / 图标（幂等），返回新增条数。
+
+    两件事，都幂等：
+
+    1. **缺失则插入**（原有行为）；
+    2. **只回填空值**：`system_prompt` / `icon` 为 NULL 时补上默认值。存量环境里
+       这三行是在 ADR-036 之前种下的，`system_prompt` 全是 NULL —— 于是「改 prompt」
+       只能改代码。回填让 DB 成为真相源；**只填空值**是为了不覆盖用户已经改过的
+       prompt：「补默认值」与「重置用户配置」是两件事，用 `is None` 区分而不是
+       无条件赋值。
+
+    `enabled` 刻意不参与回填：用户停用过的内置角色，重启不该把它重新打开。
+    """
+
+    # 函数内导入：`app.agents.roles` 正是被本模块**数据化**的那份来源。放顶层会让
+    # core 在导入期依赖 agents，白白收紧将来的拆分自由度。
+    from app.agents.roles import ROLE_DEFINITIONS, RoleId
 
     with get_session_factory()() as session:
         created = 0
         for seed in BUILTIN_AGENT_SEED:
-            if session.get(AgentRegistryRecord, seed["id"]) is not None:
-                continue
-            session.add(
-                AgentRegistryRecord(
-                    id=seed["id"],
-                    name=seed["name"],
-                    role=seed["role"],
-                    description=seed["description"],
-                    system_prompt=None,
-                    builtin=True,
-                    enabled=True,
+            prompt = ROLE_DEFINITIONS[RoleId(seed["role"])].system_prompt
+            row = session.get(AgentRegistryRecord, seed["id"])
+            if row is None:
+                session.add(
+                    AgentRegistryRecord(
+                        id=seed["id"],
+                        name=seed["name"],
+                        role=seed["role"],
+                        description=seed["description"],
+                        system_prompt=prompt,
+                        icon=seed.get("icon"),
+                        builtin=True,
+                        enabled=True,
+                    )
                 )
-            )
-            created += 1
+                created += 1
+                continue
+            if row.system_prompt is None:
+                row.system_prompt = prompt
+            if row.icon is None:
+                row.icon = seed.get("icon")
         session.commit()
         return created
 
@@ -730,6 +812,7 @@ def upsert_agent_config(
     top_p: Any = UNSET,
     max_output_tokens: Any = UNSET,
     reasoning_type: Any = UNSET,
+    tool_names: Any = UNSET,
     updated_by: str | None = None,
 ) -> dict[str, Any]:
     """写入覆盖值；未传的字段保持原值，显式传 None 表示清除该字段的覆盖。"""
@@ -746,6 +829,7 @@ def upsert_agent_config(
             "top_p": top_p,
             "max_output_tokens": max_output_tokens,
             "reasoning_type": reasoning_type,
+            "tool_names": tool_names,
         }
         for field, value in values.items():
             if value is not UNSET:
@@ -2106,7 +2190,9 @@ _REGISTRY_COLUMN_MIGRATIONS: dict[str, tuple[tuple[str, str], ...]] = {
         ("top_p", "FLOAT"),
         ("max_output_tokens", "INTEGER"),
         ("reasoning_type", "VARCHAR(20)"),
+        ("tool_names", "JSONB"),
     ),
+    "agent_registry": (("icon", "VARCHAR(32)"),),
     "provider_configs": (("default_llm_model_id", "VARCHAR(80)"),),
     # ADR-033 阶段 2：`workspaces` 增加「谁提的档」。阶段 1 已经建过这张表的环境
     # 不会被 `create_all` 补列，所以这里显式补。

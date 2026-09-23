@@ -43,14 +43,23 @@ from app.workspace import approvals as workspace_approvals
 from app.security import egress as egress_module
 from app.core.agent_config import (
     AgentConfigError,
+    AgentProfileError,
+    DESCRIPTION_MAX_LENGTH,
+    ICON_MAX_LENGTH,
+    NAME_MAX_LENGTH,
     OVERRIDE_FIELDS,
+    SYSTEM_PROMPT_MAX_LENGTH,
+    TOOL_NAME_MAX_LENGTH,
+    TOOL_NAMES_MAX_ITEMS,
     agent_config_overrides,
     create_agent_registry,
     delete_agent_registry,
     effective_override_keys,
     list_agent_registry,
     resolve_agent_settings,
+    resolve_agent_tools,
     update_agent_config,
+    update_agent_registry,
 )
 from app.core.checkpoint import UNSET
 from app.core.mcp_registry import (
@@ -251,12 +260,22 @@ class MessageListResponse(BaseModel):
 
 
 class WorkflowResponse(BaseModel):
+    """一次协作工作流的终态（`doc/api.md` §4.8、§5.18）。
+
+    `error` 是**失败原因**，由存储层的 `workflow_runs.error` 贯通而来（ADR-035）：
+    这列一直存在、也一直被 `finalize_activity` 写入（"上游步骤未成功完成，已跳过。"
+    之类的正文），但此前没有进响应模型，于是前端拿不到任何失败说明——「执行失败」
+    在界面上只剩一个红色标签，说不出失败在哪。字段是原样透传的持久化文本，
+    不是临时拼装的句子：读不到原因时它就是空，不能在这里编一个。
+    """
+
     id: str
     session_id: str | None = None
     agent_run_id: str | None = None
     status: str
     current_step: str | None = None
     checkpoint: dict[str, Any] | None = None
+    error: str | None = None
     created_at: datetime
     updated_at: datetime
     completed_at: datetime | None = None
@@ -286,6 +305,16 @@ class AgentResponse(BaseModel):
     与「回退值」，不必猜测某个值来自哪一层（ADR-013、ADR-017）。
     `builtin` / `description` / `enabled` 来自角色目录（`agent_registry`），
     用于区分「内置流水线角色」与「自定义角色」。
+
+    `tool_names` 是该角色被授权的工具名（ADR-035）；`None` = 未配置、执行期沿用全量
+    注册表。它读的是**覆盖行本身**而不是「解析后的生效值」——白名单没有下一层可回退，
+    `None` 与 `[]` 是两种不同的授权状态（未限制 / 显式取消全部），列表页要能原样区分。
+
+    `system_prompt` / `icon` 来自角色目录（ADR-036）：前者是主 Agent 动态调度这个角色时
+    喂给它的人设，后者是卡片图标键（`frontend/src/components/AgentGlyph.tsx` 的图标集）。
+    两者都可空，**空就是空**，不在这一层编默认值：执行期回退到角色的内置人设
+    （内置三角色有 `ROLE_DEFINITIONS`）或通用兜底人设（自定义角色），前端回退到按
+    `role`/`name` 推断图标。把回退值当字符串发出去会让「没配置」和「配了默认值」分不开。
     """
 
     id: str
@@ -304,6 +333,9 @@ class AgentResponse(BaseModel):
     builtin: bool = False
     description: str | None = None
     enabled: bool = True
+    tool_names: list[str] | None = None
+    system_prompt: str | None = None
+    icon: str | None = None
 
 
 class AgentListResponse(BaseModel):
@@ -331,6 +363,10 @@ class AgentConfigPatchRequest(BaseModel):
     """`PATCH /api/v1/config/agents/{agent_id}` 的请求体（doc/api.md §5.7）。
 
     字段缺省 = 不改动；显式 `null` = 清除覆盖、回退下一层配置。
+
+    `tool_names` 是**工具白名单**（ADR-035），语义与其余六个字段有一处关键差别：
+    缺省与 `null` 都表示「未配置 = 不加限制」，而 `[]` 是**显式取消全部授权**
+    （该角色一个工具也用不了，会话级附件工具除外）。空数组与缺省必须分得开。
     """
 
     llm_model_id: str | None = Field(default=None, max_length=80)
@@ -339,6 +375,7 @@ class AgentConfigPatchRequest(BaseModel):
     top_p: float | None = Field(default=None, ge=0.0, le=1.0)
     max_output_tokens: int | None = Field(default=None, ge=1)
     reasoning_type: str | None = Field(default=None, max_length=20)
+    tool_names: list[str] | None = Field(default=None, max_length=TOOL_NAMES_MAX_ITEMS)
 
     @field_validator("model")
     @classmethod
@@ -350,10 +387,37 @@ class AgentConfigPatchRequest(BaseModel):
             raise ValueError("model 不能为空")
         return resolved
 
+    @field_validator("tool_names")
+    @classmethod
+    def _normalize_tool_names(cls, value: list[str] | None) -> list[str] | None:
+        """形状校验放在 schema 这一层：空名 / 超长名是**请求**错误（422），不是域错误。
+
+        去重与总量上限留给 `app/core/agent_config.py`——那是授权语义，schema 不该管。
+        分成两层不是重复：请求体的形状问题应该在进业务之前就被挡住，而不是等
+        `agent_config` 抛出来再翻译成 422。
+        """
+
+        if value is None:
+            return None
+        resolved: list[str] = []
+        for item in value:
+            name = item.strip()
+            if not name:
+                raise ValueError("tool_names 不能包含空名")
+            if len(name) > TOOL_NAME_MAX_LENGTH:
+                raise ValueError(
+                    f"单个工具名不能超过 {TOOL_NAME_MAX_LENGTH} 个字符"
+                )
+            resolved.append(name)
+        return resolved
+
     @model_validator(mode="after")
     def _require_any_field(self) -> AgentConfigPatchRequest:
         if not self.model_fields_set:
-            raise ValueError("至少需要提供 llm_model_id/model/temperature/top_p/max_output_tokens/reasoning_type 之一")
+            raise ValueError(
+                "至少需要提供 llm_model_id/model/temperature/top_p/max_output_tokens/"
+                "reasoning_type/tool_names 之一"
+            )
         return self
 
 
@@ -364,11 +428,51 @@ class AgentRegistryCreateRequest(BaseModel):
     """
 
     id: str = Field(min_length=1, max_length=50, pattern=r"^[A-Za-z0-9._-]+$")
-    name: str = Field(min_length=1, max_length=100)
+    name: str = Field(min_length=1, max_length=NAME_MAX_LENGTH)
     role: str = Field(min_length=1, max_length=50)
-    description: str | None = Field(default=None, max_length=1000)
-    system_prompt: str | None = Field(default=None, max_length=8000)
+    description: str | None = Field(default=None, max_length=DESCRIPTION_MAX_LENGTH)
+    system_prompt: str | None = Field(
+        default=None, max_length=SYSTEM_PROMPT_MAX_LENGTH
+    )
+    icon: str | None = Field(
+        default=None, max_length=ICON_MAX_LENGTH, pattern=r"^[a-z][a-z0-9_]*$"
+    )
     enabled: bool = True
+
+
+class AgentProfilePatchRequest(BaseModel):
+    """`PATCH /api/v1/config/agents/{agent_id}/profile` 的请求体（ADR-036）。
+
+    与覆盖组（`AgentConfigPatchRequest`）同一个三态读法：字段省略 = 不改动，
+    显式 `null` = 清除。差别在 `null` 的**后果**：覆盖组清掉一个字段会回退到下一层
+    配置，这里清掉就是 `agent_registry` 那一列变空——两个端点分开，前端才能对两种
+    动作给出不同的提示（「恢复为环境配置」对「清空」）。
+
+    `name` / `enabled` 没有「空值」这个状态，显式传 `null` 返回 422：没有名字的角色
+    在画布上是一个空白节点，「启用状态是空的」没有定义。
+    """
+
+    name: str | None = Field(default=None, min_length=1, max_length=NAME_MAX_LENGTH)
+    description: str | None = Field(default=None, max_length=DESCRIPTION_MAX_LENGTH)
+    system_prompt: str | None = Field(
+        default=None, max_length=SYSTEM_PROMPT_MAX_LENGTH
+    )
+    icon: str | None = Field(
+        default=None, max_length=ICON_MAX_LENGTH, pattern=r"^[a-z][a-z0-9_]*$"
+    )
+    enabled: bool | None = None
+
+    @model_validator(mode="after")
+    def _require_valid_fields(self) -> AgentProfilePatchRequest:
+        if not self.model_fields_set:
+            raise ValueError(
+                "至少需要提供 name/description/system_prompt/icon/enabled 之一"
+            )
+        if "name" in self.model_fields_set and self.name is None:
+            raise ValueError("name 不能为 null")
+        if "enabled" in self.model_fields_set and self.enabled is None:
+            raise ValueError("enabled 不能为 null")
+        return self
 
 
 class ProviderResponse(BaseModel):
@@ -1078,6 +1182,7 @@ def _workflow_response(row: dict[str, Any]) -> WorkflowResponse:
         status=row["status"],
         current_step=row.get("current_step"),
         checkpoint=row.get("checkpoint"),
+        error=row.get("error"),
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         completed_at=row.get("completed_at"),
@@ -1470,6 +1575,9 @@ def _agent_response(agent_id: str) -> AgentResponse:
         builtin=bool(entry["builtin"]) if entry else True,
         description=entry["description"] if entry else None,
         enabled=bool(entry["enabled"]) if entry else True,
+        tool_names=resolve_agent_tools(agent_id, overrides=overrides),
+        system_prompt=(entry.get("system_prompt") if entry else None),
+        icon=(entry.get("icon") if entry else None),
     )
 
 
@@ -1528,9 +1636,15 @@ def patch_agent_config(
     payload: AgentConfigPatchRequest,
     request: Request,
 ) -> AgentResponse:
-    """修改角色的 model / temperature 覆盖值，下一次阶段执行即生效。"""
+    """修改角色的模型参数覆盖值与工具白名单，下一次阶段执行即生效。"""
 
-    if agent_id not in _AGENT_NAMES:
+    # 目录里有条目的自定义角色同样可写：列表页会把它们渲染成完整的卡片，
+    # 只让内置三名可调参会让「新增角色」停在半路（ADR-036：角色是模块，不是常量）。
+    # 判据是「目录与内置回退名单里都没有」——目录读取失败时不能把内置角色误判成 404。
+    if (
+        agent_id not in _agent_registry_map()
+        and agent_id not in _AGENT_NAMES
+    ):
         raise ApiError("AGENT_NOT_FOUND", "Agent 不存在", status.HTTP_404_NOT_FOUND)
     try:
         update_agent_config(
@@ -1541,10 +1655,55 @@ def patch_agent_config(
             top_p=_patch_field(payload, "top_p"),
             max_output_tokens=_patch_field(payload, "max_output_tokens"),
             reasoning_type=_patch_field(payload, "reasoning_type"),
+            tool_names=_patch_field(payload, "tool_names"),
             actor=request.headers.get("X-Request-ID"),
         )
     except AgentConfigError as exc:
         raise ApiError("VALIDATION_ERROR", str(exc), status.HTTP_422_UNPROCESSABLE_ENTITY) from exc
+    except (SQLAlchemyError, OSError, ValueError, KeyError) as exc:
+        raise ApiError("DATA_SOURCE_UNAVAILABLE", "配置写入失败，请稍后重试", 503) from exc
+    return _agent_response(agent_id)
+
+
+@app.patch(
+    "/api/v1/config/agents/{agent_id}/profile",
+    response_model=AgentResponse,
+)
+def patch_agent_profile(
+    agent_id: str,
+    payload: AgentProfilePatchRequest,
+    request: Request,
+) -> AgentResponse:
+    """修改角色的**目录**字段（名称 / 描述 / 系统提示 / 图标 / 启停）。
+
+    与 `PATCH /api/v1/config/agents/{agent_id}`（模型参数覆盖）分开两个端点的理由
+    见 ADR-036：两组字段写的是两张表（`agent_registry` 对 `agent_configs`），
+    `null` 的后果不同（清空那一列 vs 回退下一层配置），前端要给的提示也不同。
+    内置角色同样可改（ADR-036 把三角色降级为普通种子），删除仍受 `DELETE` 的
+    `409 AGENT_BUILTIN` 保护。
+
+    `system_prompt` 是主 Agent 动态调度这个角色时喂给它的人设：改完**下一次**
+    阶段执行即生效，进行中的执行不受影响（工作流拿到的是启动时的快照）。
+    """
+
+    if (
+        agent_id not in _agent_registry_map()
+        and agent_id not in _AGENT_NAMES
+    ):
+        raise ApiError("AGENT_NOT_FOUND", "Agent 不存在", status.HTTP_404_NOT_FOUND)
+    try:
+        update_agent_registry(
+            agent_id,
+            name=_patch_field(payload, "name"),
+            description=_patch_field(payload, "description"),
+            system_prompt=_patch_field(payload, "system_prompt"),
+            icon=_patch_field(payload, "icon"),
+            enabled=_patch_field(payload, "enabled"),
+        )
+    except AgentProfileError as exc:
+        raise ApiError(
+            "VALIDATION_ERROR", str(exc), status.HTTP_422_UNPROCESSABLE_ENTITY
+        ) from exc
     except (SQLAlchemyError, OSError, ValueError, KeyError) as exc:
         raise ApiError("DATA_SOURCE_UNAVAILABLE", "配置写入失败，请稍后重试", 503) from exc
     return _agent_response(agent_id)
@@ -1590,6 +1749,7 @@ def create_agent_registry_entry(
             role=payload.role,
             description=payload.description,
             system_prompt=payload.system_prompt,
+            icon=payload.icon,
             enabled=payload.enabled,
         )
     except SQLAlchemyError as exc:

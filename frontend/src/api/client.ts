@@ -2,6 +2,7 @@ import type {
   Agent,
   AgentConfigList,
   AgentConfigUpdate,
+  AgentProfileUpdate,
   AgentRegistryCreate,
   Approval,
   ApprovalDecision,
@@ -398,6 +399,12 @@ export const api = {
   listAgentConfigs: () => json<AgentConfigList>("/api/v1/config/agents"),
   patchAgentConfig: (id: string, payload: AgentConfigUpdate) =>
     json<Agent>(`/api/v1/config/agents/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    }),
+  /** 角色**目录**字段（名称 / 描述 / 系统提示 / 图标 / 启停），ADR-036。 */
+  patchAgentProfile: (id: string, payload: AgentProfileUpdate) =>
+    json<Agent>(`/api/v1/config/agents/${encodeURIComponent(id)}/profile`, {
       method: "PATCH",
       body: JSON.stringify(payload),
     }),

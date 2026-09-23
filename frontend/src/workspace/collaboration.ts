@@ -88,6 +88,80 @@ export function planSteps(workflow: Workflow | null): PlanStepSummary[] {
 }
 
 /**
+ * 「计划从哪来」——项目对外只说这一个概念。
+ *
+ * 这里**没有**「两套并列的编排模式」：固定链是动态路径的退化情形，计划不由规划节点产出，
+ * 而是一条常量链（收集 → 分析 → 报告）。把 `static` 说成「另一种编排方式」，会让读者以为
+ * 存在两条对等的链路；实际存在的只有「计划由规划节点产出」与「计划是那条常量链」。
+ * 见 ADR-030 §2 与本轮 ADR-037。
+ */
+export type PlanSourceKey = "planning" | "planned" | "fallback" | "fixed";
+
+export const PLAN_SOURCE_TEXT: Record<PlanSourceKey, string> = {
+  planning: "正在规划",
+  planned: "规划 Agent 产出",
+  fallback: "回退固定链",
+  fixed: "固定链",
+};
+
+export const PLAN_SOURCE_HINT: Record<PlanSourceKey, string> = {
+  planning: "计划还没落盘：这次由规划 Agent 判断需要哪些角色。",
+  planned: "计划由规划 Agent 按任务产出，再按依赖逐步执行。",
+  fallback: "规划节点没产出可用计划，已回退固定链（收集 → 分析 → 报告）。",
+  fixed: "固定链：计划恒为 收集 → 分析 → 报告，不经过规划节点。",
+};
+
+/**
+ * 由链路事实推「计划来源」。
+ *
+ * 判据顺序即优先级：还在规划窗口 → 没有计划可谈；计划来自规划节点（`llm`，或计划已落盘
+ * 但来源字段缺失的老数据）→ 规划 Agent 产出；来源是 `fallback` → 规划失败回退；既不是
+ * 规划窗口也不是动态链路 → 那条固定链。
+ */
+export function planSourceKey(input: {
+  mode?: string | null;
+  planning?: boolean;
+  source?: string | null;
+}): PlanSourceKey {
+  if (input.planning) return "planning";
+  if (input.mode === "dynamic") {
+    return input.source === "fallback" ? "fallback" : "planned";
+  }
+  return "fixed";
+}
+
+/**
+ * 「还在规划」——计划没落盘之前，**不要**把写死的固定三步当成这次的事实画出来。
+ *
+ * 动态链路的计划由规划节点产出后才随 `mode` 一起写进 `checkpoint`；在那之前
+ * `workflow_runs.checkpoint` 是 **null**（`create_workflow_run` 只建行、不写摘要），
+ * 于是「没有 `plan`」这件事同时对应两种完全不同的实情：
+ *
+ * - **静态链路**：它没有规划环节，写死的固定三步就是全部——照画不误；
+ * - **动态链路**：链路由几步、派给谁都还不知道，此时能画出来的只有固定三步，
+ *   而这次它可能压根不参与（一个 Agent 一步做完）。
+ *
+ * 把后者当成前者，界面上就是「先画一版错的、等计划落盘再换成对的」：读数的人会把
+ * 第一版当成真链路。所以判据要凑齐三条——**这次走的是动态编排**（服务端在规划窗口内
+ * 没有任何字段能说明这件事，只有提交方自己知道，见 `requestedMode`）、**服务端还没写过
+ * 任何链路事实**、**运行还没进终态**。
+ */
+export function isPlanning(
+  workflow: Workflow | null,
+  requestedMode?: string | null,
+): boolean {
+  if (!workflow) return false;
+  // 判据一：这次走的是动态编排——服务端在规划窗口内没有任何字段能说明这件事，
+  // 只有提交方自己知道（见 `requestedMode`）。静态链路的固定三步是常量，照画不误。
+  if (requestedMode !== "dynamic") return false;
+  // 判据二：服务端**还没写过任何链路事实**。`checkpoint` 一旦有值就说明链路已定型——
+  // 动态链路的计划与 `mode` 是同一次写入的，有 `mode` 必有 `plan`。
+  if (workflow.checkpoint) return false;
+  // 判据三：运行还没进终态。终态却没有计划属于数据残缺，不该读成「还在规划」。
+  return ["pending", "running"].includes(workflow.status);
+}
+
+/**
  * 计划步骤的显示状态。
  *
  * `skipped` 必须原样透出：它和 `pending` 在界面上长得像，但语义完全相反——
@@ -225,6 +299,32 @@ export type CollabNode = {
   traceReason: string | null;
 };
 
+/** 计划里某一步被派给了谁、为什么（「任务分配」节点的悬停明细）。 */
+export type CollabAssignment = {
+  id: string;
+  /** 角色 id（`collector` / …）。 */
+  role: string;
+  /** 角色的显示名。 */
+  label: string;
+  /** 该步骤的一句话职责（规划节点产出）。 */
+  instruction: string;
+};
+
+/**
+ * 规划决策（planner 环节）。
+ *
+ * **只在动态链路出现**：静态链路的步骤是写死的三步常量，没有「谁被派了活」这个决策，
+ * 因此 `null` 而**不是**一份空壳——画布据此决定要不要画那个节点（§5.22「计划即落盘」）。
+ */
+export type CollabPlanner = {
+  /** 规划理由；降级（`fallback`）时这里是回退原因。 */
+  rationale: string;
+  /** `llm` = 规划节点真的产出了计划；`fallback` = 降级到固定三步。 */
+  source: string;
+  /** 各步骤的分配结果，按计划声明顺序。 */
+  assignments: CollabAssignment[];
+};
+
 export type CollabEdge = {
   from: string;
   to: string;
@@ -243,6 +343,15 @@ export type CollabGraph = {
   /** 本次工作流的任务原文（§5.17 的 `task`）。 */
   task: string | null;
   mode: string;
+  /** 规划决策（planner 环节）；静态链路为 `null`，画布据此决定要不要画「任务分配」节点。 */
+  planner: CollabPlanner | null;
+  /**
+   * 还在等计划落盘（`isPlanning`）。
+   *
+   * `true` 时 `nodes` 必为空——**不是**「这次没有节点可画」，而是「现在还不知道要画什么」。
+   * 两者在界面上要分开说：一个是终态，一个是过程。
+   */
+  planning: boolean;
   /** 整条链路都没有分阶段轨迹时的原因（目前只有动态编排走到这里）。 */
   traceReason: string | null;
 };
@@ -316,8 +425,11 @@ function toolCallsOf(calls: StageToolCall[]): CollabToolCall[] {
 /**
  * 组装协作画布的节点与连线。
  *
- * 轨迹（§5.17）与用量（§5.5）都是**可选**的：任务刚开始时两者都还没有，
- * 画布要先能画出来（节点带 pending 状态），不能因为「还没数据」就整块空白。
+ * 轨迹（§5.17）与用量（§5.5）都是**可选**的：没有轨迹时节点仍要画出来（带 `pending`
+ * 状态），不能因为「还没数据」就整块空白。
+ *
+ * 唯一的例外是**计划尚未落盘**（`isPlanning`）：那时连「几步、派给谁」都还不知道，
+ * 返回的是 `planning: true` 的空图，而不是拿固定三步顶上（ADR-034）。
  */
 export function buildCollaboration({
   stages,
@@ -326,6 +438,7 @@ export function buildCollaboration({
   completed,
   traces = null,
   metrics = [],
+  requestedMode = null,
 }: {
   stages: StageMeta[];
   agents: Agent[];
@@ -333,6 +446,14 @@ export function buildCollaboration({
   completed: Set<string>;
   traces?: WorkflowStageTrace | null;
   metrics?: Metric[];
+  /**
+   * 提交这次任务时声明的编排模式（`doc/api.md` §4.4 的 `orchestration_mode`）。
+   *
+   * 规划窗口内服务端还没有任何事实可读（`checkpoint` 是 null），**唯一**知道「这次走的是
+   * 动态编排」的就是提交方自己。只有实时工作流该传：历史工作流的模式要按它自己的数据
+   * 判断，借用当前那个开关会把静态老任务读成「正在规划」。
+   */
+  requestedMode?: string | null;
 }): CollabGraph {
   const traceReason =
     traces && !traces.items.length ? traces.reason ?? null : null;
@@ -342,9 +463,15 @@ export function buildCollaboration({
     waves: [],
     task: traces?.task ?? null,
     mode: traces?.mode ?? "static",
+    planner: null,
+    planning: false,
     traceReason,
   };
   if (!workflow) return empty;
+
+  // 规划窗口：这张图上**没有任何**可用的事实。此时不画比画错更有用——
+  // 见 `isPlanning` 的注释（用户 2026-09-22 反馈：单 Agent 的问题也先画了三段固定链路）。
+  if (isPlanning(workflow, requestedMode)) return { ...empty, planning: true };
 
   // 1) 参与本次执行的节点，静态阶段与计划步骤收敛成同一种形状
   const plan = planSteps(workflow);
@@ -365,6 +492,22 @@ export function buildCollaboration({
             // 静态链路是固定串行流水线：每一步都依赖上一步
             deps: index > 0 ? [list[index - 1].id] : [],
           }));
+
+  // 规划决策（planner 环节）：动态链路才有「谁被派了活、依据是什么」这件事——计划与理由
+  // 由 §5.22「计划即落盘」写进 checkpoint。静态链路的步骤是写死的三步常量，没有这个决策，
+  // 因此给 `null` 而不是一份空壳：画布据此决定要不要画「任务分配」节点。
+  const planner: CollabPlanner | null = plan.length
+    ? {
+        rationale: workflow.checkpoint?.plan_rationale ?? "",
+        source: workflow.checkpoint?.plan_source ?? "",
+        assignments: plan.map((step) => ({
+          id: step.id,
+          role: step.role,
+          label: metaForRole(stages, step.role).label,
+          instruction: step.instruction ?? "",
+        })),
+      }
+    : null;
 
   if (!entries.length) return empty;
 
@@ -448,6 +591,8 @@ export function buildCollaboration({
     waves,
     task: traces?.task ?? null,
     mode: traces?.mode ?? (plan.length ? "dynamic" : "static"),
+    planner,
+    planning: false,
     traceReason,
   };
 }

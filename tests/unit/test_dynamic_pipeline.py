@@ -37,6 +37,7 @@ from app.orchestration.dynamic_graph import (
     ordered_outcomes,
     parse_plan,
     planner_prompt,
+    resolve_step_prompt,
     ready_steps,
     recursion_limit,
     resolve_max_plan_steps,
@@ -117,7 +118,7 @@ def test_parse_plan_accepts_plain_json():
 
     assert plan is not None
     assert plan.source == "llm"
-    assert [(step.id, step.role.value, step.depends_on) for step in plan.steps] == [
+    assert [(step.id, step.role, step.depends_on) for step in plan.steps] == [
         ("s1", "collector", []),
         ("s2", "analyst", ["s1"]),
         ("s3", "reporter", ["s2"]),
@@ -509,9 +510,10 @@ def test_checkpoint_summary_lists_plan_with_statuses():
 
     assert summary["mode"] == "dynamic"
     assert summary["completed_steps"] == ["s1"]
+    assert "plan_rationale" in summary  # 计划理由一并进 checkpoint，供前端展示分配依据
     assert summary["plan"] == [
-        {"id": "s1", "role": "collector", "depends_on": [], "status": "completed"},
-        {"id": "s2", "role": "analyst", "depends_on": ["s1"], "status": "pending"},
+        {"id": "s1", "role": "collector", "instruction": "收集信息", "depends_on": [], "status": "completed"},
+        {"id": "s2", "role": "analyst", "instruction": "分析信息", "depends_on": ["s1"], "status": "pending"},
     ]
 
 
@@ -715,3 +717,54 @@ def test_static_collect_stage_receives_attachments():
     assert isinstance(content, list)
     assert content[0]["type"] == "text"
     assert content[1]["type"] == "image_url"
+
+
+# —— ADR-036：候选集与人设由角色目录驱动 ——
+
+def test_planner_prompt_lists_registry_candidates():
+    """候选集来自目录：planner 只看到目录给的角色，自定义条目同样可选。"""
+
+    prompt = planner_prompt(
+        4,
+        candidates=[
+            {"id": "summarizer", "name": "摘要 Agent", "description": "把上游内容压缩成三句话。"},
+        ],
+    )
+
+    assert "summarizer（摘要 Agent）" in prompt
+    assert "把上游内容压缩成三句话。" in prompt
+    # 提示词尾部固定话术提到 reporter（「通常用 reporter」），只断言角色清单。
+    assert "- collector" not in prompt
+
+
+def test_parse_plan_rejects_role_outside_candidates():
+    """allowed 候选集是「模型编造角色」的唯一防线：候选之外的角色整份丢弃。"""
+
+    text = json.dumps(
+        {
+            "rationale": "测试计划",
+            "steps": [{"id": "s1", "role": "collector", "instruction": "收集"}],
+        },
+        ensure_ascii=False,
+    )
+    assert parse_plan(text, allowed={"summarizer"}) is None
+    assert parse_plan(text, allowed={"collector"}) is not None
+    # 不传候选集（目录功能之前的调用方式）仍按内置三角色校验。
+    assert parse_plan(text) is not None
+
+
+def test_resolve_step_prompt_prefers_registry_prompt():
+    """人设三级回退：目录条目 > 内置角色定义 > 通用兜底。"""
+
+    assert (
+        resolve_step_prompt(
+            "summarizer",
+            {"summarizer": {"system_prompt": "你是摘要助手。"}},
+        )
+        == "你是摘要助手。"
+    )
+    # 内置角色：目录里没写 prompt 就回退 ROLE_DEFINITIONS。
+    assert resolve_step_prompt("analyst", {}) == get_role(RoleId.ANALYST).system_prompt
+    # 自定义角色且没有 prompt：通用兜底，不编一份假人设。
+    generic = resolve_step_prompt("summarizer", {"summarizer": {"system_prompt": None}})
+    assert "协作角色" in generic

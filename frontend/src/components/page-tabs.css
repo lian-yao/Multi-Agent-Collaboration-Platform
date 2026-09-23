@@ -12,11 +12,11 @@
   gap: 6px;
   width: fit-content;
   max-width: 100%;
-  margin: 0 0 16px;
+  margin: 16px;
   padding: 5px;
-  border: 1px solid var(--cfg-line, #dce7ea);
+  border: 1px solid var(--cfg-line, var(--t-bd-dce7ea));
   border-radius: var(--cfg-radius, 10px);
-  background: var(--cfg-surface, #fff);
+  background: var(--cfg-surface, var(--t-bg-ffffff));
 }
 
 .ui-tab {
@@ -27,34 +27,35 @@
   border: 0;
   border-radius: var(--cfg-radius-sm, 8px);
   background: transparent;
-  color: var(--cfg-ink-2, #456572);
+  color: var(--cfg-ink-2, var(--t-ink-456572));
   font-size: 12px;
   font-weight: 500;
   line-height: 1;
   white-space: nowrap;
-  transition: background-color var(--cfg-ease, .16s cubic-bezier(.4, 0, .2, 1)),
-    color var(--cfg-ease, .16s cubic-bezier(.4, 0, .2, 1));
+  transition:
+    background-color var(--cfg-ease, 0.16s cubic-bezier(0.4, 0, 0.2, 1)),
+    color var(--cfg-ease, 0.16s cubic-bezier(0.4, 0, 0.2, 1));
 }
 
 .ui-tab:hover {
-  background: var(--cfg-surface-hover, #f4f9fb);
-  color: var(--cfg-ink, #33505d);
+  background: var(--cfg-surface-hover, var(--t-bg-f4f9fb));
+  color: var(--cfg-ink, var(--t-ink-33505d));
 }
 
 .ui-tab.active {
-  background: #eaf2f5;
-  color: #2f6076;
+  background: var(--t-bg-eaf2f5);
+  color: var(--t-ink-2f6076);
   /* 不设 font-weight：加粗会让文字变宽、按钮尺寸变化，导致后续按钮位置跳动 */
 }
 
 .ui-tab:focus-visible {
-  outline: 2px solid var(--cfg-accent, #3f7f93);
+  outline: 2px solid var(--cfg-accent, var(--t-bd-3f7f93));
   outline-offset: 1px;
 }
 
 .ui-tab svg {
   flex: none;
-  opacity: .85;
+  opacity: 0.85;
 }
 
 .ui-tab.active svg {

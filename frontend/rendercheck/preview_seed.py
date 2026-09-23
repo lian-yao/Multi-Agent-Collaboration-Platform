@@ -33,7 +33,9 @@ AGENTS = [
         "model": "gpt-5.5", "provider": "openai-main", "provider_name": "OpenAI 主端点",
         "llm_model_id": "openai-main:gpt-5.5", "temperature": 0.3, "top_p": None,
         "max_output_tokens": None, "reasoning_type": "openai", "status": "running",
-        "override_keys": ["temperature"],
+        # 白名单 + 一个目录里没有的名字（孤儿）：演示「配置得比目录多」时界面怎么交代。
+        "override_keys": ["temperature", "tool_names"],
+        "tool_names": ["web_search", "fetch_page", "read_file", "legacy_search"],
         "builtin": True, "description": "收集、检索并整理任务主题相关的事实与要点。", "enabled": True,
     },
     {
@@ -41,7 +43,9 @@ AGENTS = [
         "model": "claude-sonnet-4", "provider": "anthropic-main", "provider_name": "Anthropic 主端点",
         "llm_model_id": "anthropic-main:claude-sonnet-4", "temperature": 0.2, "top_p": 0.9,
         "max_output_tokens": 8192, "reasoning_type": "anthropic", "status": "running",
-        "override_keys": ["temperature", "top_p", "max_output_tokens"],
+        # 空名单是危险态（显式取消全部授权），预览页要能看到它被单独着色。
+        "override_keys": ["temperature", "top_p", "max_output_tokens", "tool_names"],
+        "tool_names": [],
         "builtin": True, "description": "基于信息清单进行归纳、对比与提炼。", "enabled": True,
     },
     {
@@ -49,14 +53,18 @@ AGENTS = [
         "model": "gemini-2.5-pro", "provider": "google-main", "provider_name": "Google 主端点",
         "llm_model_id": "google-main:gemini-2.5-pro", "temperature": 0.5, "top_p": None,
         "max_output_tokens": None, "reasoning_type": "gemini", "status": "idle",
+        # 未配置 = 不受限（默认态），与上图两种受限态并列便于对照。
         "override_keys": [],
+        "tool_names": None,
         "builtin": True, "description": "整合分析摘要，生成结构清晰的正式报告。", "enabled": True,
     },
     {
         "id": "planner", "name": "任务规划 Agent", "role": "planner",
         "model": "deepseek-v3.2", "provider": "deepseek-main", "provider_name": "DeepSeek 端点",
         "llm_model_id": None, "temperature": 0.1, "top_p": None, "max_output_tokens": None,
-        "reasoning_type": "none", "status": "idle", "override_keys": [],
+        "reasoning_type": "none", "status": "idle",
+        "override_keys": ["tool_names"],
+        "tool_names": ["read_file", "list_directory"],
         "builtin": False, "description": "拆解任务并规划执行步骤（自定义角色）。", "enabled": True,
     },
 ]
@@ -245,6 +253,8 @@ def new_workflow(session_id: str, completed: int = 2, status: str = "running") -
         "checkpoint": {"status": status, "current_step": current,
                        "completed_steps": done, "updated_at": iso()},
         "created_at": iso(-300), "updated_at": iso(), "completed_at": None,
+        # 响应模型有 `error`（§4.8）；种子缺这个键会让预览比真实少一个字段。
+        "error": None,
     }
     STATE["workflows"][wid] = workflow
     STATE["tool_calls"][wid] = [
@@ -311,6 +321,7 @@ def new_dynamic_workflow(session_id: str) -> dict:
             "updated_at": iso(),
         },
         "created_at": iso(-100), "updated_at": iso(), "completed_at": None,
+        "error": None,
     }
     STATE["workflows"][wid] = workflow
     STATE["tool_calls"][wid] = [
@@ -433,38 +444,68 @@ def metrics_for(workflow_id: str) -> list:
     「Token 有没有分到 Agent 头上」这个真问题在预览里反而看不出来。
     """
 
-    rows = (
-        ("collector", "collect", 817, 66, 883),
-        ("analyst", "analyze", 852, 279, 1131),
-        ("reporter", "report", 1045, 511, 1556),
+    # 每个阶段给**两轮**模型调用：带工具的一步会多次请求模型，而 `record_llm_usage`
+    # 每次调用各记一条，所以同一 (role, stage) 的 Token 真实存在多条采样。种子只给一条，
+    # 会让「同指标归集成一行、按时间看趋势」这件事在预览里根本看不出来。
+    rounds = (
+        ("collector", "collect", ((640, 48, 688), (817, 66, 883))),
+        ("analyst", "analyze", ((512, 133, 645), (852, 279, 1131))),
+        ("reporter", "report", ((701, 208, 909), (1045, 511, 1556))),
     )
     items = []
-    for role, stage, prompt, completion, total in rows:
-        for name, value in (
-            ("input_tokens", prompt),
-            ("output_tokens", completion),
-            ("total_tokens", total),
-        ):
+    for role, stage, turns in rounds:
+        for turn, (prompt, completion, total) in enumerate(turns):
+            for name, value in (
+                ("input_tokens", prompt),
+                ("output_tokens", completion),
+                ("total_tokens", total),
+            ):
+                items.append({
+                    "id": len(items) + 1,
+                    "metric_name": name,
+                    "value": float(value),
+                    "labels": {"workflow_id": workflow_id, "role": role, "stage": stage},
+                    "recorded_at": iso(-180 + turn * 12),
+                })
+    # 耗时与 Token 分开给：量纲不同，混在一把尺子上会把 80ms→120ms 的变化压成直线。
+    for role, stage, durations in (
+        ("collector", "collect", (1820.0, 2140.0)),
+        ("analyst", "analyze", (2440.0, 3120.0)),
+        ("reporter", "report", (3980.0, 4610.5)),
+    ):
+        for turn, value in enumerate(durations):
             items.append({
                 "id": len(items) + 1,
-                "metric_name": name,
-                "value": float(value),
+                "metric_name": "tool_call_duration_ms",
+                "value": value,
                 "labels": {"workflow_id": workflow_id, "role": role, "stage": stage},
-                "recorded_at": iso(-120),
+                "recorded_at": iso(-150 + turn * 12),
             })
+    for role, stage, value in (
+        ("collector", "collect", 7179.5),
+        ("analyst", "analyze", 9210.0),
+        ("reporter", "report", 13480.0),
+    ):
+        items.append({
+            "id": len(items) + 1,
+            "metric_name": "stage_duration_ms",
+            "value": value,
+            "labels": {"workflow_id": workflow_id, "role": role, "stage": stage},
+            "recorded_at": iso(-100),
+        })
     items.append({
         "id": len(items) + 1,
-        "metric_name": "stage_duration_ms",
-        "value": 7179.5,
-        "labels": {"workflow_id": workflow_id, "role": "collector", "stage": "collect"},
-        "recorded_at": iso(-110),
+        "metric_name": "workflow_duration_ms",
+        "value": 29869.5,
+        "labels": {"workflow_id": workflow_id},
+        "recorded_at": iso(-95),
     })
     items.append({
         "id": len(items) + 1,
         "metric_name": "workflow_runs",
         "value": 1.0,
         "labels": {"workflow_id": workflow_id, "status": "completed"},
-        "recorded_at": iso(-100),
+        "recorded_at": iso(-90),
     })
     return items
 
@@ -489,6 +530,7 @@ def session_workflows(session_id: str) -> dict:
             "created_at": iso(-1800),
             "updated_at": iso(-1740),
             "completed_at": iso(-1740),
+            "error": None,
             "checkpoint": {
                 "status": "completed",
                 "current_step": None,

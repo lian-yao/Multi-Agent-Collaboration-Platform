@@ -42,8 +42,10 @@ from app.orchestration.tools import (
     ToolCallStatus,
     ToolRegistry,
     ToolSpec,
+    ToolNotAuthorizedError,
     as_openai_tool,
     default_tool_registry,
+    restricted_registry,
     set_tool_registry_factory,
 )
 
@@ -717,3 +719,129 @@ def test_retryable_tool_failure_is_still_retried_three_times():
     [record] = result["tool_calls"]
     assert record["status"] == ToolCallStatus.FAILED.value
     assert len(registry.calls) == 4  # 首次 + 3 次重试
+
+
+# --------------------------------------------------------------------------------------
+# ADR-035：按角色白名单收窄工具集
+# --------------------------------------------------------------------------------------
+
+SECOND_SPEC = ToolSpec(
+    name="calculator",
+    description="计算数学表达式",
+    input_schema={"type": "object", "properties": {"expression": {"type": "string"}}},
+)
+
+
+def test_restricted_registry_returns_input_untouched_when_unset():
+    """`None` = 未配置：**原样返回同一个对象**，不套壳。
+
+    这条不是风格问题——套一层壳会让「未配置」的角色也走一条新代码路径，
+    那样「加了这个字段但没配」的行为就不再与加字段之前逐字一致了。
+    """
+
+    registry = MemoryToolRegistry([SEARCH_SPEC, SECOND_SPEC])
+
+    assert restricted_registry(None, ["web_search"]) is None
+    assert restricted_registry(registry, None) is registry
+
+
+def test_restricted_registry_hides_tools_outside_the_allowlist():
+    registry = MemoryToolRegistry([SEARCH_SPEC, SECOND_SPEC])
+    narrowed = restricted_registry(registry, ["calculator"])
+
+    assert [spec.name for spec in narrowed.list_tools()] == ["calculator"]
+
+
+def test_restricted_registry_rejects_calls_outside_the_allowlist():
+    registry = MemoryToolRegistry([SEARCH_SPEC, SECOND_SPEC])
+    narrowed = restricted_registry(registry, ["calculator"])
+
+    with pytest.raises(ToolNotAuthorizedError):
+        narrowed.call(ToolCall(call_id="c-1", tool_name="web_search", arguments={}))
+
+    # 白名单内的照常放行，并且真的转发给了底层注册表。
+    assert narrowed.call(
+        ToolCall(call_id="c-2", tool_name="calculator", arguments={"expression": "1+1"})
+    ) == {"ok": True}
+    assert [call.tool_name for call in registry.calls] == ["calculator"]
+
+
+def test_empty_allowlist_yields_an_agent_without_tools():
+    """`[]` = 显式取消全部授权：模型连工具都看不到（与 `None` 的「全量」相对）。"""
+
+    narrowed = restricted_registry(MemoryToolRegistry([SEARCH_SPEC]), [])
+    caller = ToolCaller(narrowed)
+
+    assert caller.has_tools() is False
+    assert caller.available() == ()
+
+
+def test_unauthorized_tool_call_is_recorded_as_failed_not_raised():
+    """越权调用必须落成一条 `failed` 记录，而不是把异常抛穿到流水线。
+
+    抛穿会让整条任务失败；落成记录则用户在执行台看得到
+    「模型试着调了一个它不该有的工具」——这才是需要被看见的信息。
+    """
+
+    registry = restricted_registry(MemoryToolRegistry([SEARCH_SPEC]), [])
+    caller = ToolCaller(registry)
+
+    record = caller.invoke("web_search", {"query": "主题"})
+
+    assert record.status is ToolCallStatus.FAILED
+    assert record.error is not None
+    assert "未被授权" in record.error
+
+
+def test_stage_only_exposes_tools_granted_to_the_role():
+    """走到阶段这一层：白名单外的工具连 `bind_tools` 的清单都进不去。"""
+
+    from app.workflows.pipeline import advance_pipeline_stage
+
+    registry = MemoryToolRegistry([SEARCH_SPEC, SECOND_SPEC])
+    set_tool_registry_factory(lambda: registry)
+    model = ToolCallingChatModel(
+        tool_name="web_search", tool_arguments={"query": "主题"}
+    )
+
+    outcome = advance_pipeline_stage(
+        start(new_pipeline_state(task="演示任务")),
+        PipelineStage.COLLECT,
+        task="演示任务",
+        llm=model,
+        allowed_tools=["calculator"],
+    )
+    restored = deserialize_pipeline_state(outcome["state"])
+    [record] = restored.results[PipelineStage.COLLECT]["tool_calls"]
+
+    # 模型看不到 web_search，却仍然请求了它 —— 必须落成 failed 而不是成功。
+    assert [entry["function"]["name"] for entry in model.bound_tools] == ["calculator"]
+    assert record["tool_name"] == "web_search"
+    assert record["status"] == ToolCallStatus.FAILED.value
+
+
+def test_stage_without_allowlist_still_binds_every_tool():
+    """未传白名单（= 角色未配置）时，行为与加这个参数之前一致。"""
+
+    from app.workflows.pipeline import advance_pipeline_stage
+
+    registry = MemoryToolRegistry([SEARCH_SPEC, SECOND_SPEC])
+    set_tool_registry_factory(lambda: registry)
+    model = ToolCallingChatModel(
+        tool_name="web_search", tool_arguments={"query": "主题"}
+    )
+
+    outcome = advance_pipeline_stage(
+        start(new_pipeline_state(task="演示任务")),
+        PipelineStage.COLLECT,
+        task="演示任务",
+        llm=model,
+    )
+    restored = deserialize_pipeline_state(outcome["state"])
+    [record] = restored.results[PipelineStage.COLLECT]["tool_calls"]
+
+    assert sorted(entry["function"]["name"] for entry in model.bound_tools) == [
+        "calculator",
+        "web_search",
+    ]
+    assert record["status"] == ToolCallStatus.SUCCEEDED.value

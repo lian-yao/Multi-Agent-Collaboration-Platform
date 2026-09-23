@@ -2,8 +2,9 @@
 
 升级一个跑过旧版本的环境时，`agent_configs` / `provider_configs` 还是老列定义，
 新增的 `llm_model_id` / `top_p` / `max_output_tokens` / `reasoning_type` /
-`default_llm_model_id` 必须显式补上，否则注册表配置一写就报 `UndefinedColumn`。
-ADR-033 阶段 2 同理给 `workspaces` 补了 `updated_by`（提档要记"谁提的"）。
+`default_llm_model_id` / `tool_names`（ADR-035）必须显式补上，否则注册表配置一写就报 `UndefinedColumn`。
+ADR-033 阶段 2 同理给 `workspaces` 补了 `updated_by`（提档要记「谁提的」），
+ADR-036 给 `agent_registry` 补了 `icon`。
 
 这里只验证语句生成与执行接线（不连真实数据库）：语句必须是幂等的
 `ADD COLUMN IF NOT EXISTS`，且只在 PostgreSQL 上生成。
@@ -52,6 +53,8 @@ def test_migration_covers_every_column_added_by_adr_017():
         "max_output_tokens",
         "reasoning_type",
         "default_llm_model_id",
+        "tool_names",
+        "icon",
     ):
         assert column in joined
 
@@ -130,7 +133,11 @@ def test_apply_migration_executes_statements_in_order():
     applied = checkpoint._apply_registry_migrations(RecordingEngine("postgresql", log))
 
     assert applied == log
-    assert len(log) == len(checkpoint._registry_migration_statements("postgresql"))
+    # 执行的就是生成器那条列表本身，逐条、按序：ADR-017 覆盖列 + ADR-033 的
+    # `workspaces.updated_by` + ADR-035 的 `tool_names` + ADR-036 的 `icon`，
+    # 另含 workspaces 唯一性收敛那几条。
+    # 不写死条数：这条迁移链一天内改过三版结构（见上一个用例），写死必然再烂一次。
+    assert log == checkpoint._registry_migration_statements("postgresql")
 
 
 def test_apply_migration_is_a_noop_off_postgresql():

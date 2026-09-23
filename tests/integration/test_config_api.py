@@ -37,6 +37,7 @@ def config_api(monkeypatch):
         top_p=UNSET,
         max_output_tokens=UNSET,
         reasoning_type=UNSET,
+        tool_names=UNSET,
         actor=None,
     ):
         state["calls"].append(
@@ -48,6 +49,7 @@ def config_api(monkeypatch):
                 "top_p": top_p,
                 "max_output_tokens": max_output_tokens,
                 "reasoning_type": reasoning_type,
+                "tool_names": tool_names,
                 "actor": actor,
             }
         )
@@ -61,6 +63,7 @@ def config_api(monkeypatch):
                 "top_p": None,
                 "max_output_tokens": None,
                 "reasoning_type": None,
+                "tool_names": None,
             },
         )
         for field, value in (
@@ -70,6 +73,7 @@ def config_api(monkeypatch):
             ("top_p", top_p),
             ("max_output_tokens", max_output_tokens),
             ("reasoning_type", reasoning_type),
+            ("tool_names", tool_names),
         ):
             if value is not UNSET:
                 row[field] = value
@@ -118,6 +122,7 @@ def _call(**overrides) -> dict:
         "top_p": UNSET,
         "max_output_tokens": UNSET,
         "reasoning_type": UNSET,
+        "tool_names": UNSET,
         "actor": None,
     }
     base.update(overrides)
@@ -166,6 +171,11 @@ def test_patch_updates_effective_config(config_api):
         "builtin": True,
         "description": None,
         "enabled": True,
+        # 没碰过工具白名单 → 仍是「未配置」（不等于空名单）。
+        "tool_names": None,
+        # 目录回退时这两个字段就是空（ADR-036）：不在 API 层编默认值。
+        "system_prompt": None,
+        "icon": None,
     }
     assert state["calls"] == [
         _call(model="custom:1b", temperature=0.4)
@@ -357,3 +367,139 @@ def test_config_agents_list_survives_model_catalog_failure(config_api, monkeypat
     body = response.json()
     assert body["available_models"] == []
     assert [item["id"] for item in body["items"]] == ["collector", "analyst", "reporter"]
+def test_patch_writes_tool_names_and_null_restores_unlimited(config_api):
+    """工具白名单的三种状态都要能写进去（ADR-034）。
+
+    `null` = 未配置（不加限制）、`[]` = 显式取消全部、非空 = 只允许这些。
+    这条用例守的是「空数组与 null 不能混淆」这个最容易出错的接缝。
+    """
+
+    client, state = config_api
+
+    response = _patch(client, body={"tool_names": ["calculator", "web_search"]})
+    assert response.status_code == 200
+    assert state["calls"][-1]["tool_names"] == ["calculator", "web_search"]
+    assert response.json()["tool_names"] == ["calculator", "web_search"]
+
+    response = _patch(client, body={"tool_names": []})
+    assert state["calls"][-1]["tool_names"] == []
+    assert response.json()["tool_names"] == []
+
+    response = _patch(client, body={"tool_names": None})
+    assert state["calls"][-1]["tool_names"] is None
+    assert response.json()["tool_names"] is None
+
+
+def test_patch_rejects_blank_tool_name(config_api):
+    client, _state = config_api
+
+    response = _patch(client, body={"tool_names": ["calculator", "   "]})
+
+    assert response.status_code == 422
+
+
+# —— ADR-036：目录字段端点（）——
+
+def _fake_registry_update(calls):
+    def fake(agent_id, **kwargs):
+        calls.append({"agent_id": agent_id, **kwargs})
+        return {"id": agent_id}
+    return fake
+
+
+def test_profile_patch_maps_tri_state(config_api, monkeypatch):
+    """三态与覆盖端点同构：省略 = 不动（UNSET）、显式 null = 清空（None）、值 = 写入。"""
+
+    client, _ = config_api
+    calls: list = []
+    monkeypatch.setattr(api_main, "update_agent_registry", _fake_registry_update(calls))
+
+    response = client.patch(
+        "/api/v1/config/agents/collector/profile",
+        json={"name": "采集员", "description": None},
+    )
+
+    assert response.status_code == 200
+    assert calls == [
+        {
+            "agent_id": "collector",
+            "name": "采集员",
+            # 显式 null 在可空列上 = 清空；省略的字段保持 UNSET（不动）。
+            "description": None,
+            "system_prompt": UNSET,
+            "icon": UNSET,
+            "enabled": UNSET,
+        }
+    ]
+
+
+def test_profile_patch_rejects_null_name_and_enabled(config_api, monkeypatch):
+    """ /  没有空值状态：显式 null 返回 422，不会静默变成「不动」。"""
+
+    client, _ = config_api
+    calls: list = []
+    monkeypatch.setattr(api_main, "update_agent_registry", _fake_registry_update(calls))
+
+    for field in ("name", "enabled"):
+        response = client.patch(
+            "/api/v1/config/agents/collector/profile", json={field: None}
+        )
+        assert response.status_code == 422
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {},
+        {"icon": "Search"},
+        {"icon": "has space"},
+        {"name": ""},
+        {"system_prompt": "x" * 8001},
+    ],
+)
+def test_profile_patch_shape_validation(config_api, body):
+    """形状错误在 schema 层挡下（422），不进业务层。"""
+
+    client, _ = config_api
+    response = client.patch("/api/v1/config/agents/collector/profile", json=body)
+    assert response.status_code == 422
+
+
+def test_profile_patch_unknown_agent_404(config_api):
+    client, _ = config_api
+    response = client.patch(
+        "/api/v1/config/agents/missing/profile", json={"name": "x"}
+    )
+    assert response.status_code == 404
+    assert response.json()["code"] == "AGENT_NOT_FOUND"
+
+
+CUSTOM_ENTRY = {
+    "id": "summarizer",
+    "name": "摘要 Agent",
+    "role": "summarizer",
+    "builtin": False,
+    "description": None,
+    "enabled": True,
+    "system_prompt": "你是摘要助手。",
+    "icon": "summary",
+}
+
+
+def test_patch_accepts_registered_custom_agent(config_api, monkeypatch):
+    """覆盖端点对目录里的自定义角色同样可写（ADR-036：角色是模块，不是常量）。"""
+
+    client, _ = config_api
+    monkeypatch.setattr(api_main, "list_agent_registry", lambda: [CUSTOM_ENTRY])
+
+    response = _patch(client, agent_id="summarizer", body={"temperature": 0.6})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["id"] == "summarizer"
+    assert body["builtin"] is False
+    assert body["temperature"] == 0.6
+    # 目录字段原样透出，不在 API 层编默认值。
+    assert body["system_prompt"] == "你是摘要助手。"
+    assert body["icon"] == "summary"

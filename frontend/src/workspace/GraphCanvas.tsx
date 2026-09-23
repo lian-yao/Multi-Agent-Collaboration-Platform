@@ -26,12 +26,19 @@ import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { CircleAlert, LoaderCircle, Maximize2, Pause, Wrench } from "lucide-react";
 import { Status } from "../components/Status";
 import { AgentGlyph } from "../components/AgentGlyph";
-import type { CollabGraph, CollabNode, CollabToolCall } from "./collaboration";
+import type {
+  CollabGraph,
+  CollabNode,
+  CollabPlanner,
+  CollabToolCall,
+} from "./collaboration";
 import "./workspace.css";
 
 /** 合成出来的首尾端子：任务从哪进来、结果从哪出去。 */
 const START_ID = "__start";
 const END_ID = "__end";
+/** 规划决策节点（planner 环节）：只在动态链路出现，排在任务端子与首个角色节点之间。 */
+const PLANNER_ID = "__planner";
 
 type Geometry = {
   /** 节点圆直径。 */
@@ -53,13 +60,15 @@ const WIDE: Geometry = { size: 42, gap: 96, padX: 96, padY: 44, padBottom: 74, i
 
 export type PlacedNode = {
   id: string;
-  kind: "agent" | "start" | "end";
+  kind: "agent" | "start" | "end" | "planner";
   /** 圆心（画布坐标系）。 */
   x: number;
   y: number;
   size: number;
-  /** 只有 agent 节点才有原始模型（端子为 null）。 */
+  /** 只有 agent 节点才有原始模型（端子与规划节点为 null）。 */
   node: CollabNode | null;
+  /** 只有 planner 节点才有规划决策（其余为 null）。 */
+  planner: CollabPlanner | null;
   label: string;
   /** `883 tok`；空串 = 没有采样，不是「消耗为 0」。 */
   token: string;
@@ -193,7 +202,12 @@ export function layoutCollaboration(
 ): CollabLayout {
   const m = dense ? DENSE : WIDE;
   const waves = graph.waves.map((wave) => wave.filter(Boolean)).filter((wave) => wave.length);
-  const rows = waves.length + 2;
+  // 规划节点占一行：动态链路是「任务 → 任务分配 → 各角色」，静态链路没有这一环，行数也就少一行。
+  // 只加行、不改波次——`graph.waves` 仍由依赖算出，并行区的语义因此不受影响。
+  const planner = graph.planner;
+  const rows = waves.length + (planner ? 3 : 2);
+  /** 第 `waveIndex` 波落在第几行（规划节点插在任务端子之后）。 */
+  const waveRow = (waveIndex: number) => waveIndex + (planner ? 2 : 1);
   const w = Math.max(width > 0 ? width : dense ? 248 : 720, dense ? 200 : 320);
   const h = Math.max(m.padY + m.padBottom + (rows - 1) * m.gap, minHeight);
   const yOf = (row: number) =>
@@ -212,6 +226,7 @@ export function layoutCollaboration(
     y: yOf(0),
     size: m.size,
     node: null,
+    planner: null,
     label: "任务",
     token: "",
     status: "completed",
@@ -224,6 +239,7 @@ export function layoutCollaboration(
     y: yOf(rows - 1),
     size: m.size,
     node: null,
+    planner: null,
     label: "交付",
     token: "",
     status: "pending",
@@ -231,8 +247,25 @@ export function layoutCollaboration(
   };
   nodes.push(start);
 
+  // 规划节点：它已经跑完了（计划都落在图上了），所以恒为 `completed`——不是「待执行的一步」。
+  if (planner) {
+    nodes.push({
+      id: PLANNER_ID,
+      kind: "planner",
+      x: w / 2,
+      y: yOf(1),
+      size: m.size,
+      node: null,
+      planner,
+      label: "任务分配",
+      token: "",
+      status: "completed",
+      visited: true,
+    });
+  }
+
   waves.forEach((wave, waveIndex) => {
-    const y = yOf(waveIndex + 1);
+    const y = yOf(waveRow(waveIndex));
     wave.forEach((node, index) => {
       nodes.push({
         id: node.id,
@@ -241,6 +274,7 @@ export function layoutCollaboration(
         y,
         size: m.size,
         node,
+        planner: null,
         label: node.name,
         token: tokenBadge(node),
         status: node.status,
@@ -303,12 +337,17 @@ export function layoutCollaboration(
     });
   };
 
-  // 根步骤左边接任务端子，每个末端接交付端子；中间按依赖连
+  // 根步骤上面接任务端子（有规划节点就先经它），每个末端接交付端子；中间按依赖连
   const children = new Set(graph.edges.map((edge) => edge.to));
+  const plannerNode = nodes.find((item) => item.kind === "planner");
+  /** 根步骤的上游：有规划节点就从它出发，否则直接是任务端子。 */
+  const rootSource = plannerNode ?? start;
   for (const item of nodes) {
     if (item.kind !== "agent" || children.has(item.id)) continue;
-    push(start, item, item.status !== "pending", "", []);
+    push(rootSource, item, item.status !== "pending", "", []);
   }
+  // 任务端子 → 规划节点恒为「已走通」：根步骤能画出来，就说明计划已经产出了。
+  if (plannerNode) push(start, plannerNode, true, "", []);
   for (const edge of graph.edges) {
     const source = byId.get(edge.from);
     push(source, byId.get(edge.to), source?.status === "completed", edge.toolSummary, edge.toolCalls);
@@ -354,8 +393,13 @@ export function useElementSize<T extends HTMLElement>(enabled = true) {
  * 圆面里的图形。**状态优先于角色**：执行中 / 失败 / 暂停是人要立刻看见的信号，
  * 此时不画角色图标。停在待命或已完成时画角色图标（与配置页同一套解析，
  * 见 `components/AgentGlyph.tsx`），不再一律画机器人。
+ *
+ * 规划节点是例外：它不是某个 Agent，也没有「跑到哪一步」这件事（计划产出了它就跑完了），
+ * 所以固定用「规划」图标，不进上面那套状态规则。
  */
 function NodeGlyph({ node, size }: { node: PlacedNode; size: number }) {
+  if (node.kind === "planner")
+    return <AgentGlyph role="planner" name={node.label} size={size} />;
   if (node.kind !== "agent") return <span className="cv-dot" />;
   if (node.status === "failed") return <CircleAlert size={size} />;
   if (node.status === "paused") return <Pause size={size} />;
@@ -430,6 +474,39 @@ function NodeDetail({ node }: { node: CollabNode }) {
         ) : (
           <p className="cv-pop-note">没有采样记录。缺少 Token 是「没采到」，不是消耗为 0。</p>
         )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * 规划节点的悬停详情：**分配理由在前，逐条分配在后**。
+ *
+ * 不复用 `NodeDetail`：那个面板问的是「这个 Agent 拿到了什么、交出了什么、用什么跑的」，
+ * 而规划环节的产物就是这份分配决定本身——把角色节点那套字段（输入 / 产出 / 工具 / 参数）
+ * 填进来只会得到整面板的「（无）」。
+ */
+function PlannerDetail({ planner }: { planner: CollabPlanner }) {
+  return (
+    <div className="cv-pop cv-pop-node" role="tooltip">
+      <header className="cv-pop-head">
+        <b>任务分配</b>
+        <span>{planner.source === "fallback" ? "降级分配" : "规划决策"}</span>
+      </header>
+      <div className="cv-pop-block">
+        <h5>分配理由</h5>
+        <pre>{planner.rationale || "（规划节点未给出理由）"}</pre>
+      </div>
+      <div className="cv-pop-block">
+        <h5>分给谁</h5>
+        <ul>
+          {planner.assignments.map((item) => (
+            <li key={item.id}>
+              <b>{item.label}</b>
+              <span>{item.instruction || item.role}</span>
+            </li>
+          ))}
+        </ul>
       </div>
     </div>
   );
@@ -649,11 +726,13 @@ export function CollaborationCanvas({
             marginLeft: -node.size / 2,
             marginTop: -node.size / 2,
           }}
-          tabIndex={node.kind === "agent" ? 0 : -1}
+          tabIndex={node.kind === "agent" || node.kind === "planner" ? 0 : -1}
           aria-label={
             node.kind === "agent"
               ? `${node.label}：${node.status}${node.token ? `，${node.token}` : ""}`
-              : node.label
+              : node.kind === "planner" && node.planner
+                ? `${node.label}：${node.planner.assignments.length} 步的分工`
+                : node.label
           }
         >
           <NodeGlyph node={node} size={dense ? 12 : 16} />
@@ -669,6 +748,11 @@ export function CollaborationCanvas({
           {!dense && node.node && (
             <div className={`cv-pop-slot is-${popSide(node)}`} style={{ top: popTop(node) }}>
               <NodeDetail node={node.node} />
+            </div>
+          )}
+          {!dense && node.planner && (
+            <div className={`cv-pop-slot is-${popSide(node)}`} style={{ top: popTop(node) }}>
+              <PlannerDetail planner={node.planner} />
             </div>
           )}
         </div>

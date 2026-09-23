@@ -23,7 +23,11 @@ import dapr.ext.workflow as wf
 
 from app.attachments import AttachmentPayload, load_payloads
 from app.config import AgentSettings
-from app.core.agent_config import resolve_agent_settings
+from app.core.agent_config import (
+    agent_config_overrides,
+    resolve_agent_settings,
+    resolve_agent_tools,
+)
 from app.core.tool_audit import AuditedToolRegistry
 from app.core.checkpoint import (
     update_agent_run_status,
@@ -55,6 +59,7 @@ from app.orchestration.pipeline_graph import role_for_stage, run_role_stage
 from app.orchestration.tools import (
     ToolRegistry,
     default_tool_registry,
+    restricted_registry,
     session_scoped_registry,
 )
 from app.observability.metrics import flush_metrics, record_workflow_terminal
@@ -158,11 +163,16 @@ def advance_pipeline_stage(
     attachments: Sequence[AttachmentPayload] = (),
     session_id: str | None = None,
     agent_run_id: str | None = None,
+    allowed_tools: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """推进一个阶段，审计工具调用并保留 Workflow 行为日志关联。
 
     ``session_id`` / ``agent_run_id`` 用于从会话记忆读出本轮之前的上下文并注入提示词
     （F-06，接线口径见 ADR-019）；缺省时按「没有历史」执行。
+
+    ``allowed_tools`` 是该角色被授权的工具名（ADR-035）；``None`` 表示未配置、
+    不加限制（与加这个字段之前逐字一致）。收窄发生在**会话级工具之前**，
+    因此「读本次会话附件」两个工具不受这份白名单影响。
 
     ``attachments`` 用来给本次执行挂上「读本次会话附件」的工具（`app/tools/session_files.py`）：
     附件正文只注入接收原始任务的那一步，下游阶段想回头看原始文件就得自己按需读。
@@ -183,6 +193,10 @@ def advance_pipeline_stage(
         result = fake_stage_result(stage.value, task, previous=previous)
     else:
         registry = tool_registry if tool_registry is not None else default_tool_registry()
+        # ADR-035：先按角色白名单收窄，再挂会话级工具。顺序不能反——会话文件工具
+        # 是「读你自己上传的附件」的兜底能力，不进静态目录、配置页也不给开关
+        # （doc/api.md §5.3），把它一并收窄等于让配了白名单的角色读不了自己的附件。
+        registry = restricted_registry(registry, allowed_tools)
         # 会话文件工具先挂、审计后包：这样读文件也算一次被审计的工具调用
         # （谁读了哪份附件，`tool_calls` 表里查得到）。
         registry = session_scoped_registry(registry, session_id)
@@ -256,13 +270,19 @@ def _run_stage_activity(
         if use_fake_model
         else tuple(load_payloads([str(value) for value in task.get("attachment_ids") or []]))
     )
+    # 覆盖行一次读出、两处消费：生效模型参数与工具白名单读的是同一张 `agent_configs`。
+    # 分两次读不划算——同一请求里两次读有机会落在不同版本上（用户 PATCH 与本活动并发），
+    # 那样「模型换了、工具清单还是旧的」这种不一致要多难查有多难查。
+    # 假模型只用于恢复演练，不读配置表。
+    role = role_for_stage(stage).value
+    overrides = None if use_fake_model else agent_config_overrides()
     outcome = advance_pipeline_stage(
         state,
         stage,
         task["task"],
         # 阶段执行时解析生效配置：PATCH 后新执行立即使用新模型/温度（ADR-013）。
-        # 假模型只用于恢复演练，不读配置表。
-        settings=None if use_fake_model else resolve_agent_settings(role_for_stage(stage).value),
+        settings=None if use_fake_model else resolve_agent_settings(role, overrides=overrides),
+        allowed_tools=None if use_fake_model else resolve_agent_tools(role, overrides=overrides),
         use_fake_model=use_fake_model,
         workflow_id=workflow_id,
         run_id=task.get("agent_run_id"),

@@ -260,6 +260,69 @@ class ToolCaller:
         return record
 
 
+
+class ToolNotAuthorizedError(PermissionError):
+    """调用了未被授权给当前角色的工具（`ToolAllowlistRegistry` 抛出）。"""
+
+
+class ToolAllowlistRegistry:
+    """把一张注册表收窄到一份工具白名单（ADR-035）。
+
+    为什么收在**注册表**这一层，而不是在 `ToolCaller` 上加个过滤参数：工具可见性有两条
+    路径——`list_tools()` 决定「模型看得到什么」，`call()` 决定「真调用时能不能执行」。
+    只在其中一条上过滤，另一条就是旁路：模型在历史消息里带着某个工具名时（多步累积、
+    工作流重放），`call()` 会照旧放行。收在注册表上两条路径同时成立，而且 `ToolCaller`、
+    审计层（`AuditedToolRegistry`）、指标层（`InstrumentedToolRegistry`）都不用改。
+
+    `call()` 对越权名抛异常而不是静默拒绝：`ToolCaller.invoke` 会把任何异常归一化成一条
+    `failed` 的工具调用记录，配上原因「未被授权给这个角色」，用户在执行台看得见
+    「模型试着调了一个它不该有的工具」——这比悄悄返回空结果更值得知道。
+
+    **不覆盖会话级工具**：`with_session_files()` 在调用点包在**本层之外**，
+    所以 `list_session_files` / `read_session_file` 始终可用。理由是 §5.3 的既有取向：
+    会话级工具不进静态目录，因此配置页也刻意不给它们开关——不给假开关，也不让
+    「配了白名单就再也读不了自己上传的附件」变成一个要靠读代码才能发现的坑。
+    """
+
+    def __init__(self, registry: ToolRegistry, allowed: Sequence[str]) -> None:
+        self._registry = registry
+        self._allowed = frozenset(allowed)
+
+    def list_tools(self) -> tuple[ToolSpec, ...]:
+        return tuple(
+            spec for spec in self._registry.list_tools() if spec.name in self._allowed
+        )
+
+    def call(self, request: ToolCall) -> Any:
+        if request.tool_name not in self._allowed:
+            raise ToolNotAuthorizedError(
+                f"工具 {request.tool_name} 未被授权给这个角色"
+            )
+        return self._registry.call(request)
+
+    def close(self) -> None:
+        closer = getattr(self._registry, "close", None)
+        if callable(closer):
+            closer()
+
+
+def restricted_registry(
+    registry: ToolRegistry | None,
+    allowed: Sequence[str] | None,
+) -> ToolRegistry | None:
+    """按白名单收窄注册表；`allowed` 为 `None` 时**原样返回**。
+
+    `None` 与空列表是两件不同的事，不能混：
+    - `None` = 该角色未配置工具白名单 → 不加限制（与加这个字段之前的行为逐字一致）；
+    - `[]` = 显式取消全部授权 → 该角色一个工具也用不了（会话级工具除外，见上）。
+
+    把这两个读成同一件事，会让「显式收紧」被静默放大成「回到全量」。
+    """
+
+    if registry is None or allowed is None:
+        return registry
+    return ToolAllowlistRegistry(registry, allowed)
+
 _REGISTRY_FACTORY: Callable[[], ToolRegistry | None] | None = None
 
 

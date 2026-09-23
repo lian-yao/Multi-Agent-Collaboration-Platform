@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Settings2, Sliders, Route, Plug, ShieldCheck, Brain } from "lucide-react";
+import { Settings2, Sliders, Route, Boxes, Plug, ShieldCheck, Brain } from "lucide-react";
 import { api } from "../api/client";
 import { PageTabs, type PageTab } from "../components/PageTabs";
 import type { ProviderPresetCatalog } from "../types/api";
@@ -7,18 +7,20 @@ import { describeError } from "./shared";
 import { ProviderPanel } from "./ProviderPanel";
 import { DefaultRoutePanel } from "./DefaultRoutePanel";
 import { McpPanel } from "./McpPanel";
+import { InternalToolsPanel } from "./InternalToolsPanel";
 import { SandboxPanel } from "./SandboxPanel";
 import { EgressPanel } from "./EgressPanel";
 import { MemoryPanel } from "./MemoryPanel";
 import "./config.css";
 
-export type ConfigTabId = "providers" | "defaults" | "mcp" | "memory" | "sandbox";
+export type ConfigTabId = "providers" | "defaults" | "tools" | "mcp" | "memory" | "sandbox";
 
 /**
- * 四个分区的职责边界（ADR-017 / ADR-018 / doc/api.md §7）：
+ * 六个分区的职责边界（ADR-017 / ADR-018 / doc/api.md §7）：
  * 同一份数据只在一个分区里写，别的页面只读。
  * - providers：多端点登记、批量引入模型、逐条特化调参
  * - defaults：兜底模型与 legacy 五列
+ * - tools：平台内置工具目录（§5.3）——进入即读取，含输入 Schema
  * - mcp：多 Server 与紧凑工具卡片
  * - memory：长期记忆（§5.22、ADR-036）——**只列与删**，写入回到对话里的 `记住：…`
  * - sandbox：执行边界 + 出网策略（§5.15 / §5.21），**只读**（都是部署期安全边界）
@@ -34,6 +36,12 @@ export const CONFIG_TABS: readonly PageTab<ConfigTabId>[] = [
     title: "多端点登记、批量引入模型、逐条特化调参",
   },
   { id: "defaults", label: "默认路由", icon: Route, title: "兜底模型与 legacy 五列" },
+  {
+    id: "tools",
+    label: "内部工具",
+    icon: Boxes,
+    title: "平台内置工具目录（§5.3）：进入即读取，含输入 Schema",
+  },
   { id: "mcp", label: "MCP 工具", icon: Plug, title: "多 Server 与紧凑工具卡片" },
   {
     id: "memory",
@@ -105,6 +113,7 @@ export function ConfigPage() {
       <div className="cfg-tab-panel" role="tabpanel" id={`cfg-panel-${tab}`}>
         {tab === "providers" && <ProviderPanel catalog={catalog} />}
         {tab === "defaults" && <DefaultRoutePanel />}
+        {tab === "tools" && <InternalToolsPanel />}
         {tab === "mcp" && <McpPanel />}
         {tab === "memory" && <MemoryPanel />}
         {tab === "sandbox" && (

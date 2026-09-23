@@ -205,13 +205,20 @@
 | --- | --- | --- |
 | `content` | 否 | 用户任务。**允许为空**，但此时必须有 `attachment_ids`（见下） |
 | `attachment_ids` | 否 | 先经 `POST /api/v1/attachments` 登记拿到的附件 id，最多 4 个（§5.16） |
-| `orchestration_mode` | 否 | 单次执行的编排模式覆盖，`static` / `dynamic`；省略时用服务端 `AGENT_ORCHESTRATION_MODE`（默认 `static`）。见 §3.1 与 `doc/orchestration.md` |
+| `orchestration_mode` | 否 | 单次执行的**计划来源**覆盖，`static` / `dynamic`；省略时用服务端 `AGENT_ORCHESTRATION_MODE`（默认 `static`）。**这不是「两种并列的编排模式」**：`dynamic` 的计划由规划节点产出，`static` 的计划恒为那条固定链（收集 → 分析 → 报告），即动态路径的退化情形。见 §3.1、`doc/orchestration.md` 与 ADR-037 |
 
 `content` 与 `attachment_ids` **不能同时为空**（由模型校验器拦成 `422`）。放开 `content` 的
 `min_length=1` 是为了支持「只发一张截图、不打字」这种最常见的多模态用法（ADR-021）。
 
 非法 `orchestration_mode`（如 `"autonomous"`）由 `Literal` 校验拦成 `422`，**不静默退回 `static`**——
 「选了动态却悄悄变成固定流程」比直接报错更难排查。
+
+**口径（ADR-037）**：本字段选的是「这次执行的计划从哪来」，不是「用哪种编排架构」。执行侧目前
+仍是两条 Dapr workflow（`static` → `agent_pipeline`，`dynamic` → `agent_dynamic`），但对外只暴露
+一个概念：`dynamic` 的计划由规划节点产出，`static` 的计划恒为固定链。所以「固定链」不再被当作
+与自动编排对等的第二种策略——前端入口是单按钮 + 浮层，固定链排在「兜底」分组。
+把两条链路彻底合并需要先补齐动态侧的逐阶段轨迹读侧（否则静态运行的详情会变空），
+属未落地部分，见 ADR-037「决策 4」。
 
 **执行期间 Agent 拿到的工具比 §5.3 的静态目录多两个**：`list_session_files` / `read_session_file`
 （ADR-025）按本次会话临时绑定，让 Agent 能按需读回这条会话里的附件正文。它们**不在**
@@ -347,6 +354,10 @@ item 字段为 name、description、input_schema（JSON 对象）、status。数
 
 API 进程默认按 `MCP_TRANSPORT` 注入该目录（`InspectionStore(tool_catalog=tool_catalog)`）。注册表构建或读取失败返回 `503 DATA_SOURCE_UNAVAILABLE`，不吞掉错误伪装成空目录；只有显式构造为「未注入目录」的读取器才返回 availability=not_integrated。该接口只列目录，不探测每个工具的运行期可用性（例如沙箱后端是否可连）。
 
+**目录 ≠ 某个角色能用什么**：本接口返回的是平台全部工具，单个角色实际能调用哪些由
+「角色工具白名单」收窄（§5.7 的 `tool_names`，ADR-035）。也就是说「配置页看到的工具」与
+「某个 Agent 执行时拿到的工具」是两件事，不要拿目录当授权。
+
 **用户登记的 MCP Server 的工具现在也会出现在这里**（ADR-026，2026-09-19 起）。`RegistryServersToolRegistry`（`app/mcp/registry.py`）会把启用 Server 的**已发现**工具合成进来，所以目录的实际内容是「内置工具 + 已发现的登记工具」。两点需要注意：
 
 - **没「发现」过的 Server 不出现在目录里**：目录取自已发现的缓存（与 §5.11 同一条语义——「目录是配置的函数」），用户要在配置页点一次「发现」。读取发生在**每次执行**的工具枚举上，因此这条路径上不做任何 IO（进程内快照，配置变更时由配置面刷新）。
@@ -406,8 +417,12 @@ Token 归到具体 Agent 的标签；`agent_id` 在采样里目前不存在。�
 
 角色目录来自 `agent_registry` 表（ADR-017 的 `chatModels` 同构扩展）：三个内置流水线角色
 （collector / analyst / reporter）作为 `builtin=true` 的种子数据，**不可删除**；自定义角色
-（`builtin=false`）可自由增删启停。自定义角色暂不接入固定三步流水线，仅作为可绑定模型的
-配置单元存在（意图路由属后续架构演进）。
+（`builtin=false`）可自由增删启停。
+
+**ADR-036 把内置三角色降级为普通种子**：`builtin` 只意味着「不可删除」，其余一切可改。
+动态编排（§5.22）的 planner 候选集由目录里 `enabled=true` 的条目驱动，不再写死三角色；
+每个角色的 `system_prompt` 是主 Agent 调度它时喂给它的人设，执行期按「目录 > 内置定义 >
+通用兜底」解析。停用只作用于动态调度：固定三步流水线的角色是拓扑的一部分，不受影响。
 
 `GET /api/v1/config/agents` 返回全部角色的生效配置与可选模型清单，供「Agent 团队」页
 （`frontend/src/config/AgentPanel.tsx`）一次加载；`PATCH` 只提交被改动的字段：
@@ -431,7 +446,10 @@ Token 归到具体 Agent 的标签；`agent_id` 在采样里目前不存在。�
       "override_keys": ["temperature"],
       "builtin": true,
       "description": "收集、检索并整理任务主题相关的事实与要点。",
-      "enabled": true
+      "enabled": true,
+      "tool_names": null,
+      "system_prompt": null,
+      "icon": null
     }
   ],
   "available_models": [
@@ -443,6 +461,24 @@ Token 归到具体 Agent 的标签；`agent_id` 在采样里目前不存在。�
 `override_keys` 列出该角色**当前被覆盖**的字段名（未列出的字段来自环境配置或默认路由），
 供前端区分「显式覆盖」与「回退值」。`available_models` 只含 `enabled=true` 的模型条目，
 按 `provider_id`、`model` 升序。`builtin` / `description` / `enabled` 来自角色目录。
+
+`tool_names` 是该角色**被授权的工具名**（ADR-035）。它与上面六个字段有一处关键差别：
+那六个是「可逐字段回退的**值**」，`tool_names` 是一条「**授权边界**」。三种状态必须分开读：
+
+| 值 | 含义 | 执行期行为 |
+| --- | --- | --- |
+| `null` | 未配置 | 该角色可用**工具目录里的全部工具**（与加这个字段之前逐字一致） |
+| `[]` | 显式取消全部授权 | 该角色一个工具也用不了（会话级附件工具除外，见 §5.3） |
+| 非空数组 | 白名单 | 只放行这些工具；白名单外的工具模型看不到、也调不动 |
+
+`null` 与「`PATCH` 里省略该字段」都是「未配置」，**只有 `[]` 才是「取消全部」**。
+所以「恢复不受限」必须显式传 `null`，不能指望传空数组。配置了白名单时，
+`override_keys` 里会出现 `tool_names`。
+
+会话级附件工具（`list_session_files` / `read_session_file`）**不在本字段管辖内**：它们不进
+工具目录（§5.3），因此不会出现在这份名单里，也不受它收窄（否则会出现一个「关不掉、又只在
+有附件的会话里存在」的开关）。收窄发生在注册表层（`app/orchestration/tools.py`），不是在
+调用点上加过滤——后者对重放与历史消息是旁路。
 
 `POST /api/v1/config/agents` 登记自定义角色（请求体）：
 
@@ -472,7 +508,8 @@ Token 归到具体 Agent 的标签；`agent_id` 在采样里目前不存在。�
   "temperature": 0.3,
   "top_p": 0.9,
   "max_output_tokens": 2048,
-  "reasoning_type": "openai"
+  "reasoning_type": "openai",
+  "tool_names": ["web_search", "knowledge_search"]
 }
 ```
 
@@ -483,13 +520,49 @@ Token 归到具体 Agent 的标签；`agent_id` 在采样里目前不存在。�
 - `top_p`：`0.0`–`1.0`（闭区间）。
 - `max_output_tokens`：整数且 ≥ 1。
 - `reasoning_type`：`none` / `openai` / `gemini` / `anthropic`。
+- `tool_names`：字符串数组；单个名字 1–120 字符，去重保序后最多 60 项。**不校验名字是否
+  存在于当前工具目录**：MCP Server 可以临时离线，若按目录校验，用户保存一份合法白名单会
+  因它依赖的服务此刻不可达而失败。名字在目录里找不到时原样保留（界面上单独成组提示），
+  要删只能靠显式提交一份不含它的名单。
 - `provider` 不在本接口范围：它涉及 base_url 与凭据，由 §5.8 / §5.9 管理；
   `llm_model_id` 已经间接决定 Provider。
 
 权限边界：**本接口不鉴权**（ADR-015，2026-09-15 起）：任何能访问该 API 的调用方都可以写入。部署时必须把 API 限制在本机或可信内网，不要直接暴露到公网（见 `doc/deployment.md`）。
 
+#### 5.7.1 角色目录字段：`PATCH /api/v1/config/agents/{agent_id}/profile`（ADR-036）
+
+修改角色的**目录**字段（名称 / 描述 / 系统提示词 / 图标 / 启停），与上面的模型参数覆盖
+分开两个端点：两组字段写的是两张表（`agent_registry` 对 `agent_configs`），`null` 的后果
+不同——覆盖组清掉一个字段会**回退到下一层配置**，目录组清掉一个字段就是**那一列变空**，
+没有回退链。三态读法与覆盖组一致：字段省略 = 不改动，显式 `null` = 清除。
+
+```json
+{
+  "name": "摘要 Agent",
+  "description": "收集、归纳并输出摘要。",
+  "system_prompt": "你是「摘要 Agent」……",
+  "icon": "summary",
+  "enabled": true
+}
+```
+
+- `name`：1–100 字符，**不能显式传 `null`**（422）——没有名字的角色在画布上是空白节点。
+- `enabled`：布尔，**不能显式传 `null`**（422）。停用后主 Agent 不再自动派给它任务；
+  固定三步流水线不受影响。
+- `description` / `system_prompt`：可空文本，上限 1000 / 8000 字符；传空串等价于清空。
+- `icon`：图标键，`^[a-z][a-z0-9_]*$`、≤32 字符，**只校验形状不查图标集白名单**
+  （图标集在前端 `AgentGlyph`，后端维护枚举会让「加一个图标」变成两处改动）。
+  `null` / 缺省 = 按 `role` 与名称推断。
+- 响应是更新后的完整角色（与 `GET` 同形，含 `system_prompt` / `icon`）。
+- `system_prompt` 修改后**下一次**阶段执行即生效；进行中的执行用的是启动时的快照。
+- 内置角色同样可改；删除仍受 `DELETE` 的 `409 AGENT_BUILTIN` 保护。
+- 不存在的角色返回 `404 AGENT_NOT_FOUND`；域校验失败（空名、超长、图标形状）返回 `422`。
+
+另外，模型参数覆盖端点 `PATCH /api/v1/config/agents/{agent_id}` 的存在性校验已放开到
+角色目录：目录里登记的**自定义角色同样可以绑定模型与调参**（此前只有内置三名可写）。
+
 响应 `200` 返回与 §5.2 同构的 Agent 对象（生效配置，额外含 `provider_name` / `llm_model_id` /
-`top_p` / `max_output_tokens` / `reasoning_type` / `override_keys`）。
+`top_p` / `max_output_tokens` / `reasoning_type` / `override_keys` / `tool_names`）。
 
 错误码：
 
@@ -498,7 +571,7 @@ Token 归到具体 Agent 的标签；`agent_id` 在采样里目前不存在。�
 | 404 | `AGENT_NOT_FOUND` | 角色不存在 |
 | 409 | `VALIDATION_ERROR` | `POST` 时 id 与内置角色冲突或已存在 |
 | 409 | `AGENT_BUILTIN` | `DELETE` 目标是内置流水线角色 |
-| 422 | 框架默认或 `VALIDATION_ERROR` | Pydantic 校验失败（空 body、非法 temperature/top_p、超长 model、空白 model、未知 llm_model_id、未知 reasoning_type、非法 id 格式） |
+| 422 | 框架默认或 `VALIDATION_ERROR` | Pydantic 校验失败（空 body、非法 temperature/top_p、超长 model、空白 model、未知 llm_model_id、未知 reasoning_type、非法 id 格式、`tool_names` 非数组 / 含空名 / 单名超 120 字符 / 超过 60 项） |
 | 503 | `DATA_SOURCE_UNAVAILABLE` | 覆盖值写入失败（写操作必须显式失败，不回退、不静默成功） |
 
 持久化：覆盖值写入 `agent_configs` 表、角色目录写入 `agent_registry` 表
@@ -513,6 +586,10 @@ Token 归到具体 Agent 的标签；`agent_id` 在采样里目前不存在。�
 `AGENT_*` 环境配置 → `provider_configs.default_llm_model_id` 指向的模型条目 →
 `provider_configs` 的 legacy 五列 → 本表的角色覆盖。`llm_model_id` 悬空（指向已删除的条目）
 时按未绑定处理，不报错。
+
+`tool_names` **不参与**这条链：它没有「下一层」可取，未配置就是不限制（见上文三态表）。
+把它并进逐字段回退，会让「未配置」与「上层配了白名单」变成两种结果，而现实里只有
+「这个角色被收窄了没有」这一个问题。
 
 ### 5.8 读取与修改模型 Provider 配置
 
@@ -1222,8 +1299,10 @@ latin-1 编码报错）。
 - `reason` 与「有轨迹」互斥，写的是**为什么没有**：还没轮到 / 正在执行（轨迹在阶段完成后才落盘）/
   阶段已完成但状态已被清理 / 载荷无法解析。四种原因指向四种不同的下一步动作，前端必须原样显示，
   不得改写为「暂无数据」。
-- `mode` 为 `dynamic` 时 `availability=not_integrated`、`items=[]`、`reason` 说明动态链路当前
-  不落盘逐步骤轨迹（ADR-019）；界面同样原样显示这句原因。
+- `mode` 为 `dynamic` 时，`items` 按计划步骤顺序返回（`s1` / `s2` / …），`stage` 即计划步骤 id，
+  `role` 为该步骤分配到的角色；每个步骤的 `input` 是它按 `depends_on` 收到的上游正文
+  （根步骤为 `null`，原始任务就是 `task`）。`availability=available`；仅当编排层从未写入过
+  任何步骤载荷时才降级为 `not_integrated` 并给出 `reason`。
 
 | 状态 | 码 | 情况 |
 | --- | --- | --- |
@@ -1231,10 +1310,12 @@ latin-1 编码报错）。
 | 404 | `WORKFLOW_NOT_FOUND` | Workflow 不存在 |
 | 503 | `DATA_SOURCE_UNAVAILABLE` | 状态存储（Dapr sidecar）读不到 |
 
-**数据来源与边界**：轨迹取自 Dapr State Store 里 `_record_checkpoint` 写入的阶段状态
-（`app/api/stage_trace.py`）。因此 503 与 200+`reason` 必须分开——前者是环境没起来，后者是任务
-还没跑到。模型内部的隐藏推理（reasoning / thinking 块）**不在本接口范围内**：编排层只落盘行动与
-结论，接口不伪造中间过程。该接口**只读**：不写状态存储、不建表，也不触发任何阶段重跑。
+**数据来源与边界**：轨迹取自 Dapr State Store 里编排层写入的阶段状态（`app/api/stage_trace.py`）：
+静态链路写 `agentrun:workflow:{workflow_id}:{stage}`，动态链路写
+`agentrun:workflow:{workflow_id}:dyn:{step_id}`（每步完成后落盘，见 §5.22）。因此 503 与
+200+`reason` 必须分开——前者是环境没起来，后者是任务还没跑到。模型内部的隐藏推理
+（reasoning / thinking 块）**不在本接口范围内**：编排层只落盘行动与结论，接口不伪造中间过程。
+该接口**只读**：不写状态存储、不建表，也不触发任何阶段重跑。
 
 ### 5.18 查询会话的历史工作流（只读）
 
@@ -1599,6 +1680,32 @@ POST /api/v1/approvals/ap-1/decision
 **建立会话时**（构造会话工厂保持零 IO，ADR-026），`discover` 因此返回
 502 `MCP_DISCOVERY_FAILED`，调用期则表现为那次调用失败。
 
+### 5.22 运行期实时进度语义
+
+执行中的一次任务，前端要靠**轮询**拿到「正在发生什么」。本节固定四条契约，前端据此
+渲染「近似流式」的执行活动，而不是等到任务完成才一次性刷新：
+
+- **计划即落盘**。动态链路在规划产出后立即把 `checkpoint.plan`（含每步 `id` / `role` /
+  `depends_on` / `status`）与 `checkpoint.plan_rationale` 写入 `workflow_runs`（首步同时
+  占住 `current_step`，见第三条），并刷新 `updated_at`。前端据此在「分配」环节就渲染出
+  真实的计划步骤与角色，而不是回退到写死的三步常量。
+- **每步完成即推进**。动态链路每执行完一个计划步骤，就更新 `checkpoint.completed_steps`、
+  该步的 `plan[].status` 与 `updated_at`，使轮询能观察到步骤依次变绿；静态链路沿用
+  `_record_checkpoint` 的逐阶段写入。
+- **`current_step` 指「现在轮到谁」**。两条链路都必须维护它，且**都在上一步落盘时就把指针
+  推到下一步**（不是在步骤开跑时才写）：静态由 `_record_checkpoint` 写（`pipeline.py`），
+  动态由 `dynamic_plan_activity` 写首步、`dynamic_progress_activity` 写下一步。
+  终态一律归零（`checkpoint.current_step` 为 `null`）。前端只认**指针相等的那一步**：
+  它默认摊开（ADR-031）、也只有它承接下面第四条（工具调用即落库）的实时工具调用——**指针
+  缺席时这两条都不成立**，这正是动态链路此前「实时工具调用一直不显示、当前步也不默认摊开」
+  的根因。
+- **工具调用即落库**。每次工具调用完成后立即写入 `tool_calls` 表（带 `workflow_run_id`）。
+  运行中前端轮询 `GET /workflows/{id}/tool-calls`（§5.4）即可让工具调用**逐条长出**，这是
+  当前唯一在步骤完成前就有数据的实时来源；长出来的位置由上面那条 `current_step` 决定。
+
+> 本节描述的是**轮询粒度**的实时性（秒级）。逐 token 打字机式流式（SSE + 模型 `stream=True`）
+> 属独立专项，不在此契约内，见 ADR 的演进方向。
+
 ## 6. 规划接口（当前未实现）
 
 下列接口已列入设计方向，但当前 FastAPI 不提供路由，前端不得直接调用：
@@ -1780,19 +1887,34 @@ POST /api/v1/agents/{agent_id}/run
        「正在逐 token 接收」；真要流式得先在后端开只读事件流端点。
        只对**本次会话新到达**的消息播放（历史会话整屏重放会让人以为任务在重新执行），
        非浏览器环境与 `prefers-reduced-motion: reduce` 下降级为立即全文。
-     - 执行活动卡片摆在**提问之后、答复之前**（`reportIndex` 定位）：过程要出现在结果的
+     - 执行过程摆在**提问之后、答复之前**（`reportIndex` 定位）：过程要出现在结果的
        上一个位置；排到整段对话末尾会看起来像另一个任务。
+     - **形态是一行可展开的灰字，不是卡片**（ADR-033）：跑完写
+       「已执行 N 步 · T 次工具调用 · 用时 X」（静态链路写「N 个阶段」）、运行中写
+       「{角色名} 正在执行 · …」；点开才逐步铺开，每步仍可单独点开看工具入参与产出。
+       **跑完默认收起、运行中默认摊开**。不画边框与底色——外壳会把过程从消息里割出来
+       （用户 2026-09-22 反馈）。
+     - **「用时」是 `created_at → (completed_at ?? updated_at)` 算出来的**，运行中从
+       `created_at` 起本地走秒；取不到任一端就**不显示这一项**，不摆估出来的数字。
+     - **措辞不叫「思考」**：落盘的只有 ReAct 链里的行动与结论，模型隐藏推理没有落盘
+       （§5.17）。形态照网页 AI、措辞不照搬，否则会被读成模型推理过程。
+     - **「任务分配」不在这里重复**：协作画布的 planner 节点已承载
+       `checkpoint.plan_rationale` 与分配顺序（ADR-032）。
+     - **计划未落盘时那一行写「正在规划任务分配」，且不可展开**：动态编排在规划节点产出计划
+       之前，连几步、派给谁都不知道，没有可铺开的步骤，此时那一行不是按钮（ADR-034）。
      - 逐步轨迹按 §5.17 如实呈现，三段小标题与执行台弹窗**逐字一致**
        （**分配到的任务 → 执行轨迹 → 阶段产出**）；同一份字段在两处用两套词会被读成
-       两件事，冒烟里同时断言两条渲染路径。**不伪造思维链**——模型内部的隐藏推理没有落盘，
-       卡片只呈现落盘过的事实：**不写口径脚注，也不复述任务原文**（这两条脚注已按评审删除；
-       口径说明由执行台弹窗承载，见本条 2）。轨迹缺席时转述服务端给的具体原因，不留白。
+       两件事，冒烟里同时断言两条渲染路径。轨迹缺席时转述服务端给的具体原因，不留白。
+     - **不写口径脚注，也不复述任务原文**（这两条脚注已按评审删除；口径说明由执行台弹窗
+       承载，见本条 2）。
      - 与弹窗的唯一差别：**根步骤不铺输入原文**（用户的原始任务就在上方那条用户消息里）。
-     - 正在跑的那一步默认摊开、跑完的收成一行；摘要行必须仍写清
-       「谁 / 什么状态 / 动了几次工具」，否则收起就是信息丢失。
+     - 展开后每步那一行必须写清「谁 / 什么阶段 / 动了几次工具 / 什么状态」，否则收起就是
+       信息丢失。说明性文字（轨迹缺席原因等）摆在折叠之外——它们是「这次为什么看不到过程」
+       的答案，收起来就等于不说。
   2. **Agent 执行台**（`App.tsx` 内联，卡片类名 `dock-node cli-node`）——按 Workflow 的
      `checkpoint.completed_steps` 与 `current_step` 展示阶段状态；不得在无 Workflow 时预填
-     三张 Agent 卡片。卡片点击打开**单个 Agent 的执行轨迹弹窗**
+     三张 Agent 卡片；动态编排在计划落盘前（`isPlanning`）同样一张都不预填，改报「正在规划」
+     （ADR-034）。卡片点击打开**单个 Agent 的执行轨迹弹窗**
      （`frontend/src/workspace/AgentStageModal.tsx`，数据走 §5.17），不改变右侧侧栏内容——
      侧栏是任务级视图，不跟随单卡点击而变。
      弹窗回答的是「它收到了什么、调了什么、产出了什么」：分配到的任务（上游正文）、按序的工具
@@ -1804,6 +1926,12 @@ POST /api/v1/agents/{agent_id}/run
      （`frontend/src/workspace/TaskUsage.tsx`）。协作画布按**波次**表达：波内并行、波间串行；
      当前后端是固定串行流水线，每波一个节点，编排层支持 fan-out 后只需把同波阶段放进
      同一个数组，同波多节点会自动圈进「并行协作区」框。用量按采样原值展示、不累加，口径同 §5.5。
+     **计划没落盘之前一个节点都不画**：动态编排的任务在规划节点产出计划前，`checkpoint` 还是
+     `null`，服务端此刻**没有任何事实**能说明这次要跑几步、派给谁。此时不拿写死的固定三步顶上
+     （那样等于先给一版错链路、等计划落盘再换掉，读图的人会把第一版当成真链路），而是报
+     「正在规划」。判据 = 提交时声明的 `orchestration_mode`（§4.4）为 `dynamic`（规划窗口内只有
+     提交方知道这件事）+ `checkpoint` 为空 + 状态仍在 `pending`/`running`，三条齐了才算；静态链路
+     不受影响——它的固定三步就是事实，照画不误（ADR-034）。
      **节点是圆形的 Agent 节点，回答的是「这个 Agent 是用什么跑的」**：圆面一个角色图标，
      圆下方两行写名字与 `模型 · Token`（按角色归集），完整参数表在悬停面板里。节点**不是
      执行轨迹的入口**——点了不跳 §5.17 的弹窗：执行台卡片已经承担那个入口，两块视图都能点进

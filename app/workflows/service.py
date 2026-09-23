@@ -9,6 +9,7 @@ from app.workflows.dynamic import (
     DYNAMIC_WORKFLOW_NAME,
     agent_dynamic_workflow,
     dynamic_plan_activity,
+    dynamic_progress_activity,
     dynamic_step_activity,
     dynamic_subtask_workflow,
 )
@@ -74,6 +75,7 @@ class WorkflowService:
         self._runtime.register_activity(rewrite_activity)
         self._runtime.register_activity(dynamic_plan_activity)
         self._runtime.register_activity(dynamic_step_activity)
+        self._runtime.register_activity(dynamic_progress_activity)
         self._registered = True
 
     def start(self) -> None:

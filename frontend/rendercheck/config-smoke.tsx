@@ -8,10 +8,15 @@
  * 运行（**必须在 `frontend/` 下执行**，版式断言会按 cwd 读 `src/**.css`）：
  *
  * ```bash
- * node_modules/.bin/esbuild rendercheck/config-smoke.tsx --bundle --platform=node \
- *   --format=cjs --jsx=automatic --loader:.css=empty --outfile="$TEMP/config-smoke.cjs" \
- *   && node "$TEMP/config-smoke.cjs"
+ * node node_modules/esbuild/bin/esbuild rendercheck/config-smoke.tsx --bundle \
+ *   --platform=node --format=esm --jsx=automatic --loader:.css=empty \
+ *   --packages=external --outfile=_smoke_config.mjs && node _smoke_config.mjs
  * ```
+ *
+ * 跑法按 2026-09-22 实测改过：`--format=cjs` 会让 react-dom 的服务端渲染抛
+ * `Element type is invalid`（必须 `esm`），而 `node_modules/.bin/` 在本仓库不存在、
+ * `$TEMP` 在 Git Bash 里不展开 → 直接调 `node node_modules/esbuild/bin/esbuild`，
+ * 产物写显式相对路径，用完即删。
  *
  * 退出码 0 = 全通过。**覆盖边界**：只跑不依赖 effects 的渲染路径（组件树挂载、JSX、
  * hooks 顺序、空态、以及用显式 props 驱动的模型区块），外加四组读文件的静态断言
@@ -28,8 +33,17 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { AgentPanel, AgentRoleCard, AgentTuningPanel } from "../src/config/AgentPanel";
 import { RuntimeConfig } from "../src/config/ConfigPage";
 import { ModelSection } from "../src/config/ModelSection";
-import { RuntimeSampling } from "../src/records/Inspection";
+import {
+  MetricSeries,
+  RuntimeSampling,
+  groupMetrics,
+} from "../src/records/Inspection";
 import { RecordsPage } from "../src/records/RecordsPage";
+import {
+  AgentToolsPanel,
+  buildToolCatalogGroups,
+  orphanToolNames,
+} from "../src/config/AgentTools";
 import { PageTabs } from "../src/components/PageTabs";
 import { InlineConfirm, InlineConfirmBar } from "../src/components/InlineConfirm";
 import { ProviderMark } from "../src/config/providerIcons";
@@ -41,8 +55,14 @@ import { McpImportModal } from "../src/config/McpImportModal";
 import { SandboxBoundary } from "../src/config/SandboxPanel";
 import { EgressBoundary } from "../src/config/EgressPanel";
 import { MemoryBoundary } from "../src/config/MemoryPanel";
-import type { Agent, ProviderRegistryDetail, SandboxStatus } from "../src/types/api";
-import type { LongTermMemoryEntry } from "../src/types/api";
+import type {
+  Agent,
+  LongTermMemoryEntry,
+  Metric,
+  ProviderRegistryDetail,
+  SandboxStatus,
+  Workflow,
+} from "../src/types/api";
 
 (globalThis as Record<string, unknown>).fetch = async () => ({
   ok: true,
@@ -64,8 +84,8 @@ try {
 }
 
 check(
-  "渲染出 5 个分区入口（含「记忆」）",
-  ["Provider", "默认路由", "MCP 工具", "记忆", "执行边界"].every((label) =>
+  "渲染出 6 个分区入口",
+  ["Provider", "默认路由", "内部工具", "MCP 工具", "记忆", "执行边界"].every((label) =>
     page.includes(label),
   ),
   page.slice(0, 300),
@@ -84,8 +104,9 @@ check(
   "配置页与任务记录页必须共用 components/PageTabs",
 );
 check(
-  "副路由带 aria-selected 与 tab 角色（工作区搬走后 4 个 + 记忆 = 5 个分区）",
-  (page.match(/role="tab"/g) ?? []).length === 5 && page.includes('aria-selected="true"'),
+  "副路由带 aria-selected 与 tab 角色（工作区入口已搬到工作台；ADR-036 的内部工具与长期记忆各占一个分区）",
+  // 六个分区：Provider / 默认路由 / 内部工具 / MCP 工具 / 记忆 / 执行边界。
+  (page.match(/role="tab"/g) ?? []).length === 6 && page.includes('aria-selected="true"'),
   String((page.match(/role="tab"/g) ?? []).length),
 );
 check(
@@ -124,6 +145,8 @@ const roleAgent: Agent = {
   builtin: true,
   description: null,
   enabled: true,
+  // 不配白名单 = 不受限，是默认态；「按名单」那条路另有断言。
+  tool_names: null,
 };
 
 let card = "";
@@ -208,6 +231,28 @@ check(
       renderToStaticMarkup(<AgentGlyph role="reporter" size={17} />),
 );
 
+/* ---- 工具目录夹具：面板与三态断言共用，必须声明在使用点之前 ---- */
+
+const toolGroups = buildToolCatalogGroups(
+  [
+    { name: "knowledge_search", description: "检索知识库" },
+    { name: "code_exec", description: "在沙箱里执行代码" },
+    { name: "web_search", description: "联网检索" },
+  ],
+  {
+    items: [
+      {
+        name: "web_search",
+        description: "联网检索",
+        tool_enabled: false,
+        enabled: true,
+        server_id: "srv-1",
+      },
+    ],
+    servers: [{ id: "srv-1", name: "检索服务" }],
+  },
+);
+
 /* ---- 角色配置面板（props 驱动）：表单在这里 ---- */
 
 let tuning = "";
@@ -219,6 +264,9 @@ try {
         { id: "main:gpt-5.5", provider_id: "main", model: "gpt-5.5", name: "GPT 5.5", enabled: true },
       ]}
       active
+      toolGroups={toolGroups}
+      toolsError=""
+      onReloadTools={() => undefined}
       onSaved={async () => undefined}
       onClose={() => undefined}
     />,
@@ -237,6 +285,143 @@ check(
 );
 check("面板标出已绑定模型与已覆盖字段", tuning.includes("main · GPT 5.5") && tuning.includes("cfg-flag on"));
 check("面板有保存与清除入口", tuning.includes("保存覆盖") && tuning.includes("清除全部覆盖"));
+check("角色面板带出工具授权分区与白名单标记", tuning.includes("工具授权") && tuning.includes("工具白名单"));
+
+/* ---- 弹窗副路由真的分区 + 图标改由头像浮层承担（2026-09-23 用户反馈） ---- */
+
+const tagOf = (pattern: RegExp) => (pattern.exec(tuning) ?? [""])[0];
+const profileTag = tagOf(/<section[^>]*aria-label="角色设定"[^>]*>/);
+const toolsTag = tagOf(/<section[^>]*aria-label="角色工具授权"[^>]*>/);
+const tuningTag = tagOf(/<form[^>]*id="agent-tuning-form"[^>]*>/);
+check(
+  "弹窗副路由真的分区：只有当前分区不带 hidden",
+  profileTag.length > 0 &&
+    tuningTag.length > 0 &&
+    toolsTag.length > 0 &&
+    !/\shidden/.test(profileTag) &&
+    /\shidden/.test(tuningTag) &&
+    /\shidden/.test(toolsTag),
+  `设定=${profileTag} / 调度=${tuningTag} / 工具=${toolsTag}` +
+    "。缺 hidden 就是 .cfg-form-grid 的 display:grid 压过了 UA 的 [hidden]，两个分区会一直同时可见",
+);
+check(
+  "图标选择器不再常驻「设定」，改由头部头像的浮层承担",
+  tuning.includes("cfg-agent-avatar-slot") &&
+    tuning.includes('aria-expanded="false"') &&
+    !tuning.includes("cfg-agent-icons") &&
+    !tuning.includes("cfg-agent-icon-popover"),
+  "设定分区里不该再有一整行图标格；没点头像时浮层不该出现在 DOM 里",
+);
+
+/* ---- 角色工具授权（ADR-035）：三态语义与目录分组 ---- */
+
+check(
+  "工具目录按来源分组，MCP 工具从内置里摘出去",
+  toolGroups.length === 2 &&
+    toolGroups[0].id === "builtin" &&
+    toolGroups[0].tools.length === 2 &&
+    toolGroups[1].label === "MCP · 检索服务",
+  toolGroups.map((group) => `${group.label}:${group.tools.length}`).join(" / "),
+);
+check(
+  "全局停用的工具说明具体原因，不换成「不可用」三个字",
+  toolGroups[1].tools[0].available === false &&
+    toolGroups[1].tools[0].unavailableReason ===
+      "已在 MCP 配置里停用该工具（tool_options.disabled）",
+  String(toolGroups[1].tools[0].unavailableReason),
+);
+check(
+  "名单里目录没有的名字才是孤儿",
+  orphanToolNames(["code_exec", "gone_tool"], toolGroups).join(",") === "gone_tool",
+);
+
+const toolsPanel = (restricted: boolean, selected: string[], groupsError = "") =>
+  renderToStaticMarkup(
+    <AgentToolsPanel
+      groups={toolGroups}
+      groupsError={groupsError}
+      restricted={restricted}
+      selected={selected}
+      onToggle={() => undefined}
+      onRestrictedChange={() => undefined}
+      onSelectAll={() => undefined}
+      onSelectNone={() => undefined}
+      onReload={() => undefined}
+    />,
+  );
+const inputsTotal = (html: string) => (html.match(/<input/g) ?? []).length;
+const inputsLocked = (html: string) => (html.match(/<input[^>]*disabled/g) ?? []).length;
+
+const unrestrictedTools = toolsPanel(false, []);
+check(
+  "不受限态：整份清单照画，但复选框全部只读",
+  unrestrictedTools.includes("当前不受限") &&
+    unrestrictedTools.includes("3 / 3 个生效") &&
+    inputsTotal(unrestrictedTools) === 3 &&
+    inputsLocked(unrestrictedTools) === 3,
+  `${inputsLocked(unrestrictedTools)}/${inputsTotal(unrestrictedTools)}`,
+);
+
+const scopedTools = toolsPanel(true, ["code_exec"]);
+check(
+  "受限态：只放行勾选项，另说清名单是快照",
+  scopedTools.includes("1 / 3 个生效") && scopedTools.includes("名单是快照"),
+  scopedTools.slice(0, 200),
+);
+check(
+  "受限态：只有「全局停用且未勾选」的项锁住，其余可编辑",
+  inputsTotal(scopedTools) === 3 && inputsLocked(scopedTools) === 1,
+  `${inputsLocked(scopedTools)}/${inputsTotal(scopedTools)}`,
+);
+
+const emptyTools = toolsPanel(true, []);
+check(
+  "空名单是危险态，明说保存后没有工具可用",
+  emptyTools.includes("0 / 3 个生效") && emptyTools.includes("名单是空的"),
+  emptyTools.slice(0, 200),
+);
+const orphanTools = toolsPanel(true, ["gone_tool"]);
+check(
+  "孤儿名单单独成组，并说清保存时原样保留",
+  orphanTools.includes("名单里有、目录里没有") && orphanTools.includes("原样保留"),
+  orphanTools.slice(0, 200),
+);
+const brokenTools = toolsPanel(true, [], "工具目录读取失败。");
+check(
+  "目录读不到时禁用模式开关并给出重试入口",
+  brokenTools.includes("重新读取工具目录") &&
+    (brokenTools.match(/<button[^>]*disabled/g) ?? []).length === 1,
+  brokenTools.slice(0, 260),
+);
+
+const legacyAgent = { ...roleAgent };
+delete (legacyAgent as { tool_names?: unknown }).tool_names;
+check(
+  "tool_names 缺失（旧响应 / 预览种子）按「不受限」渲染，不是渲染期报错",
+  renderToStaticMarkup(
+    <AgentRoleCard agent={legacyAgent} active={false} onOpen={() => undefined} />,
+  ).includes("工具不受限"),
+  "缺字段时应当等价于未配置",
+);
+check(
+  "角色方块标出工具授权状态",
+  card.includes("工具不受限") &&
+    renderToStaticMarkup(
+      <AgentRoleCard
+        agent={{ ...roleAgent, tool_names: ["code_exec"] }}
+        active={false}
+        onOpen={() => undefined}
+      />,
+    ).includes("工具 1 个") &&
+    renderToStaticMarkup(
+      <AgentRoleCard
+        agent={{ ...roleAgent, tool_names: [] }}
+        active={false}
+        onOpen={() => undefined}
+      />,
+    ).includes("工具 0 个"),
+  card.slice(0, 200),
+);
 
 let historyPage = "";
 try {
@@ -278,6 +463,112 @@ check(
   records.includes('class="ui-tabs"') && records.includes('role="tablist"') && records.includes('role="tab"'),
 );
 check("运行记录标题与分区释义就位", records.includes("RUN RECORDS") && records.includes("当前任务的整体执行与终态"));
+
+/* ---- 运行记录：就地展开日志，失败原因在折叠区之外 ---- */
+
+const failedWorkflow: Workflow = {
+  id: "wf-1234567890",
+  session_id: "s-1",
+  agent_run_id: null,
+  status: "failed",
+  current_step: "analyst",
+  checkpoint: {
+    status: "failed",
+    current_step: "analyst",
+    completed_steps: ["collector"],
+    mode: "static",
+  },
+  error: "阶段 analyst 执行失败：Provider 返回 401（凭据无效）",
+  created_at: "2026-09-22T10:00:00Z",
+  updated_at: "2026-09-22T10:02:00Z",
+  completed_at: "2026-09-22T10:02:00Z",
+};
+
+let failedRun = "";
+try {
+  failedRun = renderToStaticMarkup(
+    <RecordsPage
+      tab="runs"
+      onTabChange={() => undefined}
+      workflow={failedWorkflow}
+      messageCount={3}
+      currentTaskTitle="分析这份财报"
+      sessionId="s-1"
+      onOpenRun={() => undefined}
+      onOpenSession={() => undefined}
+      onDeleteSession={async () => undefined}
+    />,
+  );
+} catch (cause) {
+  check("失败态运行记录可渲染", false, cause instanceof Error ? cause.message : String(cause));
+}
+check(
+  "运行记录就地展开，不再把整卡做成跳转入口",
+  failedRun.includes("展开阶段日志与失败原因") && failedRun.includes('aria-expanded="false"'),
+  failedRun.slice(0, 240),
+);
+check(
+  "失败原因不等展开就先给出来",
+  failedRun.includes("失败原因") && failedRun.includes("Provider 返回 401（凭据无效）"),
+  failedRun.slice(0, 400),
+);
+check(
+  "未展开时不请求也不渲染阶段日志",
+  !failedRun.includes("阶段日志") || !failedRun.includes("读取阶段日志"),
+  failedRun.slice(0, 240),
+);
+
+/* ---- 指标采样：按「指标名 + 标签组」归集成序列 ---- */
+
+const metricFixtures: Metric[] = [
+  { id: 1, metric_name: "stage_duration_ms", value: 120, labels: { stage: "collector" }, recorded_at: "2026-09-22T10:00:01Z" },
+  { id: 2, metric_name: "stage_duration_ms", value: 200, labels: { stage: "analyst" }, recorded_at: "2026-09-22T10:00:02Z" },
+  { id: 3, metric_name: "stage_duration_ms", value: 180, labels: { stage: "collector" }, recorded_at: "2026-09-22T10:00:03Z" },
+  { id: 4, metric_name: "input_tokens", value: 900, labels: {}, recorded_at: "2026-09-22T10:00:04Z" },
+];
+const seriesGroups = groupMetrics(metricFixtures);
+check(
+  "同指标不同标签分成两条序列，不混成一条",
+  seriesGroups.length === 3 &&
+    seriesGroups.filter((group) => group.metric_name === "stage_duration_ms").length === 2,
+  seriesGroups.map((group) => group.key).join(" | "),
+);
+const collectorSeries = seriesGroups.find((group) => group.labels.stage === "collector");
+check(
+  "同序列按时间升序排，趋势才读得出来",
+  collectorSeries?.samples.map((sample) => sample.value).join(",") === "120,180",
+  collectorSeries?.samples.map((sample) => `${sample.value}@${sample.recorded_at}`).join(" / "),
+);
+check(
+  "序列之间按最近一次采样倒序",
+  seriesGroups[0].metric_name === "input_tokens",
+  seriesGroups[0].metric_name,
+);
+const seriesHtml = collectorSeries ? renderToStaticMarkup(<MetricSeries group={collectorSeries} />) : "";
+check(
+  "指标序列行画出趋势、统计与单位",
+  seriesHtml.includes("polyline") &&
+    seriesHtml.includes("最小") &&
+    seriesHtml.includes("均值") &&
+    seriesHtml.includes("2 次采样") &&
+    seriesHtml.includes("耗时"),
+  seriesHtml.slice(0, 260),
+);
+check(
+  "逐次原值仍可展开，归集没有丢掉原始数据",
+  seriesHtml.includes("逐次原值（2 条）"),
+  seriesHtml.slice(0, 260),
+);
+const singleSample = renderToStaticMarkup(
+  <MetricSeries
+    group={{ key: "k", metric_name: "input_tokens", labels: {}, samples: [metricFixtures[3]] }}
+  />,
+);
+check(
+  "只有一次采样时说明画不出趋势，而不是画一条假线",
+  singleSample.includes("仅 1 次采样") && !singleSample.includes("polyline"),
+  singleSample.slice(0, 200),
+);
 check(
   "页头有当前任务徽标与历史入口",
   records.includes("当前任务") && records.includes("历史会话"),
@@ -334,6 +625,16 @@ try {
     /\.config-page\s*>\s*\*\s*\{[^}]*max-width:\s*1180px[^}]*margin-inline:\s*auto/.test(styles) &&
       /\.config-page\s*>\s*\.ui-tabs\s*\{[^}]*width:\s*fit-content/.test(styles),
     "`.config-page > *` 需要 max-width:1180px + margin-inline:auto，且 `.config-page > .ui-tabs` 保持 fit-content",
+  );
+  check(
+    "[hidden] 压得住 .cfg-form-grid 的 display（副路由互斥的隐性依赖）",
+    /\[hidden\]\s*\{[^}]*display:\s*none\s*!important/.test(config),
+    "config.css 需要 [hidden]{display:none!important}：作者样式的 display 优先于 UA 的 [hidden]，少了它「设定」与「调度」会一直同时可见",
+  );
+  check(
+    "config.css 不引用从未定义的设计令牌",
+    !/--cfg-(?:border|text|text-dim)\)/.test(config),
+    "--cfg-border / --cfg-text / --cfg-text-dim 从未定义（真令牌是 --cfg-line / --cfg-ink / --cfg-ink-3），引用它们等于整条声明失效",
   );
 } catch (cause) {
   check("读得到样式表以校验版式", false, cause instanceof Error ? cause.message : String(cause));
@@ -795,7 +1096,7 @@ check(
 
 const configPageSource = readFileSync(join(process.cwd(), "src", "config", "ConfigPage.tsx"), "utf8");
 check(
-  "工具与配置：执行边界是第五个分区（记忆排在它前面）",
+  "工具与配置：执行边界排在最后（记忆排在它前面）",
   page.includes("执行边界") &&
     /id:\s*"sandbox"/.test(configPageSource) &&
     /<SandboxPanel\s*\/>/.test(configPageSource) &&

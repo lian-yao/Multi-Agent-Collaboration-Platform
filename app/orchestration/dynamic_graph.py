@@ -84,10 +84,20 @@ class PlanStepStatus(StrEnum):
 
 
 class PlanStep(BaseModel):
-    """规划节点产出的一个步骤：由哪个角色、做什么、依赖谁。"""
+    """规划节点产出的一个步骤：由哪个角色、做什么、依赖谁。
+
+    ``role`` 是角色目录（``agent_registry``）里的条目 id，**不是枚举**（ADR-036）：
+    候选集由目录驱动，写死枚举会让「登记一个新角色」永远等不来被调度的那天。
+    合法性由 ``parse_plan`` 对照 ``allowed`` 候选集校验，不靠类型系统。
+    """
 
     id: str = Field(min_length=1, description="步骤 id，同一份计划内唯一，如 s1")
-    role: RoleId
+    role: str = Field(
+        min_length=1,
+        max_length=50,
+        pattern=r"^[A-Za-z0-9._-]+$",
+        description="执行该步骤的角色 id（角色目录 agent_registry.id）",
+    )
     instruction: str = Field(min_length=1, description="该步骤的职责说明，拼进角色输入")
     depends_on: list[str] = Field(default_factory=list, description="依赖的步骤 id")
 
@@ -105,7 +115,7 @@ class StepOutcome(BaseModel):
     """一个步骤的执行结果，字段与静态链路 ``_stage_result`` 对齐以便复用展示与审计。"""
 
     step_id: str
-    role: RoleId
+    role: str
     instruction: str
     status: PlanStepStatus = PlanStepStatus.PENDING
     content: str = ""
@@ -167,18 +177,25 @@ def _extract_json(text: str) -> Any | None:
         return None
 
 
-def parse_plan(text: str, max_steps: int = DEFAULT_MAX_PLAN_STEPS) -> DynamicPlan | None:
+def parse_plan(
+    text: str,
+    max_steps: int = DEFAULT_MAX_PLAN_STEPS,
+    allowed: set[str] | None = None,
+) -> DynamicPlan | None:
     """把规划模型的自由文本解析成计划；任一处不合法返回 ``None``。
 
     校验口径（全部通过才接受）：
 
     - 顶层是对象且有非空 ``steps`` 数组，长度不超过 ``max_steps``；
-    - 每步 ``role`` 必须是已知角色（``RoleId``）；
+    - 每步 ``role`` 必须在 ``allowed`` 候选集里；``allowed`` 为 ``None`` 时回退内置
+      三角色（保持没有目录时的既有行为，调用方传候选集是 ADR-036 的常规路径）；
     - ``id`` 非空且同一份计划内唯一；
     - ``instruction`` 非空；
     - ``depends_on`` 只引用**在它之前已声明**的步骤 id（由此天然排除自依赖与环）。
     """
 
+    # ``allowed=None`` 回退内置三角色：没有目录时「未知角色」仍要被拒之门外。
+    valid_roles = allowed if allowed is not None else {r.value for r in RoleId}
     payload = _extract_json(text)
     if not isinstance(payload, dict):
         return None
@@ -196,9 +213,12 @@ def parse_plan(text: str, max_steps: int = DEFAULT_MAX_PLAN_STEPS) -> DynamicPla
         step_id = str(raw.get("id") or f"s{index}").strip()
         if not step_id or step_id in seen:
             return None
-        try:
-            role = RoleId(str(raw.get("role") or "").strip())
-        except ValueError:
+        role = str(raw.get("role") or "").strip()
+        if not role:
+            return None
+        # 候选集里的角色才允许被指派：这是「模型编造角色」的唯一防线，
+        # 计划里出现目录之外的 id 整份丢弃（不猜、不修补）。
+        if role not in valid_roles:
             return None
         instruction = str(raw.get("instruction") or "").strip()
         if not instruction:
@@ -234,18 +254,18 @@ def fallback_plan(reason: str = "") -> DynamicPlan:
         steps=[
             PlanStep(
                 id="s1",
-                role=RoleId.COLLECTOR,
+                role=RoleId.COLLECTOR.value,
                 instruction="围绕用户任务收集、核实并整理信息与线索，输出结构化信息清单。",
             ),
             PlanStep(
                 id="s2",
-                role=RoleId.ANALYST,
+                role=RoleId.ANALYST.value,
                 instruction="基于上游信息清单做归纳、对比与提炼，输出关键结论、趋势与风险。",
                 depends_on=["s1"],
             ),
             PlanStep(
                 id="s3",
-                role=RoleId.REPORTER,
+                role=RoleId.REPORTER.value,
                 instruction=(
                     "基于上游分析结果生成面向用户的最终报告，包含概述、关键结论、"
                     "支撑细节、风险与建议。"
@@ -258,12 +278,34 @@ def fallback_plan(reason: str = "") -> DynamicPlan:
     )
 
 
-def planner_prompt(max_steps: int = DEFAULT_MAX_PLAN_STEPS) -> str:
-    """构造规划节点的 system prompt。"""
+def _default_candidates() -> list[dict[str, str]]:
+    """内置三角色的候选描述；目录不可用/为空时的回退（行为与 ADR-036 之前一致）。"""
 
-    roles = "\n".join(
-        f"- {role.value}（{get_role(role).name}）：{_role_summary(role)}"
+    return [
+        {
+            "id": role.value,
+            "name": get_role(role).name,
+            "description": _role_summary(role.value),
+        }
         for role in RoleId
+    ]
+
+
+def planner_prompt(
+    max_steps: int = DEFAULT_MAX_PLAN_STEPS,
+    candidates: Sequence[dict[str, Any]] | None = None,
+) -> str:
+    """构造规划节点的 system prompt；候选角色来自角色目录（ADR-036）。
+
+    ``candidates`` 为 ``None`` 或空表时回退内置三角色：目录读失败不能把动态编排
+    变成「没有候选可用」，降级成 ADR-036 之前的候选集是更可用的选择。
+    """
+
+    entries = list(candidates) if candidates else _default_candidates()
+    roles = "\n".join(
+        f"- {entry.get('id')}（{entry.get('name') or entry.get('id')}）："
+        f"{(entry.get('description') or '').strip() or _role_summary(str(entry.get('id') or ''))}"
+        for entry in entries
     )
     return (
         "你是多智能体协作平台的「任务规划 Agent」。你的唯一职责是判断这个任务需要"
@@ -286,13 +328,13 @@ def planner_prompt(max_steps: int = DEFAULT_MAX_PLAN_STEPS) -> str:
     )
 
 
-def _role_summary(role: RoleId) -> str:
+def _role_summary(role: str) -> str:
     summaries = {
-        RoleId.COLLECTOR: "收集与核实信息，产出结构化信息清单",
-        RoleId.ANALYST: "归纳、对比与提炼，产出结论与风险",
-        RoleId.REPORTER: "整合上游结果，产出面向用户的最终报告",
+        RoleId.COLLECTOR.value: "收集与核实信息，产出结构化信息清单",
+        RoleId.ANALYST.value: "归纳、对比与提炼，产出结论与风险",
+        RoleId.REPORTER.value: "整合上游结果，产出面向用户的最终报告",
     }
-    return summaries[role]
+    return summaries.get(role, "按分配的职责完成该步骤并输出交付物")
 
 
 def generate_plan(
@@ -302,19 +344,25 @@ def generate_plan(
     workflow_id: str | None = None,
     history: Sequence[SessionMessage] = (),
     preferences: str = "",
+    candidates: Sequence[dict[str, Any]] | None = None,
 ) -> DynamicPlan:
     """调用规划模型产出计划；解析失败或调用失败一律回退，不向上抛。
 
     `history` 是会话记忆里最近若干条（不含本轮），按 ADR-019 的口径渲染成提示词前缀——
     **规划也要看得到上下文**：只说「重试」时，规划节点否则连要重试什么都没法判断。
+
+    ``candidates`` 是角色目录里 ``enabled=True`` 的条目（ADR-036）：既进提示词
+    （planner 只能从这些角色里挑），也进 ``parse_plan`` 的 ``allowed`` 校验
+    （模型编造候选之外的角色时整份计划丢弃）。``None``/空表回退内置三角色。
     """
 
     started = time.perf_counter()
     log_event(logger, "dynamic.plan.start", workflow_id=workflow_id, task_chars=len(task))
+    allowed = {str(entry.get("id")) for entry in candidates} if candidates else None
     try:
         response = llm.invoke(
             [
-                SystemMessage(content=planner_prompt(max_steps)),
+                SystemMessage(content=planner_prompt(max_steps, candidates)),
                 HumanMessage(
                     content=f"{preferences}{conversation_block(history)}用户任务：\n{task}"
                 ),
@@ -333,7 +381,7 @@ def generate_plan(
         )
         return plan
 
-    plan = parse_plan(text, max_steps) or fallback_plan(
+    plan = parse_plan(text, max_steps, allowed) or fallback_plan(
         "规划模型返回的内容不是可用计划，回退到固定三步流水线。"
     )
     log_event(
@@ -342,7 +390,7 @@ def generate_plan(
         workflow_id=workflow_id,
         source=plan.source,
         steps=len(plan.steps),
-        roles=[step.role.value for step in plan.steps],
+        roles=[step.role for step in plan.steps],
         duration_ms=round((time.perf_counter() - started) * 1000, 1),
     )
     return plan
@@ -395,23 +443,44 @@ def blocked_steps(state: DynamicPipelineState) -> list[PlanStep]:
     return blocked
 
 
+def _role_label(role: str, catalog: dict[str, dict[str, Any]] | None = None) -> str:
+    """角色的展示名：目录条目名 > 内置定义 > 角色 id 本身。
+
+    角色 id 来自计划文本，可能是目录之外的任何串（parse 只挡住了「不在候选集」
+    的情况，回退计划之外的展示场景仍要兜底），所以最后一级回退是 id 本身，
+    而不是像以前那样抛 ``ValueError``。
+    """
+
+    entry = (catalog or {}).get(role)
+    if entry and (entry.get("name") or "").strip():
+        return str(entry["name"]).strip()
+    try:
+        return get_role(role).name
+    except ValueError:
+        return role
+
+
 def step_input(
     task: str,
     step: PlanStep,
     results: dict[str, StepOutcome],
     history: Sequence[SessionMessage] = (),
     preferences: str = "",
+    catalog: dict[str, dict[str, Any]] | None = None,
 ) -> str:
     """构造步骤的角色输入：长期记忆 + 会话历史 + 任务 + 依赖步骤的正文 + 本步职责。
 
     历史放在最前面，与固定三步链路（`pipeline_graph._role_input`）同一形态——两条编排
     对模型呈现的上下文必须一致，否则「同一个会话在两种模式下记忆表现不同」。
     长期记忆（跨会话偏好）再排在历史之前：约束在前、上下文在后（ADR-036）。
+
+    ``catalog`` 是角色目录的 id → 条目映射，用于把上游步骤的角色渲染成展示名
+    （ADR-036）；缺省 ``None`` 时按内置角色定义解析。
     """
 
     parts = [f"{preferences}{conversation_block(history)}用户任务：\n{task}"]
     upstream = [
-        f"【{dep} · {get_role(results[dep].role).name}】\n{results[dep].content}"
+        f"【{dep} · {_role_label(results[dep].role, catalog)}】\n{results[dep].content}"
         for dep in step.depends_on
         if dep in results
     ]
@@ -419,6 +488,39 @@ def step_input(
         parts.append("上游结果：\n" + "\n\n".join(upstream))
     parts.append(f"你这一步的职责：\n{step.instruction}")
     return "\n\n".join(parts)
+
+
+_GENERIC_ROLE_PROMPT = """\
+你是多智能体协作平台的一个协作角色，负责完成分配给你的步骤。
+
+要求：
+- 仔细阅读用户任务、上游结果与你这一步的职责，输出该步骤的交付物；
+- 忠实于上游内容，不引入未在输入中出现的新事实；
+- 只输出交付物本身，不要复述任务说明。\
+"""
+
+
+def resolve_step_prompt(
+    role: str,
+    catalog: dict[str, dict[str, Any]] | None = None,
+) -> str:
+    """步骤角色的人设：目录条目的 ``system_prompt`` > 内置角色定义 > 通用兜底。
+
+    这是 ADR-036「角色可配置提示词」的执行期接缝：配置页改了某个角色的
+    system_prompt 后，下一次阶段执行喂给模型的就是目录里的版本。目录条目没有
+    prompt 时回退内置定义（内置三角色在 ``ROLE_DEFINITIONS`` 里都有人设），
+    自定义角色没写过 prompt 就用通用兜底——不在这里替用户编一份「看起来专属」
+    的人设，那会让「没配置」看起来像「配置过了」。
+    """
+
+    entry = (catalog or {}).get(role)
+    configured = (entry or {}).get("system_prompt") if entry else None
+    if configured and str(configured).strip():
+        return str(configured)
+    try:
+        return get_role(role).system_prompt
+    except ValueError:
+        return _GENERIC_ROLE_PROMPT
 
 
 def run_plan_step(
@@ -431,6 +533,7 @@ def run_plan_step(
     attachments: Sequence[AttachmentPayload] = (),
     history: Sequence[SessionMessage] = (),
     preferences: str = "",
+    catalog: dict[str, dict[str, Any]] | None = None,
 ) -> StepOutcome:
     """执行一个计划步骤，返回结果；异常被收敛成 ``failed`` 结果而不外抛。
 
@@ -440,13 +543,17 @@ def run_plan_step(
     ``attachments`` 只注入到**根步骤**（``depends_on`` 为空，即直接拿到用户原始任务
     的那些步骤）。多根计划会各拿一份附件——这是有意的：它们彼此看不到对方的产出，
     少给任何一条根步骤，那条分支的模型就完全不知道用户传了东西。
+
+    ``catalog`` 是角色目录的 id → 条目映射，用于解析该角色的人设（ADR-036）；
+    缺省 ``None`` 时按内置角色定义解析。
     """
 
-    definition = get_role(step.role)
-    prompt = step_input(task, step, results, history, preferences)
+    # 不再 `get_role(step.role)`：角色可能只存在于目录里（ADR-036 自定义角色），
+    # 内置定义查不到时会抛 ValueError；人设解析统一走 resolve_step_prompt。
+    prompt = step_input(task, step, results, history, preferences, catalog)
     content = build_human_content(prompt, attachments if not step.depends_on else ())
     messages = [
-        SystemMessage(content=definition.system_prompt),
+        SystemMessage(content=resolve_step_prompt(step.role, catalog)),
         HumanMessage(content=content),
     ]
     started = time.perf_counter()
@@ -455,14 +562,14 @@ def run_plan_step(
         "dynamic.step.start",
         workflow_id=workflow_id,
         step=step.id,
-        role=step.role.value,
+        role=step.role,
         depends_on=list(step.depends_on),
     )
     try:
         with observed_stage(
             workflow_id=workflow_id,
             stage=f"dyn:{step.id}",
-            role=step.role.value,
+            role=step.role,
         ):
             content = invoke_role_messages(
                 messages, llm, caller, stage=f"dyn:{step.id}", role=step.role
@@ -474,7 +581,7 @@ def run_plan_step(
             level=logging.ERROR,
             workflow_id=workflow_id,
             step=step.id,
-            role=step.role.value,
+            role=step.role,
             error=f"{type(exc).__name__}: {exc}",
             duration_ms=round((time.perf_counter() - started) * 1000, 1),
         )
@@ -502,7 +609,7 @@ def run_plan_step(
         "dynamic.step.finish",
         workflow_id=workflow_id,
         step=step.id,
-        role=step.role.value,
+        role=step.role,
         chars=len(content),
         tool_calls=len(outcome.tool_calls),
         duration_ms=outcome.duration_ms,
@@ -595,9 +702,12 @@ def _node_planner(
     model: BaseChatModel,
     max_steps: int,
     workflow_id: str | None,
+    candidates: Sequence[dict[str, Any]] | None = None,
 ):
     def planner(state: DynamicPipelineState) -> dict[str, Any]:
-        plan = generate_plan(state.task, model, max_steps, workflow_id=workflow_id)
+        plan = generate_plan(
+            state.task, model, max_steps, workflow_id=workflow_id, candidates=candidates
+        )
         return {
             "plan": plan.steps,
             "plan_source": plan.source,
@@ -614,6 +724,7 @@ def _node_execute(
     registry: ToolRegistry | None,
     workflow_id: str | None,
     attachments: Sequence[AttachmentPayload] = (),
+    catalog: dict[str, dict[str, Any]] | None = None,
 ):
     def execute(state: DynamicPipelineState) -> dict[str, Any]:
         ready = ready_steps(state)
@@ -622,7 +733,16 @@ def _node_execute(
         step = ready[0]
         caller = ToolCaller(registry) if registry is not None else None
         outcome = run_plan_step(
-            step, state.task, state.results, model, caller, workflow_id, attachments
+            step,
+            state.task,
+            state.results,
+            model,
+            caller,
+            workflow_id,
+            attachments,
+            # 必须按关键字传：合并后第 8 个位置参数是 history（会话历史那侧新增的），
+            # 位置传会把 catalog 绑到 history 上——conversation_block 收到 dict 当场炸。
+            catalog=catalog,
         )
         return {
             "results": {**state.results, step.id: outcome},
@@ -670,6 +790,8 @@ def build_dynamic_pipeline(
     max_steps: int = DEFAULT_MAX_PLAN_STEPS,
     workflow_id: str | None = None,
     attachments: Sequence[AttachmentPayload] = (),
+    catalog: dict[str, dict[str, Any]] | None = None,
+    candidates: Sequence[dict[str, Any]] | None = None,
 ):
     """构建动态协作图：``planner → execute（循环）→ finalize``。
 
@@ -677,15 +799,22 @@ def build_dynamic_pipeline(
     （例如无 MCP 实现）时步骤不调用工具，与静态图口径一致。
 
     ``attachments`` 只在进程内直跑时使用；Dapr 链路按 id 从库里取（ADR-021）。
+
+    ``candidates`` / ``catalog`` 是 ADR-036 的目录接线：前者是 planner 的候选集
+    （目录里 ``enabled=True`` 的条目），后者是执行期的人设解析映射；两者都缺省时
+    行为与目录功能加入之前一致（内置三角色）。
     """
 
     model = llm or build_chat_model(settings or get_settings())
     registry = tool_registry if tool_registry is not None else default_tool_registry()
 
     builder = StateGraph(DynamicPipelineState)
-    builder.add_node("planner", _node_planner(model, max_steps, workflow_id))
     builder.add_node(
-        "execute", _node_execute(model, registry, workflow_id, attachments)
+        "planner", _node_planner(model, max_steps, workflow_id, candidates)
+    )
+    builder.add_node(
+        "execute",
+        _node_execute(model, registry, workflow_id, attachments, catalog),
     )
     builder.add_node("finalize", _node_finalize(workflow_id))
 
@@ -708,6 +837,8 @@ def run_dynamic_pipeline(
     max_steps: int = DEFAULT_MAX_PLAN_STEPS,
     workflow_id: str | None = None,
     attachments: Sequence[AttachmentPayload] = (),
+    catalog: dict[str, dict[str, Any]] | None = None,
+    candidates: Sequence[dict[str, Any]] | None = None,
 ) -> DynamicPipelineState:
     """用完整的动态图执行一次协作，返回终态 ``DynamicPipelineState``。"""
 
@@ -718,6 +849,8 @@ def run_dynamic_pipeline(
         max_steps=max_steps,
         workflow_id=workflow_id,
         attachments=attachments,
+        catalog=catalog,
+        candidates=candidates,
     )
     output = graph.invoke(
         DynamicPipelineState(task=task),
@@ -736,12 +869,14 @@ def dynamic_checkpoint_summary(state: DynamicPipelineState) -> dict[str, Any]:
         # 改写结果随 checkpoint 落库（ADR-037）：使用者要能看见"平台把我的话改成了什么"。
         "rewritten_task": state.rewritten_task,
         "rewrite_source": state.rewrite_source,
+        "plan_rationale": state.plan_rationale,
         "current_step": None,
         "completed_steps": [outcome.step_id for outcome in ordered_outcomes(state)],
         "plan": [
             {
                 "id": step.id,
-                "role": step.role.value,
+                "role": step.role,
+                "instruction": step.instruction,
                 "depends_on": list(step.depends_on),
                 "status": (
                     state.results[step.id].status.value

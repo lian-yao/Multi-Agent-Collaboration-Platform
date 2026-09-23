@@ -25,13 +25,25 @@
   line-height: 1.6;
 }
 
+/* 规划窗口：链路还没定型，只报「正在规划」，不画写死的固定三步（ADR-034）。
+   转动的图标不是装饰——它同时承担「还在动」这条信息（减动画偏好下改走透明度呼吸）。 */
+.cv-planning {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--cfg-ink-3);
+  font-size: 10.5px;
+  line-height: 1.6;
+}
+
 .cv-canvas {
   position: relative;
   width: 100%;
   border: 1px solid var(--cfg-line-faint);
   border-radius: var(--cfg-radius);
   background-color: var(--cfg-surface-soft);
-  background-image: radial-gradient(circle, rgba(15, 23, 42, 0.07) 1px, transparent 1px);
+  background-image: radial-gradient(circle, var(--t-bg-0f172a12) 1px, transparent 1px);
   background-size: 20px 20px;
 }
 
@@ -49,13 +61,13 @@
 
 .cv-edge {
   fill: none;
-  stroke: #cbd5e1;
+  stroke: var(--t-ink-cbd5e1);
   stroke-width: 1.8;
   stroke-dasharray: 4 4;
 }
 
 .cv-edge.active {
-  stroke: #3b82f6;
+  stroke: var(--t-ink-3b82f6);
   stroke-width: 2.4;
   stroke-dasharray: none;
 }
@@ -64,24 +76,29 @@
 .cv-group {
   position: absolute;
   z-index: 1;
-  border: 1.5px solid rgba(59, 130, 246, 0.26);
+  border: 1.5px dashed var(--t-bd-3b82f666);
   border-radius: 22px;
-  background: linear-gradient(180deg, rgba(239, 246, 255, 0.92), rgba(248, 250, 252, 0.94));
+  /* 填充必须透明：框压在连线上方（z-index 1），给底色就会把进出这片区域的连线盖掉。 */
+  background: transparent;
 }
 
+/* 标签自带一小块与画布同色的底：连线允许从框内穿过，但不该从文字底下穿过。 */
 .cv-group-head {
   position: absolute;
   left: 15px;
-  top: 9px;
+  top: 7px;
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--cfg-surface-soft);
 }
 
-.cv-group-head b { color: #3f5f86; font-size: 10.5px; font-weight: 700; }
+.cv-group-head b { color: var(--t-ink-3f5f86); font-size: 10.5px; font-weight: 700; }
 
 .cv-group-head i {
-  color: #93a8c2;
+  color: var(--t-ink-93a8c2);
   font-size: 9px;
   font-style: normal;
   font-weight: 700;
@@ -109,10 +126,10 @@
   align-items: center;
   gap: 4px;
   padding: 2px 7px;
-  border: 1px solid rgba(59, 130, 246, 0.3);
+  border: 1px solid var(--t-bd-3b82f64c);
   border-radius: 999px;
   background: var(--cfg-surface);
-  color: #3f5f86;
+  color: var(--t-ink-3f5f86);
   font-size: 9.5px;
   font-weight: 600;
   white-space: nowrap;
@@ -125,27 +142,42 @@
   z-index: 3;
   display: grid;
   place-items: center;
-  border: 2px solid #e2e8f0;
+  border: 2px solid var(--t-bd-e2e8f0);
   border-radius: 999px;
-  background: #fff;
-  color: #8fa3b0;
+  background: var(--t-bg-ffffff);
+  color: var(--t-ink-8fa3b0);
 }
 
-.cv-node.kind-agent { color: #2563eb; }
+.cv-node.kind-agent { color: var(--t-ink-2563eb); }
 
-.cv-node.visited { border-color: #a8c9f0; }
+.cv-node.visited { border-color: var(--t-bd-a8c9f0); }
 
 .cv-node.running {
-  border-color: #2563eb;
-  background: #3b82f6;
-  color: #fff;
+  border-color: var(--t-bd-2563eb);
+  background: var(--t-bg-3b82f6);
+  color: var(--t-ink-ffffff);
 }
 
 .cv-node.failed {
-  border-color: #dfb3ac;
-  background: #fffbfa;
-  color: #b4635a;
+  border-color: var(--t-bd-dfb3ac);
+  background: var(--t-bg-fffbfa);
+  color: var(--t-ink-b4635a);
 }
+
+/* 规划节点（「任务分配」）：它不是某个 Agent，所以**不跟角色节点抢蓝色**——用中性石板灰
+   + 虚线边。虚线本身就是语义：「这是决策环节，不是一个可执行的步骤」。
+   带 `.visited` 的那条必须一起写：`kind-planner` 与 `visited` 同权重，不显式提高一级
+   就会被上面 `.cv-node.visited` 的蓝边盖掉。 */
+.cv-node.kind-planner {
+  border-style: dashed;
+  border-color: var(--t-bd-c3cbd9);
+  background: var(--t-bg-f8fafc);
+  color: var(--t-ink-55627a);
+}
+
+.cv-node.kind-planner.visited { border-color: var(--t-bd-9aa8bf); }
+
+.cv-node.kind-planner .cv-name { font-weight: 600; }
 
 /* 悬停时抬到最上层：侧向面板会伸到邻居节点上，不抬上去会被盖住半边。 */
 .cv-node:hover,
@@ -156,7 +188,7 @@
 .cv-ring {
   position: absolute;
   inset: -5px;
-  border: 2px solid rgba(59, 130, 246, 0.55);
+  border: 2px solid var(--t-bd-3b82f68c);
   border-radius: 999px;
   animation: cv-pulse 1.8s ease-in-out infinite;
 }
@@ -166,9 +198,9 @@
   50% { opacity: 0.35; transform: scale(1.06); }
 }
 
-.cv-dot { width: 9px; height: 9px; border-radius: 999px; background: #94a3b8; }
-.cv-node.visited .cv-dot { background: #7fb1ea; }
-.cv-node.running .cv-dot { background: #fff; }
+.cv-dot { width: 9px; height: 9px; border-radius: 999px; background: var(--t-bg-94a3b8); }
+.cv-node.visited .cv-dot { background: var(--t-bg-7fb1ea); }
+.cv-node.running .cv-dot { background: var(--t-bg-ffffff); }
 
 /* 名字与「模型 · Token」挂在圆下方：圆里只放得下一个图标，字必须出来。
    必须自带底色——连线是纵向下来的，正好从这两行字中间穿过去；而文字本身不遮光，
@@ -324,8 +356,8 @@
 .cv-pop-block h5 i {
   padding: 0 4px;
   border-radius: 3px;
-  background: #fdf9ef;
-  color: #8a6f31;
+  background: var(--t-bg-fdf9ef);
+  color: var(--t-ink-8a6f31);
   font-size: 8.5px;
   font-style: normal;
 }
@@ -342,7 +374,7 @@
 }
 
 .cv-pop-block dd { margin: 0; color: var(--cfg-ink-2); font-weight: 600; }
-.cv-pop-block dl > div.override dt { color: #8a6f31; }
+.cv-pop-block dl > div.override dt { color: var(--t-ink-8a6f31); }
 
 .cv-pop-block pre {
   overflow: auto;
@@ -375,8 +407,8 @@
 
 .cv-pop-block li b { color: var(--cfg-ink); font-size: 10px; }
 .cv-pop-block li span { color: var(--cfg-ink-3); font-size: 9px; }
-.cv-pop-block li.failed { background: #fbecea; }
-.cv-pop-block li em { color: #b4635a; font-size: 9.5px; font-style: normal; }
+.cv-pop-block li.failed { background: var(--t-bg-fbecea); }
+.cv-pop-block li em { color: var(--t-ink-b4635a); font-size: 9.5px; font-style: normal; }
 
 .cv-pop-note { margin: 0; color: var(--cfg-ink-4); }
 
@@ -395,7 +427,7 @@
   inset: 0;
   display: grid;
   grid-template-rows: auto auto 1fr auto;
-  background: #f4f8f9;
+  background: var(--t-bg-f4f8f9);
   color: var(--cfg-ink);
 }
 
@@ -546,7 +578,7 @@
   align-items: baseline;
   justify-content: space-between;
   gap: 10px;
-  color: #607b86;
+  color: var(--t-ink-607b86);
   font-size: 10.5px;
 }
 
@@ -559,8 +591,8 @@
 .usage-group li em {
   padding: 1px 5px;
   border-radius: 4px;
-  background: #f4ead6;
-  color: #8a6a2c;
+  background: var(--t-bg-f4ead6);
+  color: var(--t-ink-8a6a2c);
   font-size: 8.5px;
   font-style: normal;
 }
@@ -599,7 +631,7 @@
   width: 30px;
   height: 30px;
   border-radius: var(--cfg-radius-sm);
-  background: #eef4f5;
+  background: var(--t-bg-eef4f5);
   color: var(--cfg-accent);
 }
 
@@ -611,7 +643,7 @@
 }
 
 .ws-detail-role b {
-  color: #4d6975;
+  color: var(--t-ink-4d6975);
   font-size: 12px;
   font-weight: 600;
 }
@@ -652,7 +684,7 @@
   padding: 10px 12px;
   border: 1px dashed var(--cfg-line);
   border-radius: var(--cfg-radius-sm);
-  background: #f8fbfc;
+  background: var(--t-bg-f8fbfc);
   color: var(--cfg-ink-3);
   font-size: 10.5px;
   line-height: 1.7;
@@ -666,8 +698,8 @@
   overflow: auto;
   border: 1px solid var(--cfg-line-faint);
   border-radius: var(--cfg-radius-sm);
-  background: #fbfdfe;
-  color: #3f5b67;
+  background: var(--t-bg-fbfdfe);
+  color: var(--t-ink-3f5b67);
   font-family: Cascadia Mono, Consolas, monospace;
   font-size: 10.5px;
   line-height: 1.65;
@@ -676,15 +708,15 @@
 }
 
 .ws-trace-output {
-  border-color: #d9ebe6;
-  background: #f6fbf9;
+  border-color: var(--t-bd-d9ebe6);
+  background: var(--t-bg-f6fbf9);
 }
 
 .ws-trace-count {
   margin-left: 6px;
   padding: 1px 5px;
   border-radius: 4px;
-  background: #eef4f5;
+  background: var(--t-bg-eef4f5);
   color: var(--cfg-ink-4);
   font-size: 9px;
   font-weight: 400;
@@ -703,13 +735,13 @@
   padding: 8px 10px;
   border: 1px solid var(--cfg-line-faint);
   border-radius: var(--cfg-radius-sm);
-  background: #fff;
+  background: var(--t-bg-ffffff);
 }
 
 /* 失败的调用要一眼看出来：它是这条链路里最该被读到的一条。 */
 .ws-trace-step.failed {
-  border-color: #f0d5d5;
-  background: #fdf7f7;
+  border-color: var(--t-bd-f0d5d5);
+  background: var(--t-bg-fdf7f7);
 }
 
 .ws-trace-step-head {
@@ -720,7 +752,7 @@
 }
 
 .ws-trace-step-head b {
-  color: #4d6975;
+  color: var(--t-ink-4d6975);
   font-size: 11px;
   font-weight: 600;
 }
@@ -729,7 +761,7 @@
   margin-left: auto;
   padding: 1px 6px;
   border-radius: 4px;
-  background: #eef4f5;
+  background: var(--t-bg-eef4f5);
   color: var(--cfg-ink-4);
   font-size: 9px;
 }
@@ -741,31 +773,31 @@
   width: 22px;
   height: 22px;
   border-radius: 6px;
-  background: #eef4f5;
+  background: var(--t-bg-eef4f5);
   color: var(--cfg-ink-3);
 }
 
 .ws-trace-mark.green {
-  background: #e8f6f0;
-  color: #2f8f6b;
+  background: var(--t-bg-e8f6f0);
+  color: var(--t-ink-2f8f6b);
 }
 
 .ws-trace-mark.rose {
-  background: #fbecec;
-  color: #c0564f;
+  background: var(--t-bg-fbecec);
+  color: var(--t-ink-c0564f);
 }
 
 .ws-trace-mark.amber {
-  background: #fdf3e3;
-  color: #b8842a;
+  background: var(--t-bg-fdf3e3);
+  color: var(--t-ink-b8842a);
 }
 
 .ws-trace-error {
   margin: 0;
   padding: 6px 8px;
   border-radius: 6px;
-  background: #fbecec;
-  color: #b15550;
+  background: var(--t-bg-fbecec);
+  color: var(--t-ink-b15550);
   font-size: 10px;
   line-height: 1.6;
   word-break: break-word;
@@ -798,8 +830,8 @@
   padding: 7px 9px;
   overflow: auto;
   border-radius: 6px;
-  background: #f6f9fa;
-  color: #43606d;
+  background: var(--t-bg-f6f9fa);
+  color: var(--t-ink-43606d);
   font-family: Cascadia Mono, Consolas, monospace;
   font-size: 10px;
   line-height: 1.6;
@@ -838,10 +870,10 @@
   display: flex;
   flex-direction: column;
   width: min(560px, calc(100% - 36px));
-  border: 1px solid #d9e4e8;
+  border: 1px solid var(--t-bd-d9e4e8);
   border-radius: 10px;
-  box-shadow: 0 14px 40px #19364226;
-  background: #fbfcfd;
+  box-shadow: 0 14px 40px var(--t-shadow-19364226);
+  background: var(--t-bg-fbfcfd);
   overflow: hidden;
 }
 
@@ -851,16 +883,16 @@
   justify-content: space-between;
   min-height: 52px;
   padding: 0 16px;
-  border-bottom: 1px solid #e6ecef;
+  border-bottom: 1px solid var(--t-bd-e6ecef);
   border-radius: 10px 10px 0 0;
-  background: #fff;
+  background: var(--t-bg-ffffff);
 }
 
 .workspace-drawer-head > span {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: #68808d;
+  color: var(--t-ink-68808d);
   font-size: 12px;
 }
 

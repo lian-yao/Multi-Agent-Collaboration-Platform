@@ -25,13 +25,13 @@
   padding: 2px;
   border: 0;
   border-radius: 6px;
-  background: var(--cfg-danger-surface, #fdf3f1);
+  background: var(--cfg-danger-surface, var(--t-bg-fdf3f1));
 }
 
 .ui-confirm-q {
   max-width: 260px;
   padding: 0 4px 0 2px;
-  color: var(--cfg-ink-2, #456572);
+  color: var(--cfg-ink-2, var(--t-ink-456572));
   font-size: 11px;
   line-height: 1.3;
 }
@@ -53,27 +53,27 @@
 
 /* 确认键做实心软红：一眼看出这是"会真删东西"的那个键，也不需要自己的描边 */
 .ui-confirm-yes {
-  background: #f0c7c2;
-  color: #9c3a2e;
+  background: var(--t-bg-f0c7c2);
+  color: var(--t-ink-9c3a2e);
 }
 
 .ui-confirm-yes:hover:not(:disabled) {
-  background: #e7b3ad;
+  background: var(--t-bg-e7b3ad);
 }
 
 .ui-confirm-no {
   background: transparent;
-  color: var(--cfg-ink-3, #8499a2);
+  color: var(--cfg-ink-3, var(--t-ink-8499a2));
 }
 
 .ui-confirm-no:hover {
-  background: var(--cfg-surface, #fff);
-  color: var(--cfg-ink-2, #456572);
+  background: var(--cfg-surface, var(--t-bg-ffffff));
+  color: var(--cfg-ink-2, var(--t-ink-456572));
 }
 
 .ui-confirm-yes:focus-visible,
 .ui-confirm-no:focus-visible {
-  outline: 2px solid var(--cfg-accent, #3f7f93);
+  outline: 2px solid var(--cfg-accent, var(--t-bd-3f7f93));
   outline-offset: 1px;
 }
 

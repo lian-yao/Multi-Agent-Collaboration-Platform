@@ -32,7 +32,13 @@ import dapr.ext.workflow as wf
 
 from app.attachments import load_payloads
 from app.config import AgentSettings, get_settings
-from app.core.agent_config import resolve_agent_settings
+from app.core.agent_config import (
+    dispatchable_agents,
+    get_agent_registry,
+    resolve_agent_settings,
+    resolve_agent_tools,
+)
+from app.core.checkpoint import update_workflow_run
 from app.core.tool_audit import AuditedToolRegistry
 from app.orchestration.dynamic_graph import (
     PLAN_SOURCE_FALLBACK,
@@ -52,9 +58,10 @@ from app.orchestration.llm import build_chat_model
 from app.orchestration.long_term import USER_MEMORY_ID, preference_block
 from app.orchestration.rewrite import PLATFORM_AGENT_ID
 from app.orchestration.pipeline import PipelineStatus
-from app.orchestration.tools import ToolCaller, default_tool_registry
+from app.orchestration.tools import ToolCaller, default_tool_registry, restricted_registry
 from app.orchestration.tools import session_scoped_registry
 from app.workflows.pipeline import finalize_activity, rewrite_activity, session_history
+from app.workflows.state import save_step_result
 
 DYNAMIC_WORKFLOW_NAME = "agent_dynamic"
 DYNAMIC_SUBTASK_WORKFLOW_NAME = "agent_dynamic_subtask"
@@ -93,6 +100,51 @@ def _role_settings(role: str) -> AgentSettings:
         return get_settings()
 
 
+def _dispatch_candidates() -> list[dict[str, Any]] | None:
+    """planner 候选集：角色目录里 ``enabled=True`` 的条目（ADR-036）。
+
+    目录为空/读取失败时返回 ``None``——``generate_plan`` 会回退内置三角色候选，
+    动态编排不能因为目录这一层不可用就失去候选。
+    """
+
+    rows = dispatchable_agents()
+    if not rows:
+        return None
+    # 只挑 planner 需要的字段：system_prompt 不进提示词（人设是执行期的事）。
+    return [
+        {
+            "id": row.get("id"),
+            "name": row.get("name"),
+            "description": row.get("description"),
+        }
+        for row in rows
+    ]
+
+
+def _role_catalog(role: str) -> dict[str, dict[str, Any]] | None:
+    """单角色目录映射，供 ``run_plan_step`` 解析人设；读取失败返回 ``None``。"""
+
+    try:
+        entry = get_agent_registry(role)
+    except Exception:
+        return None
+    return {role: entry} if entry else None
+
+
+def _role_tools(role: str) -> list[str] | None:
+    """该角色被授权的工具名；``None`` 表示未配置（不限制）。
+
+    读取失败回退「未配置」而不是「空清单」：存储不可达时收紧成零工具，会让一次
+    基础设施抖动表现成「所有 Agent 突然变傻」，而这个故障看起来像模型问题。
+    与 `_role_settings` 同构（都在读不到时退回「什么都不覆盖」）。
+    """
+
+    try:
+        return resolve_agent_tools(role)
+    except Exception:
+        return None
+
+
 def fake_step_outcome(step: PlanStep, task: str) -> StepOutcome:
     """确定性假步骤输出，供恢复演练与无模型环境使用。"""
 
@@ -102,7 +154,7 @@ def fake_step_outcome(step: PlanStep, task: str) -> StepOutcome:
         instruction=step.instruction,
         status=PlanStepStatus.COMPLETED,
         content=(
-            f"dynamic {step.id} [{step.role.value}] task={task} "
+            f"dynamic {step.id} [{step.role}] task={task} "
             f"deps={','.join(step.depends_on) or '-'}"
         ),
     )
@@ -112,7 +164,12 @@ def dynamic_plan_activity(
     ctx: wf.WorkflowActivityContext,
     activity_input: dict[str, Any],
 ) -> dict[str, Any]:
-    """规划活动：产出协作计划并交给 Dapr 持久化。"""
+    """规划活动：产出协作计划并交给 Dapr 持久化。
+
+    计划产出后**立即**把 `checkpoint.plan` 与 `plan_rationale` 写回 `workflow_runs`
+    （状态保持 ``running``），前端才能在「分配」环节就渲染出真实计划步骤，而不是
+    等到任务结束才一次性看到（`doc/api.md` §5.22「计划即落盘」）。
+    """
 
     task = activity_input["task"]
     workflow_id = str(
@@ -131,7 +188,36 @@ def dynamic_plan_activity(
             workflow_id=workflow_id,
             history=history,
             preferences=preference_block(USER_MEMORY_ID),
+            candidates=_dispatch_candidates(),
         )
+
+    # 计划即落盘：写一份「已规划、尚未执行」的 checkpoint，让轮询能立刻看到计划与理由。
+    # 首步同时占住 `current_step`（§5.22「`current_step` 指现在轮到谁」）：前端只认指针
+    # 相等的那一步——它才默认摊开、也只有它承接实时工具调用。不写这一笔，动态链路这两条
+    # 判定（`RunActivity.tsx` 的 `isOpen` / `isLiveStep`）永远为假。
+    first_step = plan.steps[0].id if plan.steps else None
+    update_workflow_run(
+        workflow_id,
+        current_step=first_step,
+        checkpoint={
+            "mode": "dynamic",
+            "status": "running",
+            "plan_source": plan.source,
+            "plan_rationale": plan.rationale,
+            "current_step": first_step,
+            "completed_steps": [],
+            "plan": [
+                {
+                    "id": step.id,
+                    "role": step.role,
+                    "instruction": step.instruction,
+                    "depends_on": list(step.depends_on),
+                    "status": PlanStepStatus.PENDING.value,
+                }
+                for step in plan.steps
+            ],
+        },
+    )
     return {"workflow_id": workflow_id, "plan": plan.model_dump(mode="json")}
 
 
@@ -155,11 +241,17 @@ def dynamic_step_activity(
         outcome = fake_step_outcome(step, task["task"])
     else:
         registry = default_tool_registry()
+        # ADR-035：按**本步骤分配到的角色**收窄工具集。动态链路没有静态那套
+        # 「阶段 → 角色」的固定映射，角色来自计划本身（`step.role`），白名单跟着计划走；
+        # 同一个角色在两次计划里拿到的是同一份授权，换角色才换工具。
+        registry = restricted_registry(registry, _role_tools(step.role))
         # **会话级工具必须在这里挂**（工作区文件工具 ADR-033、会话文件工具 ADR-025）：
         # 静态链路的阶段活动一直是这么做的，动态链路此前漏了这一步——2026-09-23 实测的
         # 现象就是「本会话工具列表里没有任何文件类工具」，连带着 `code_execution` 也拿到
         # 不带工作区挂载的那个实例（沙箱里 `/workspace` 不存在、cwd 退到 `/tmp`）。
-        # 顺序与静态保持一致：会话工具先挂、审计后包，这样读文件同样落进 `tool_calls`。
+        # 顺序与静态链路（pipeline.py 的阶段活动）一致：先按角色白名单收窄，再挂会话级
+        # 工具——会话文件工具是「读你自己上传的附件」的兜底能力，一并收窄会让配了白名单
+        # 的角色读不了自己的附件。审计包在最外层，读文件同样落进 `tool_calls`。
         registry = session_scoped_registry(registry, task.get("session_id"))
         run_id = task.get("agent_run_id")
         if registry is not None and run_id:
@@ -178,14 +270,36 @@ def dynamic_step_activity(
             step,
             task["task"],
             results,
-            build_chat_model(_role_settings(step.role.value)),
+            build_chat_model(_role_settings(step.role)),
             caller,
             workflow_id,
             attachments,
             session_history(task.get("session_id"), task.get("agent_run_id")),
             preference_block(USER_MEMORY_ID),
+            _role_catalog(step.role),
         )
+
+    # 每步完成即落盘（`doc/api.md` §5.22「每步完成即推进」）：步骤载荷进状态存储
+    # （key `dyn:{step_id}`，§5.17 据此还原该步的输入/产出/工具调用）。
+    # checkpoint 进度由父工作流在拿到完整计划后统一推进（那里才有全量 plan）。
+    _persist_step_outcome(workflow_id, step, outcome)
+
     return {"workflow_id": workflow_id, "outcome": outcome.model_dump(mode="json")}
+
+
+def _persist_step_outcome(
+    workflow_id: str,
+    step: PlanStep,
+    outcome: StepOutcome,
+) -> None:
+    """把一个计划步骤的结果落盘到状态存储（供 §5.17 轨迹读侧还原）。
+
+    步骤载荷直接序列化 ``StepOutcome``（含 content / tool_calls / instruction），
+    上游输入由 §5.17 读侧按 ``depends_on`` 从已完成步骤的 ``content`` 拼出——不在这里
+    冗余存一份，避免两份数据各自漂移。
+    """
+
+    save_step_result(workflow_id, f"dyn:{step.id}", outcome.model_dump(mode="json"))
 
 
 def _serialized_results(results: dict[str, StepOutcome]) -> dict[str, Any]:
@@ -200,6 +314,72 @@ def _skipped(step: PlanStep) -> StepOutcome:
         status=PlanStepStatus.SKIPPED,
         error="上游步骤未成功完成，已跳过。",
     )
+
+
+def dynamic_progress_activity(
+    ctx: wf.WorkflowActivityContext,
+    activity_input: dict[str, Any],
+) -> dict[str, Any]:
+    """把「已执行到哪一步」写回 ``workflow_runs.checkpoint``，供前端轮询逐步刷新。
+
+    与 `dynamic_checkpoint_summary` 同形（含完整 plan + plan_rationale），差别只在
+    ``status`` 恒为 ``running``、``completed_steps`` 只含**已完成**步骤——这样轮询既
+    能看到完整计划，也能看到每个步骤依次变绿（`doc/api.md` §5.22「每步完成即推进」）。
+
+    同时把 ``current_step`` 推到**下一个还没跑的步骤**（§5.22「``current_step`` 指现在
+    轮到谁」）：口径与静态链路一致——静态也是在上一步落盘时就把指针写成下一步，而不是
+    等下一步开跑。前端只认指针相等的那一步（默认摊开 + 承接实时工具调用），指针缺席时
+    那两条判定永远为假。
+
+    作为独立活动调度（而非在父工作流体内直接写库）：进度回写是 I/O，放活动里才能
+    被 Dapr 持久化、且父工作流重放时不会重复执行落库副作用。
+    """
+
+    workflow_id = str(
+        activity_input.get("workflow_id") or ctx.workflow_id
+    )
+    plan = DynamicPlan.model_validate(activity_input["plan"])
+    results = {
+        step_id: StepOutcome.model_validate(payload)
+        for step_id, payload in (activity_input.get("results") or {}).items()
+    }
+    # 下一个还没出结果的步骤。全部跑完为 None（终态归零）；跳过的步骤在父工作流里已写进
+    # results，因此不会被算作「下一个」。
+    pending_step = next(
+        (step.id for step in plan.steps if step.id not in results), None
+    )
+
+    update_workflow_run(
+        workflow_id,
+        current_step=pending_step,
+        checkpoint={
+            "mode": "dynamic",
+            "status": "running",
+            "plan_source": plan.source,
+            "plan_rationale": plan.rationale,
+            "current_step": pending_step,
+            "completed_steps": [
+                step_id
+                for step_id, res in results.items()
+                if res.status is PlanStepStatus.COMPLETED
+            ],
+            "plan": [
+                {
+                    "id": step.id,
+                    "role": step.role,
+                    "instruction": step.instruction,
+                    "depends_on": list(step.depends_on),
+                    "status": (
+                        results[step.id].status.value
+                        if step.id in results
+                        else PlanStepStatus.PENDING.value
+                    ),
+                }
+                for step in plan.steps
+            ],
+        },
+    )
+    return {"workflow_id": workflow_id}
 
 
 def dynamic_subtask_workflow(
@@ -249,6 +429,8 @@ def agent_dynamic_workflow(
                 and results[dep].status is PlanStepStatus.COMPLETED
                 for dep in step.depends_on
             ):
+                # 跳过是瞬时判定，不产生进度回写：跳过步骤的终态由 finalize 的
+                # `dynamic_checkpoint_summary` 一次性写入，运行中无需逐条推进。
                 results[step.id] = _skipped(step)
                 continue
             ctx.set_custom_status(f"dyn:{step.id}")
@@ -264,6 +446,14 @@ def agent_dynamic_workflow(
                 retry_policy=SUBTASK_RETRY_POLICY,
             )
             results[step.id] = StepOutcome.model_validate(completed["outcome"])
+            yield ctx.call_activity(
+                dynamic_progress_activity,
+                input={
+                    "workflow_id": workflow_id,
+                    "plan": plan.model_dump(mode="json"),
+                    "results": _serialized_results(results),
+                },
+            )
 
         settled = finalize_state(
             DynamicPipelineState(
@@ -318,6 +508,7 @@ __all__ = [
     "PLAN_SOURCE_FALLBACK",
     "agent_dynamic_workflow",
     "dynamic_plan_activity",
+    "dynamic_progress_activity",
     "dynamic_step_activity",
     "dynamic_subtask_workflow",
     "fake_step_outcome",

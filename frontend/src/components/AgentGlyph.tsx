@@ -118,6 +118,12 @@ export const AGENT_ICON_GLYPHS: Record<AgentIconKey, LucideIcon> = {
 /** 回退键：没匹配到任何语义时画通用 Agent。 */
 export const FALLBACK_AGENT_ICON: AgentIconKey = "bot";
 
+/**
+ * 全部图标键（图标选择器的候选清单）。顺序即 `AGENT_ICON_GLYPHS` 的声明顺序，
+ * 与 `AGENT_ICON_RULES` 无关——选择器要的是「有哪些可挑」，不是匹配优先级。
+ */
+export const AGENT_ICON_KEYS = Object.keys(AGENT_ICON_GLYPHS) as AgentIconKey[];
+
 function matchIconKey(haystack: string): AgentIconKey | null {
   const text = haystack.toLowerCase();
   for (const [key, words] of AGENT_ICON_RULES) {
@@ -142,15 +148,23 @@ export function agentIconKey(role: string, name = ""): AgentIconKey {
 export function AgentGlyph({
   role,
   name,
+  icon,
   size = 16,
   className,
 }: {
   role: string;
   /** 显示名；`role` 没匹配上时的第二判据。 */
   name?: string;
+  /**
+   * 显式图标键（ADR-036：角色目录的 `icon` 列）。**优先级最高**——用户特意挑过的
+   * 图标不该被推断规则翻案；键不在图标集里时按未指定处理（推断 + 兜底）。
+   */
+  icon?: string | null;
   size?: number;
   className?: string;
 }) {
-  const Icon = AGENT_ICON_GLYPHS[agentIconKey(role, name)];
+  const explicit =
+    icon && icon in AGENT_ICON_GLYPHS ? (icon as AgentIconKey) : null;
+  const Icon = AGENT_ICON_GLYPHS[explicit ?? agentIconKey(role, name)];
   return <Icon size={size} className={className} aria-hidden="true" />;
 }

@@ -11,6 +11,7 @@
  *
  * 画布本体在 `GraphCanvas.tsx`，这里只负责挂上「全屏画布」入口。
  */
+import { LoaderCircle } from "lucide-react";
 import { CollaborationCanvas } from "./GraphCanvas";
 import type { CollabGraph } from "./collaboration";
 import "./workspace.css";
@@ -23,6 +24,15 @@ export function CollaborationGraph({
   /** 有它就渲染浮在画布右上角的「全屏画布」入口。 */
   onExpand?: () => void;
 }) {
+  // 计划还没落盘：链路是几步、派给谁都还不知道，所以不画——只如实说在规划（ADR-034）。
+  if (graph.planning) {
+    return (
+      <p className="cv-planning">
+        <LoaderCircle size={13} className="spin" />
+        正在规划：任务分配还没产出，链路等计划落盘后再画。
+      </p>
+    );
+  }
   if (!graph.nodes.length) {
     return <p className="cv-empty">任务开始后，这里会画出 Agent 之间的协作链路。</p>;
   }

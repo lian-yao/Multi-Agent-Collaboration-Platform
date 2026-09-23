@@ -12,7 +12,6 @@ import json
 import pytest
 
 from app.api.stage_trace import (
-    DYNAMIC_TRACE_REASON,
     STAGE_TRACE_MAX_OUTPUT_CHARS,
     STAGE_TRACE_MAX_TOOL_PAYLOAD_CHARS,
     read_stage_traces,
@@ -154,18 +153,91 @@ def test_missing_trace_explains_which_case_it_is(checkpoint, stage, expected):
     assert expected in item["reason"]
 
 
-def test_dynamic_mode_says_not_integrated_instead_of_pretending_empty():
+def test_dynamic_mode_reads_step_outcomes_from_plan_order():
+    """动态链路按 checkpoint.plan 的顺序与角色还原轨迹，载荷读 key `dyn:{step_id}`。"""
+
+    outcomes = {
+        "dyn:s1": {
+            "step_id": "s1",
+            "role": "collector",
+            "content": "已收齐数据",
+            "tool_calls": [
+                {
+                    "call_id": "c1",
+                    "tool_name": "list_session_files",
+                    "input": {},
+                    "output": ["a.csv"],
+                    "status": "succeeded",
+                    "error": None,
+                }
+            ],
+            "status": "completed",
+        },
+        "dyn:s2": {
+            "step_id": "s2",
+            "role": "analyst",
+            "content": "退货率 4.8%",
+            "tool_calls": [],
+            "status": "completed",
+        },
+    }
+    checkpoint = {
+        "mode": "dynamic",
+        "completed_steps": ["s1", "s2"],
+        "plan": [
+            {"id": "s1", "role": "collector", "depends_on": [], "status": "completed"},
+            {"id": "s2", "role": "analyst", "depends_on": ["s1"], "status": "completed"},
+        ],
+    }
+    result = read_stage_traces("w1", checkpoint=checkpoint, read_step=_reader(outcomes))
+
+    assert result["mode"] == "dynamic"
+    assert result["availability"] == "available"
+    items = _items(result)
+    assert [item["stage"] for item in result["items"]] == ["s1", "s2"]
+    assert items["s1"]["role"] == "collector"
+    assert items["s1"]["output"] == "已收齐数据"
+    assert items["s1"]["input"] is None  # 根步骤没有上游
+    # 下游步骤的 input 按 depends_on 拼出，并标明来源步骤。
+    assert items["s2"]["input"] == "【s1】\n已收齐数据"
+    assert items["s2"]["input_from"] == "s1"
+    assert [call["tool_name"] for call in items["s1"]["tool_calls"]] == ["list_session_files"]
+
+
+def test_dynamic_mode_without_plan_reports_not_integrated():
+    """计划还没落盘（规划活动尚未完成）时，如实说「还没规划」而不是伪装成空轨迹。"""
+
     result = read_stage_traces(
         "w1",
-        checkpoint={"mode": "dynamic", "completed_steps": ["s1"], "plan": []},
-        read_step=_reader(_states()),
+        checkpoint={"mode": "dynamic", "completed_steps": [], "plan": []},
+        read_step=_reader({}),
     )
 
     assert result["mode"] == "dynamic"
     assert result["availability"] == "not_integrated"
     assert result["items"] == []
-    assert result["reason"] == DYNAMIC_TRACE_REASON
-    assert "不落盘" in result["reason"]
+    assert "规划" in result["reason"]
+
+
+def test_dynamic_step_not_yet_run_explains_pending():
+    """计划里的步骤还没跑时，reason 说「尚未开始」。"""
+
+    checkpoint = {
+        "mode": "dynamic",
+        "completed_steps": ["s1"],
+        "plan": [
+            {"id": "s1", "role": "collector", "depends_on": [], "status": "completed"},
+            {"id": "s2", "role": "analyst", "depends_on": ["s1"], "status": "pending"},
+        ],
+    }
+    outcomes = {
+        "dyn:s1": {"step_id": "s1", "role": "collector", "content": "ok", "tool_calls": [], "status": "completed"}
+    }
+    result = read_stage_traces("w1", checkpoint=checkpoint, read_step=_reader(outcomes))
+    items = _items(result)
+
+    assert items["s2"]["output"] is None
+    assert items["s2"]["reason"] == "该步骤尚未开始。"
 
 
 def test_long_output_is_truncated_and_flagged():

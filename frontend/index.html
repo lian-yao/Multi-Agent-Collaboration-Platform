@@ -3,8 +3,35 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#101820" />
+    <meta name="theme-color" content="#f7f9fa" />
     <title>Agent 协作工作台</title>
+    <!--
+      首屏外观（ADR-038）：这段必须**同步**跑在样式表之前，否则会先按浅色画一帧
+      再跳到深色（暗色模式最常见的"闪白"）。口径与 `src/theme/theme.ts` 一致：
+      存储里没有键 = 跟随系统；系统外观无从查询时按浅色。
+    -->
+    <script>
+      (function () {
+        var key = "macp-theme";
+        var preference = "system";
+        try {
+          var stored = window.localStorage.getItem(key);
+          if (stored === "light" || stored === "dark") preference = stored;
+        } catch (error) {
+          /* 存储被禁：仍然按系统外观渲染 */
+        }
+        var dark =
+          preference === "dark" ||
+          (preference !== "light" &&
+            typeof window.matchMedia === "function" &&
+            window.matchMedia("(prefers-color-scheme: dark)").matches);
+        var root = document.documentElement;
+        root.setAttribute("data-theme", dark ? "dark" : "light");
+        root.style.colorScheme = dark ? "dark" : "light";
+        var meta = document.querySelector('meta[name="theme-color"]');
+        if (meta) meta.setAttribute("content", dark ? "#1c2022" : "#f7f9fa");
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

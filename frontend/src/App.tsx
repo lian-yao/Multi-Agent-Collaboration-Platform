@@ -23,6 +23,8 @@ import {
   LoaderCircle,
   Maximize2,
   MessageSquareText,
+  Monitor,
+  Moon,
   Network,
   PanelBottom,
   PanelLeft,
@@ -35,6 +37,7 @@ import {
   Send,
   Settings2,
   ShieldCheck,
+  Sun,
   Trash2,
   UsersRound,
   X,
@@ -59,6 +62,7 @@ import { formatStamp } from "./config/shared";
 import { ConfigPage } from "./config/ConfigPage";
 import { AgentPanel } from "./config/AgentPanel";
 import { RecordsPage, type RecordTabId } from "./records/RecordsPage";
+import { THEME_LABEL, themeButtonTitle, useTheme } from "./theme/theme";
 import { AgentStageModal, type AgentStageDetail } from "./workspace/AgentStageModal";
 import { CollaborationGraph } from "./workspace/CollaborationGraph";
 import { CollabCanvas, type CollabConversation } from "./workspace/CollabCanvas";
@@ -68,6 +72,7 @@ import { WorkspacePanel, type WorkspaceDraft } from "./workspace/WorkspacePanel"
 import { groupUsage, TaskUsagePanel, useWorkflowMetrics } from "./workspace/TaskUsage";
 import {
   buildCollaboration,
+  isPlanning,
   planStepStatus,
   planSteps,
   stageStatus,
@@ -90,6 +95,7 @@ import type {
   OrchestrationMode,
   Session,
   SessionSummary,
+  ToolCall,
   Workflow,
   WorkflowStageTrace,
 } from "./types/api";
@@ -117,6 +123,44 @@ const stages = [
     tone: "green",
   },
 ] as const;
+
+/** 策略浮层与触发按钮的 `aria-controls` 配对 id。 */
+const STRATEGY_MENU_ID = "composer-strategy-menu";
+
+/**
+ * 这次执行的**计划从哪来**——策略控件里的两条取值。
+ *
+ * 项目里没有「两套并列的编排模式」：`static` 是动态路径的退化情形，计划不由规划节点
+ * 产出，而是一条常量链（收集 → 分析 → 报告）。所以它排在浮层的「兜底」分组，
+ * 不与「按任务规划」争一个对等的分段位（ADR-030 §2、ADR-037）。
+ */
+const STRATEGIES: readonly {
+  value: OrchestrationMode;
+  label: string;
+  tag: string;
+  hint: string;
+  secondary?: boolean;
+}[] = [
+  {
+    value: "dynamic",
+    label: "按任务规划",
+    tag: "默认",
+    hint: "规划 Agent 先判断需要哪些角色，再按依赖逐步执行。",
+  },
+  {
+    value: "static",
+    label: "固定链",
+    tag: "兜底",
+    hint: "计划恒为 收集 → 分析 → 报告，不经过规划 Agent。",
+    secondary: true,
+  },
+];
+
+/** 取当前模式对应的策略项；非法值回退第一项（默认策略）。 */
+function strategyOf(mode: OrchestrationMode) {
+  return STRATEGIES.find((item) => item.value === mode) ?? STRATEGIES[0];
+}
+
 /**
  * 时间戳：今天只给时刻，往日补上日期。
  *
@@ -141,8 +185,8 @@ export function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
   const [content, setContent] = useState("");
-  // 编排模式：默认自动编排（ADR-019 的 `dynamic`）。服务端默认仍是 static，
-  // 这里是**前端每次请求显式声明**的取值，输入框右侧随时可切回固定三步。
+  // 计划来源：默认「按任务规划」（ADR-019 的 `dynamic`）。服务端默认仍是 static，
+  // 这里是**前端每次请求显式声明**的取值（ADR-037）。
   const [mode, setMode] = useState<OrchestrationMode>("dynamic");
   // 待发送附件：选文件即上传，提交时只带 id（ADR-021）。
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
@@ -153,6 +197,12 @@ export function App() {
   const [mobileNav, setMobileNav] = useState(false);
   const [dockOpen, setDockOpen] = useState(true);
   const [inspectorOpen, setInspectorOpen] = useState(false);
+  // 外观主题：偏好（跟随系统/浅色/深色）与当下生效的外观分两层，见 ADR-038。
+  const {
+    preference: themePreference,
+    resolved: themeResolved,
+    cycle: cycleTheme,
+  } = useTheme();
   /* ---------------------------------------------------------------------- */
   /* 工作区（`doc/api.md` §5.19 / §7.1）                                     */
   /*                                                                        */
@@ -607,7 +657,29 @@ export function App() {
         </div>
         <div className="sidebar-footer">
           <span>v0.1.0</span>
-          <Settings2 size={15} />
+          {/*
+            外观切换（ADR-038）：原来这里是 `Settings2` 图标——它不通向任何设置，
+            只是一个装饰，占着页脚最顺手的那个位置。换成三态循环开关后，
+            「跟随系统」是**默认值**而不是隐藏项：不写存储、跟着系统走，
+            点一次切深色、再点切浅色、第三下收回跟随系统（`title` 里写明下一击去哪）。
+          */}
+          <button
+            type="button"
+            className="theme-toggle"
+            onClick={cycleTheme}
+            title={themeButtonTitle(themePreference, themeResolved)}
+            aria-label={themeButtonTitle(themePreference, themeResolved)}
+            data-theme-preference={themePreference}
+          >
+            {themePreference === "dark" ? (
+              <Moon size={14} aria-hidden="true" />
+            ) : themePreference === "light" ? (
+              <Sun size={14} aria-hidden="true" />
+            ) : (
+              <Monitor size={14} aria-hidden="true" />
+            )}
+            <span className="theme-toggle-label">{THEME_LABEL[themePreference]}</span>
+          </button>
         </div>
       </aside>
       <div className="main-shell">
@@ -915,7 +987,7 @@ type WorkspaceProps = {
   attachments: PendingAttachment[];
   onPickFiles: (files: FileList | File[]) => void;
   onRemoveAttachment: (key: string) => void;
-  /** 编排模式（ADR-019）：`static` 固定三步，`dynamic` 由规划节点按任务分配角色。 */
+  /** 计划来源（ADR-019 / ADR-037）：`static` 的计划恒为固定链，`dynamic` 由规划节点分配角色。 */
   mode: OrchestrationMode;
   setMode: (value: OrchestrationMode) => void;
   /** 工作区审批（§5.20）：状态在 `App` 里维护——导航角标与对话流卡片要共用同一份。 */
@@ -1105,6 +1177,32 @@ function Workspace({
     hydrated.current = true;
   }, []);
 
+  /*
+    策略浮层：受控 + 按需挂载，与角色弹窗的图标浮层同一套模式。
+    状态放在**这里**而不是 `App`——`mode` 由 `App` 持有，但这个控件活在输入区，
+    浮层的开合与容器引用只服务于它，没有第二个消费者。
+  */
+  const [strategyOpen, setStrategyOpen] = useState(false);
+  const strategyRef = useRef<HTMLDivElement>(null);
+
+  // 外点关闭 / Esc 收起。这里**不** `stopPropagation`：本层没有 Modal 的冒泡关闭要挡，
+  // 而工作区抽屉自己的 Esc 处理挂在 window 上，抢掉会让抽屉关不掉。
+  useEffect(() => {
+    if (!strategyOpen) return;
+    const onMouseDown = (event: MouseEvent) => {
+      if (!strategyRef.current?.contains(event.target as Node)) setStrategyOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setStrategyOpen(false);
+    };
+    document.addEventListener("mousedown", onMouseDown);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onMouseDown);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [strategyOpen]);
+
   useEffect(() => {
     for (const item of messages) revealed.current.add(item.id);
   }, [messages]);
@@ -1120,9 +1218,14 @@ function Workspace({
   const busy =
     sending || workflow?.status === "running" || workflow?.status === "pending";
   // 执行台把当前阶段置顶，便于执行中一眼看到谁在跑；协作链路视图仍按真实顺序渲染。
-  const runtimeNodes = dockNodes(workflow, agents, completed).sort((left, right) =>
-    left.id === activeStage ? -1 : right.id === activeStage ? 1 : 0,
-  );
+  // 计划还没落盘时不列节点：执行台原先会摆出写死的固定三步，等计划落盘再整块换掉，
+  // 读数的人会把第一版当成真链路（见 `workspace/collaboration.ts::isPlanning`）。
+  const planning = isPlanning(workflow, mode);
+  const runtimeNodes = planning
+    ? []
+    : dockNodes(workflow, agents, completed).sort((left, right) =>
+        left.id === activeStage ? -1 : right.id === activeStage ? 1 : 0,
+      );
   const detail =
     detailNode ?? (detailStage ? stageDetail(detailStage, workflow, agents, completed) : null);
   const uploading = attachments.some((item) => item.state === "uploading");
@@ -1137,6 +1240,13 @@ function Workspace({
   const [traces, setTraces] = useState<WorkflowStageTrace | null>(null);
   const [traceError, setTraceError] = useState("");
   const [traceLoading, setTraceLoading] = useState(false);
+  // 历史对话各自的工作流（§5.18），用于把「执行活动」卡片按对话贴回 transcript，
+  // 而不是只有最新一条对话有卡片、之前对话的过程像「丢失」了一样。
+  const [historyWorkflows, setHistoryWorkflows] = useState<Workflow[]>([]);
+  const [historyTraces, setHistoryTraces] = useState<Record<string, WorkflowStageTrace | null>>({});
+  // 运行中「正在发生」的工具调用（§5.4）：步骤完成前就逐条落库，轮询它即可让工具调用
+  // 在步骤还没跑完时逐条长出，替代「整步完成才一次性出现」的块状更新。
+  const [liveToolCalls, setLiveToolCalls] = useState<ToolCall[]>([]);
   const detailStageId = detail?.stageId ?? null;
   const workflowId = workflow?.id ?? null;
   // 依赖用**实测变化的原始值**：Workflow 轮询在终态停止，所以这里只在阶段推进时重拉。
@@ -1173,6 +1283,85 @@ function Workspace({
     };
   }, [workflowId, workflowRevision]);
 
+  // 拉历史对话各自的工作流（§5.18），把「执行活动」卡片贴回每条历史对话。
+  // 当前 workflow 不重复拉——它的轨迹走上面的 `traces`，历史走 `historyTraces`。
+  useEffect(() => {
+    if (!session?.id) {
+      setHistoryWorkflows([]);
+      return;
+    }
+    let live = true;
+    api
+      .getSessionWorkflows(session.id)
+      .then((page) => {
+        if (!live) return;
+        // 排除当前 workflow：它由 `workflow` + `traces` 实时驱动。
+        const currentId = workflow?.id;
+        setHistoryWorkflows(page.items.filter((item) => item.id !== currentId));
+      })
+      .catch(() => {
+        if (live) setHistoryWorkflows([]);
+      });
+    return () => {
+      live = false;
+    };
+  }, [session?.id, workflow?.id]);
+
+  // 历史工作流各自的轨迹：懒加载，拉到就缓存进 `historyTraces`，回看时不重复请求。
+  useEffect(() => {
+    const missing = historyWorkflows.filter((item) => !(item.id in historyTraces));
+    if (!missing.length) return;
+    let live = true;
+    void Promise.all(
+      missing.map((item) =>
+        api
+          .getWorkflowStages(item.id)
+          .then((data) => [item.id, data] as const)
+          .catch(() => [item.id, null] as const),
+      ),
+    ).then((pairs) => {
+      if (!live) return;
+      setHistoryTraces((current) => {
+        const next = { ...current };
+        for (const [id, data] of pairs) next[id] = data;
+        return next;
+      });
+    });
+    return () => {
+      live = false;
+    };
+  }, [historyWorkflows]);
+
+  // 运行中轮询工具调用（§5.4）：让「正在跑的那一步」的工具调用逐条长出。终态即停。
+  useEffect(() => {
+    if (!workflowId) {
+      setLiveToolCalls([]);
+      return;
+    }
+    const running = workflow?.status === "running" || workflow?.status === "pending";
+    if (!running) {
+      setLiveToolCalls([]);
+      return;
+    }
+    let live = true;
+    const poll = () => {
+      api
+        .getToolCalls(workflowId)
+        .then((page) => {
+          if (live) setLiveToolCalls(page.items);
+        })
+        .catch(() => {
+          /* 工具调用拉不到不阻塞主流程：步骤完成后的轨迹仍会带出完整工具调用。 */
+        });
+    };
+    poll();
+    const timer = window.setInterval(poll, 1500);
+    return () => {
+      live = false;
+      window.clearInterval(timer);
+    };
+  }, [workflowId, workflow?.status]);
+
   const activeTrace =
     traces?.items.find((item) => item.stage === detailStageId) ?? null;
   // 整条链路都没有分阶段轨迹（目前只有动态编排）时，原因说在弹窗主体里，
@@ -1186,6 +1375,34 @@ function Workspace({
         (m) => m.role === "assistant" && m.agent_run_id === workflow.agent_run_id,
       )
     : -1;
+
+  // 每条对话（按 `agent_run_id`）对应的活动卡数据：当前 workflow 实时 + 历史 workflow 回看。
+  // 把「当前」与「历史」收敛成同一份映射，transcript 才能对每条对话都渲染活动卡，
+  // 而不是只有最新一条有卡、之前的对话像「丢失」了。
+  const activityByRunId = useMemo(() => {
+    const map = new Map<
+      string,
+      {
+        workflow: Workflow;
+        traces: WorkflowStageTrace | null;
+        completed: Set<string>;
+        liveToolCalls: ToolCall[];
+      }
+    >();
+    if (workflow?.agent_run_id) {
+      map.set(workflow.agent_run_id, { workflow, traces, completed, liveToolCalls });
+    }
+    for (const item of historyWorkflows) {
+      if (!item.agent_run_id || map.has(item.agent_run_id)) continue;
+      map.set(item.agent_run_id, {
+        workflow: item,
+        traces: historyTraces[item.id] ?? null,
+        completed: new Set(item.checkpoint?.completed_steps ?? []),
+        liveToolCalls: [],
+      });
+    }
+    return map;
+  }, [workflow, traces, completed, historyWorkflows, historyTraces, liveToolCalls]);
 
   useEffect(() => {
     if (followLatest.current && stream.current)
@@ -1258,30 +1475,40 @@ function Workspace({
             >
               {messages.length ? (
                 <div className="conversation-transcript">
-                  {messages.map((m, index) => (
-                    <Fragment key={m.id}>
-                      {/* 执行活动摆在「提问之后、答复之前」——过程要出现在结果的**上一个位置**，
-                          而不是被排到整段对话的最末尾（那样它看起来像另一个任务）。 */}
-                      {index === reportIndex && workflow && (
-                        <>
+                  {messages.map((m, index) => {
+                    // 每条报告消息前贴它对应那次执行的活动卡（当前 + 历史都贴）。
+                    const activity =
+                      m.role === "assistant" && m.agent_run_id
+                        ? activityByRunId.get(m.agent_run_id)
+                        : undefined;
+                    return (
+                      <Fragment key={m.id}>
+                        {/* 执行活动摆在「提问之后、答复之前」——过程要出现在结果的**上一个位置**，
+                            而不是被排到整段对话的最末尾（那样它看起来像另一个任务）。 */}
+                        {activity && (
                           <RunActivity
-                            workflow={workflow}
-                            traces={traces}
+                            workflow={activity.workflow}
+                            traces={activity.traces}
                             stages={STAGE_META}
                             agents={agents}
-                            completed={completed}
+                            completed={activity.completed}
+                            liveToolCalls={activity.liveToolCalls}
                           />
+                        )}
+                        {/* 审批卡片只贴**本次**执行那一处（§5.20）：历史对话里已经决策过的
+                            审批不再重复出现。 */}
+                        {index === reportIndex && workflow && (
                           <ApprovalCard
                             approvals={approvals}
                             busy={approvalBusy}
                             error={approvalError}
                             onDecide={onDecideApproval}
                           />
-                        </>
-                      )}
-                      <MessageBubble message={m} stream={isFresh(m.id)} />
-                    </Fragment>
-                  ))}
+                        )}
+                        <MessageBubble message={m} stream={isFresh(m.id)} />
+                      </Fragment>
+                    );
+                  })}
                   {workflow && reportIndex < 0 && (
                     <>
                       <RunActivity
@@ -1290,6 +1517,8 @@ function Workspace({
                         stages={STAGE_META}
                         agents={agents}
                         completed={completed}
+                        requestedMode={mode}
+                        liveToolCalls={liveToolCalls}
                       />
                       <ApprovalCard
                         approvals={approvals}
@@ -1404,22 +1633,50 @@ function Workspace({
                       : "可拖拽或粘贴图片/文档 · Enter 发送 · Shift + Enter 换行"}
               </small>
             </div>
-            <div className="composer-mode" role="group" aria-label="编排模式">
-              {([
-                ["dynamic", "自动编排", "由规划 Agent 按任务决定谁参与"],
-                ["static", "固定三步", "始终走 收集 → 分析 → 报告"],
-              ] as const).map(([value, label, hint]) => (
-                <button
-                  key={value}
-                  type="button"
-                  className={mode === value ? "active" : ""}
-                  aria-pressed={mode === value}
-                  title={hint}
-                  onClick={() => setMode(value)}
-                >
-                  {label}
-                </button>
-              ))}
+            {/*
+              策略控件：这次执行的**计划从哪来**。固定链不是与「按任务规划」并列的
+              第二种编排模式，而是动态路径的退化情形（ADR-030 §2、ADR-037），因此
+              降级到浮层里的次要分组，不再与主策略争一个对等的分段位。
+            */}
+            <div className="composer-strategy" ref={strategyRef}>
+              <button
+                type="button"
+                className="composer-strategy-trigger"
+                aria-haspopup="true"
+                aria-expanded={strategyOpen}
+                aria-controls={strategyOpen ? STRATEGY_MENU_ID : undefined}
+                onClick={() => setStrategyOpen((open) => !open)}
+              >
+                <Settings2 size={13} aria-hidden="true" />
+                策略
+                <b>{strategyOf(mode).label}</b>
+                <ChevronDown size={12} className="composer-strategy-caret" aria-hidden="true" />
+              </button>
+              {strategyOpen ? (
+                <div className="composer-strategy-menu" id={STRATEGY_MENU_ID}>
+                  <p className="composer-strategy-head">计划从哪来</p>
+                  {STRATEGIES.map((item) => (
+                    <button
+                      key={item.value}
+                      type="button"
+                      className={`composer-strategy-item${
+                        item.value === mode ? " is-active" : ""
+                      }${item.secondary ? " is-secondary" : ""}`}
+                      aria-pressed={item.value === mode}
+                      onClick={() => {
+                        setMode(item.value);
+                        setStrategyOpen(false);
+                      }}
+                    >
+                      <span className="composer-strategy-name">
+                        {item.label}
+                        <em>{item.tag}</em>
+                      </span>
+                      <small>{item.hint}</small>
+                    </button>
+                  ))}
+                </div>
+              ) : null}
             </div>
             <button
               className="primary-button"
@@ -1448,6 +1705,7 @@ function Workspace({
         traces={traces}
         messages={messages}
         sessionId={session?.id ?? null}
+        mode={mode}
         onOpenRecords={onOpenRecords}
       />
       {/*
@@ -1511,7 +1769,9 @@ function Workspace({
           <div>
             <span>
               {workflow
-                ? `${completed.size} / ${runtimeNodes.length} 完成`
+                ? planning
+                  ? "正在规划"
+                  : `${completed.size} / ${runtimeNodes.length} 完成`
                 : "等待任务"}
             </span>
             <button
@@ -1524,7 +1784,12 @@ function Workspace({
             </button>
           </div>
         </header>
-        {dockOpen && workflow && (
+        {dockOpen && workflow && planning && (
+          <div className="dock-empty">
+            <LoaderCircle size={15} className="spin" />正在规划：任务分配还没产出，这里等计划落盘后再列节点
+          </div>
+        )}
+        {dockOpen && workflow && !planning && (
           <div className="dock-track">
             {runtimeNodes.map((node) => {
               const Icon = node.icon;
@@ -1615,11 +1880,11 @@ function ConversationOutline({
  * 空白会话的引导区。
  *
  * 三张卡片是**任务原型**，不是三个功能按钮：它们各自代表一类协作形态，
- * 点下去会把问题填进输入框、同时把编排模式切到「自动编排」——
+ * 点下去会把问题填进输入框、同时把策略切到「按任务规划」——
  * 卡片上写的「通常 1 个 Agent 直答」「调查 → 分析 → 总结」只有在规划 Agent
- * 真的参与判断时才成立，所以切模式是卡片语义的一部分，不是附带的方便操作。
+ * 真的参与判断时才成立，所以切策略是卡片语义的一部分，不是附带的方便操作。
  *
- * 当前生效的模式在卡片下方**显式写出**，用户随时能在输入框右侧改回来；
+ * 当前生效的策略在卡片下方**显式写出**，用户随时能在输入框右侧改回来；
  * 宁可让这句提示显得啰嗦，也不要让卡片承诺一件当前链路不会做的事。
  */
 function Welcome({
@@ -1684,8 +1949,8 @@ function Welcome({
       </div>
       <p className="welcome-note">
         {mode === "dynamic"
-          ? "当前：自动编排 — 规划 Agent 先判断需要哪些角色，再按依赖逐步执行。"
-          : "当前：固定三步 — 始终走 收集 → 分析 → 报告。选任意卡片会切到自动编排。"}
+          ? "当前策略：按任务规划 — 规划 Agent 先判断需要哪些角色，再按依赖逐步执行。"
+          : "当前策略：固定链 — 计划恒为 收集 → 分析 → 报告，不经过规划 Agent。选任意卡片会切回按任务规划。"}
       </p>
     </div>
   );
@@ -1754,6 +2019,7 @@ function Inspector({
   traces,
   messages,
   sessionId,
+  mode,
   onOpenRecords,
 }: {
   open: boolean;
@@ -1762,6 +2028,8 @@ function Inspector({
   /** Agent 目录：协作卡片上的模型、参数都取自它。 */
   agents: Agent[];
   completed: Set<string>;
+  /** 提交时声明的计划来源：实时工作流的画布据此区分「在规划」与「固定链」。 */
+  mode: OrchestrationMode;
   /** 当前 Workflow 的阶段执行轨迹，与执行台弹窗**共用同一份**。 */
   traces: WorkflowStageTrace | null;
   /** 会话消息，用来给每次对话贴「任务 N」的标签。 */
@@ -1791,6 +2059,7 @@ function Inspector({
     completed,
     traces,
     metrics: live.metrics,
+    requestedMode: mode,
   });
 
   /* ---------------------------------------------------------------------- */
@@ -1814,6 +2083,8 @@ function Inspector({
     completed: canvasCompleted,
     traces: canvasTraces,
     metrics: canvasMetrics,
+    // 选了别的对话时不能借当前那个开关：那份工作流的模式得按它自己的数据判断。
+    requestedMode: isLive ? mode : undefined,
   });
 
   // 打开画布时锚到当前对话；`updated_at` 一并作依赖，让新任务跑完能出现在列表里。

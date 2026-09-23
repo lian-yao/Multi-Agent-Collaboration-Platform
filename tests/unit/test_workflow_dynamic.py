@@ -10,6 +10,8 @@
 沿用 `tests/unit/test_workflow_pipeline.py` 的假上下文写法，不启动真实 Dapr。
 """
 
+import re
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -25,6 +27,7 @@ from app.workflows.dynamic import (
     DYNAMIC_WORKFLOW_NAME,
     agent_dynamic_workflow,
     dynamic_plan_activity,
+    dynamic_progress_activity,
     dynamic_step_activity,
     dynamic_subtask_workflow,
 )
@@ -116,7 +119,8 @@ def test_workflow_functions_are_generators():
     assert inspect.isgeneratorfunction(dynamic_subtask_workflow)
 
 
-def test_drill_mode_plan_activity_returns_fallback_without_model():
+def test_drill_mode_plan_activity_returns_fallback_without_model(monkeypatch):
+    monkeypatch.setattr("app.workflows.dynamic.update_workflow_run", lambda *a, **k: None)
     result = dynamic_plan_activity(_ActivityContext(), {"task": _task()})
 
     plan = result["plan"]
@@ -126,7 +130,33 @@ def test_drill_mode_plan_activity_returns_fallback_without_model():
     assert "演练模式" in plan["rationale"]
 
 
-def test_drill_mode_step_activity_is_deterministic():
+def test_drill_mode_plan_activity_persists_plan_checkpoint(monkeypatch):
+    """规划产出后立即把计划写回 checkpoint（§5.22「计划即落盘」）。"""
+
+    written: dict[str, Any] = {}
+
+    def fake_update(workflow_id: str, **kwargs: Any) -> None:
+        written["workflow_id"] = workflow_id
+        written.update(kwargs)
+
+    monkeypatch.setattr("app.workflows.dynamic.update_workflow_run", fake_update)
+
+    dynamic_plan_activity(_ActivityContext(), {"task": _task()})
+
+    checkpoint = written["checkpoint"]
+    assert written["workflow_id"] == "wf-1"
+    assert checkpoint["mode"] == "dynamic"
+    assert checkpoint["status"] == "running"
+    assert checkpoint["plan_rationale"] != ""
+    assert [step["role"] for step in checkpoint["plan"]] == ["collector", "analyst", "reporter"]
+    assert all(step["status"] == "pending" for step in checkpoint["plan"])
+    # 首步同时占住 `current_step`（§5.22）：**行与 checkpoint 两处都要写**——前端只认
+    # 指针相等的那一步（默认摊开 + 承接实时工具调用），少写一处这条链路就断。
+    assert written["current_step"] == checkpoint["current_step"] == "s1"
+
+
+def test_drill_mode_step_activity_is_deterministic(monkeypatch):
+    monkeypatch.setattr("app.workflows.dynamic.save_step_result", lambda *a, **k: None)
     payload = {
         "task": _task(),
         "step": THREE_STEPS[1],
@@ -142,7 +172,30 @@ def test_drill_mode_step_activity_is_deterministic():
     assert "s1" in first["outcome"]["content"]
 
 
-def test_step_activity_absent_results_are_tolerated():
+def test_step_activity_persists_step_outcome_to_state_store(monkeypatch):
+    """每步完成后把 StepOutcome 落盘到状态存储 key `dyn:{step_id}`（§5.22）。"""
+
+    saved: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "app.workflows.dynamic.save_step_result",
+        lambda workflow_id, step, result: saved.update(
+            {"workflow_id": workflow_id, "step": step, "result": result}
+        ),
+    )
+
+    dynamic_step_activity(
+        _ActivityContext(),
+        {"task": _task(), "step": THREE_STEPS[0], "results": {}},
+    )
+
+    assert saved["workflow_id"] == "wf-1"
+    assert saved["step"] == "dyn:s1"
+    assert saved["result"]["step_id"] == "s1"
+    assert saved["result"]["content"] != ""
+
+
+def test_step_activity_absent_results_are_tolerated(monkeypatch):
+    monkeypatch.setattr("app.workflows.dynamic.save_step_result", lambda *a, **k: None)
     payload = {"task": _task(), "step": THREE_STEPS[0]}
 
     result = dynamic_step_activity(_ActivityContext(), payload)
@@ -185,10 +238,14 @@ def test_plan_activity_feeds_session_history_into_the_planner(monkeypatch):
     def fake_generate_plan(task, llm, max_steps, **kwargs):
         captured["task"] = task
         captured["history"] = kwargs.get("history")
+        # ADR-036：候选角色集由活动层传入，缺它就说明合并时把并集吃掉了
+        assert "candidates" in kwargs
         return fallback_plan("测试替身")
 
     monkeypatch.setattr(dynamic_module, "generate_plan", fake_generate_plan)
     monkeypatch.setattr(dynamic_module, "build_chat_model", lambda settings: object())
+    # 规划活动返回前会把计划落盘（§5.22「计划即落盘」）；这条用例只看进参，写回不必真落库。
+    monkeypatch.setattr(dynamic_module, "update_workflow_run", lambda *a, **k: None)
 
     dynamic_plan_activity(_ActivityContext(), {"task": _task(use_fake_model=False)})
 
@@ -218,7 +275,16 @@ def test_step_activity_feeds_session_history_into_the_step(monkeypatch):
     captured: dict[str, Any] = {}
 
     def fake_run_plan_step(
-        step, task, results, llm, caller, workflow_id, attachments, history=(), preferences=""
+        step,
+        task,
+        results,
+        llm,
+        caller,
+        workflow_id,
+        attachments,
+        history=(),
+        preferences="",
+        catalog=None,
     ):
         captured["task"] = task
         captured["history"] = history
@@ -234,6 +300,8 @@ def test_step_activity_feeds_session_history_into_the_step(monkeypatch):
     monkeypatch.setattr(dynamic_module, "run_plan_step", fake_run_plan_step)
     monkeypatch.setattr(dynamic_module, "build_chat_model", lambda settings: object())
     monkeypatch.setattr(dynamic_module, "default_tool_registry", lambda: None)
+    # 每步完成即落盘（§5.22）在途侧新增：这两条只看进参，落盘替掉。
+    monkeypatch.setattr(dynamic_module, "save_step_result", lambda *a, **k: None)
 
     dynamic_step_activity(
         _ActivityContext(),
@@ -271,10 +339,12 @@ def test_step_activity_mounts_session_scoped_tools(monkeypatch):
 
     monkeypatch.setattr(dynamic_module, "default_tool_registry", _BaseRegistry)
     monkeypatch.setattr(dynamic_module, "build_chat_model", lambda settings: object())
+    # 每步完成即落盘（§5.22）在途侧新增：这两条只看进参，落盘替掉。
+    monkeypatch.setattr(dynamic_module, "save_step_result", lambda *a, **k: None)
     monkeypatch.setattr(
         dynamic_module,
         "run_plan_step",
-        lambda step, task, results, llm, caller, workflow_id, attachments, history=(), preferences="": (
+        lambda step, task, results, llm, caller, workflow_id, attachments, history=(), preferences="", catalog=None: (
             StepOutcome(
                 step_id=step.id,
                 role=step.role,
@@ -321,17 +391,22 @@ def test_dynamic_workflow_plans_then_runs_each_step():
     assert ctx.calls[1][0:2] == ("activity", "dynamic_plan_activity")
 
     gen.send(_plan_payload(THREE_STEPS))
+    # 每个步骤：先 child 子工作流执行，再 progress 活动回写进度。
     for index, step in enumerate(THREE_STEPS):
-        call = ctx.calls[index + 2]
-        assert call[0:2] == ("child", "dynamic_subtask_workflow")
-        assert call[2]["step"]["id"] == step["id"]
-        assert call[3] == f"wf-1:dyn:{step['id']}"
+        child_calls = [call for call in ctx.calls if call[0] == "child"]
+        assert child_calls[index][2]["step"]["id"] == step["id"]
+        assert child_calls[index][3] == f"wf-1:dyn:{step['id']}"
         gen.send(
             {
                 "workflow_id": "wf-1",
                 "outcome": _outcome(step["id"], step["role"], PlanStepStatus.COMPLETED, f"{step['id']} 产出"),
             }
         )
+        # 喂回 progress 活动的返回值，推进到下一步的 child 调用。
+        gen.send({"workflow_id": "wf-1"})
+    # 每步执行完都紧跟一次进度回写（三步 → 三次 progress 活动）。
+    progress_calls = [call for call in ctx.calls if call[0:2] == ("activity", "dynamic_progress_activity")]
+    assert len(progress_calls) == 3
 
     finalize = ctx.calls[-1]
     assert finalize[0:2] == ("activity", "finalize_activity")
@@ -347,6 +422,69 @@ def test_dynamic_workflow_plans_then_runs_each_step():
         gen.send(None)
 
 
+def test_progress_activity_writes_running_checkpoint_with_plan(monkeypatch):
+    """进度活动回写 running 状态的完整 checkpoint（含 plan + rationale + 已完成步骤）。"""
+
+    written: dict[str, Any] = {}
+
+    def fake_update(workflow_id: str, **kwargs: Any) -> None:
+        written["workflow_id"] = workflow_id
+        written.update(kwargs)
+
+    monkeypatch.setattr("app.workflows.dynamic.update_workflow_run", fake_update)
+
+    result = dynamic_progress_activity(
+        _ActivityContext(),
+        {
+            "workflow_id": "wf-1",
+            "plan": _plan_payload(THREE_STEPS)["plan"],
+            "results": {"s1": _outcome("s1", "collector", PlanStepStatus.COMPLETED, "要点")},
+        },
+    )
+
+    assert result["workflow_id"] == "wf-1"
+    checkpoint = written["checkpoint"]
+    assert checkpoint["status"] == "running"
+    assert checkpoint["completed_steps"] == ["s1"]
+    assert checkpoint["plan_rationale"] == "测试"
+    by_id = {step["id"]: step for step in checkpoint["plan"]}
+    assert by_id["s1"]["status"] == "completed"
+    assert by_id["s2"]["status"] == "pending"
+    assert by_id["s2"]["role"] == "analyst"
+    # 指针推到「下一个还没出结果的步骤」（§5.22）：口径与静态链路一致——在上一步落盘时
+    # 就把指针写成下一步，而不是等下一步开跑。运行中的那一步靠它才会默认摊开。
+    assert written["current_step"] == checkpoint["current_step"] == "s2"
+
+
+def test_progress_activity_clears_pointer_when_every_step_has_a_result(monkeypatch):
+    """全部步骤都有结果后指针归零（§5.22：终态 `checkpoint.current_step` 为 `null`）。"""
+
+    written: dict[str, Any] = {}
+
+    def fake_update(workflow_id: str, **kwargs: Any) -> None:
+        written["workflow_id"] = workflow_id
+        written.update(kwargs)
+
+    monkeypatch.setattr("app.workflows.dynamic.update_workflow_run", fake_update)
+
+    dynamic_progress_activity(
+        _ActivityContext(),
+        {
+            "workflow_id": "wf-1",
+            "plan": _plan_payload(THREE_STEPS)["plan"],
+            "results": {
+                "s1": _outcome("s1", "collector", PlanStepStatus.COMPLETED, "a"),
+                "s2": _outcome("s2", "analyst", PlanStepStatus.COMPLETED, "b"),
+                "s3": _outcome("s3", "reporter", PlanStepStatus.COMPLETED, "c"),
+            },
+        },
+    )
+
+    assert written["current_step"] is None
+    assert written["checkpoint"]["current_step"] is None
+    assert written["checkpoint"]["completed_steps"] == ["s1", "s2", "s3"]
+
+
 def test_dynamic_workflow_passes_upstream_results_to_later_steps():
     ctx = _ScriptedWorkflowContext("wf-1")
     gen = agent_dynamic_workflow(ctx, _task())
@@ -355,7 +493,9 @@ def test_dynamic_workflow_passes_upstream_results_to_later_steps():
     gen.send(_plan_payload(THREE_STEPS))
 
     gen.send({"outcome": _outcome("s1", "collector", PlanStepStatus.COMPLETED, "要点")})
-    second_child_input = ctx.calls[3][2]
+    # 喂回 progress 活动的返回值，推进到 s2 的 child 调用。
+    gen.send({"workflow_id": "wf-1"})
+    second_child_input = [call for call in ctx.calls if call[0] == "child"][1][2]
 
     assert second_child_input["results"]["s1"]["content"] == "要点"
 
@@ -369,6 +509,8 @@ def test_failed_step_skips_downstream_and_fails_the_workflow():
 
     # s1 失败：s2、s3 连坐跳过，不应再产生任何子工作流调用。
     gen.send({"outcome": _outcome("s1", "collector", PlanStepStatus.FAILED)})
+    # 喂回 s1 的 progress 活动返回值，推进到 s2/s3 的跳过判定与终态。
+    gen.send({"workflow_id": "wf-1"})
 
     child_calls = [call for call in ctx.calls if call[0] == "child"]
     assert len(child_calls) == 1
@@ -422,7 +564,7 @@ def test_subtask_workflow_wraps_step_in_one_activity():
 def test_fallback_plan_steps_match_workflow_expectations():
     plan = fallback_plan()
 
-    assert [(step.id, step.role.value, step.depends_on) for step in plan.steps] == [
+    assert [(step.id, step.role, step.depends_on) for step in plan.steps] == [
         ("s1", "collector", []),
         ("s2", "analyst", ["s1"]),
         ("s3", "reporter", ["s2"]),
@@ -475,6 +617,54 @@ def test_service_registers_dynamic_workflows_alongside_static():
     assert names == [WORKFLOW_NAME, SUBTASK_WORKFLOW_NAME, DYNAMIC_WORKFLOW_NAME, DYNAMIC_SUBTASK_WORKFLOW_NAME]
     assert "dynamic_plan_activity" in runtime.activities
     assert "dynamic_step_activity" in runtime.activities
+
+
+# 注册清单是**第二处**独立清单：工作流体里 `ctx.call_activity(...)` 调的名字，与
+# `WorkflowService.register()` 里注册的名字之间没有任何交叉校验。漏一处**导入期与启动期都不
+# 报错**，只在真 Dapr 运行时跑到那一步时炸
+# `Activity task #N failed: Activity function named 'x' was not registered!`。
+# 上面那条 `in` 断言看不见这种情况——它检查的是「我认识的这几个在不在」，不是「调用到的都注册
+# 了没」。所以这里按**源码反推应注册集合**再比对：在没有真运行时的前提下，这是唯一能拦住漏注册
+# 的办法。（2026-09-22 线上据此挂掉：`dynamic_progress_activity` 加进了工作流体却没注册，
+# 所有 dynamic 任务都在第一步跑完后失败。）
+_WORKFLOW_SOURCE_DIR = Path(__file__).resolve().parents[2] / "app" / "workflows"
+_CALL_ACTIVITY = re.compile(r"call_activity\(\s*([A-Za-z_]\w*)")
+_CALL_CHILD_WORKFLOW = re.compile(r"call_child_workflow\(\s*([A-Za-z_]\w*)")
+
+
+def _called_names(pattern: "re.Pattern[str]") -> set[str]:
+    """扫 `app/workflows/*.py` 里被调用的活动 / 子工作流名（忽略行尾注释）。"""
+
+    names: set[str] = set()
+    for path in sorted(_WORKFLOW_SOURCE_DIR.glob("*.py")):
+        source = "\n".join(
+            line.split("#", 1)[0] for line in path.read_text(encoding="utf-8").splitlines()
+        )
+        names |= set(pattern.findall(source))
+    return names
+
+
+def test_every_activity_called_by_a_workflow_body_is_registered():
+    runtime = _RecordingRuntime()
+    WorkflowService(runtime=runtime, client=_RecordingClient()).register()
+
+    missing = sorted(_called_names(_CALL_ACTIVITY) - set(runtime.activities))
+    assert not missing, (
+        f"工作流体调用了但没注册的活动：{missing} —— 真 Dapr 运行时会报 "
+        "'Activity function named ... was not registered!'，"
+        "补 `service.py` 的 import 与 `register_activity`。"
+    )
+
+
+def test_every_child_workflow_called_by_a_workflow_body_is_registered():
+    runtime = _RecordingRuntime()
+    WorkflowService(runtime=runtime, client=_RecordingClient()).register()
+
+    # `_RecordingRuntime` 记的第二个元素是函数自己的名字：这几个工作流都没用装饰器改名，
+    # 传给 Dapr 的名字是在 `register_workflow(..., name=...)` 里显式给的常量。
+    registered = {ident for _, ident in runtime.workflows}
+    missing = sorted(_called_names(_CALL_CHILD_WORKFLOW) - registered)
+    assert not missing, f"工作流体调用了但没注册的子工作流：{missing}"
     # 静态链路的活动一个都没少。
     assert {"run_stage_activity", "collect_activity", "finalize_activity"} <= set(runtime.activities)
 

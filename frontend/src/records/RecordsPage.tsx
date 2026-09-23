@@ -1,11 +1,27 @@
-import { useCallback, useEffect, useState } from "react";
-import { Clock3, Gauge, Wrench, ChevronRight, History, MessagesSquare, Trash2 } from "lucide-react";
+import { useCallback, useEffect, useId, useState } from "react";
+import {
+  Clock3,
+  Gauge,
+  Wrench,
+  ChevronRight,
+  History,
+  MessagesSquare,
+  RefreshCw,
+  Trash2,
+} from "lucide-react";
 import { PageTabs, type PageTab } from "../components/PageTabs";
 import { Status } from "../components/Status";
 import { InlineConfirm } from "../components/InlineConfirm";
-import { EmptyState, describeError, formatTime } from "../config/shared";
+import { AgentGlyph } from "../components/AgentGlyph";
+import { Chip, EmptyState, describeError, formatTime } from "../config/shared";
 import { api } from "../api/client";
-import type { SessionSummary, Workflow } from "../types/api";
+import type {
+  SessionSummary,
+  StageTraceItem,
+  Workflow,
+  WorkflowStageTrace,
+} from "../types/api";
+import { PLAN_SOURCE_HINT, PLAN_SOURCE_TEXT, planSourceKey } from "../workspace/collaboration";
 import { RuntimeSampling, ToolCallRecords } from "./Inspection";
 import "./records.css";
 
@@ -41,6 +57,66 @@ const STATUS_LABEL: Record<string, string> = {
   cancelled: "已取消",
 };
 
+/**
+ * 单步阶段日志（§5.17）。
+ *
+ * 失败的工具调用单独顶出来：整条链路失败时，原因往往就藏在某一次工具调用里，
+ * 让它埋在「输入与产出」的 JSON 里等于没有报错信息。
+ */
+function StageLogRow({ item }: { item: StageTraceItem }) {
+  const failed = item.tool_calls.filter((call) => call.status === "failed");
+  return (
+    <article className="record-row record-stage">
+      <div className="record-row-main">
+        <AgentGlyph role={item.role} name={item.role} size={16} />
+        <b>{item.role}</b>
+        <span className="record-run-id">{item.stage}</span>
+        {item.tool_calls.length > 0 && (
+          <Chip tone="slate">{item.tool_calls.length} 次工具调用</Chip>
+        )}
+        {failed.length > 0 && <Chip tone="rose">{failed.length} 次失败</Chip>}
+        {item.truncated && <Chip tone="amber">内容已截断</Chip>}
+      </div>
+
+      {/* reason 与「有轨迹」互斥，且四种原因指向四种不同的下一步，原样显示。 */}
+      {item.reason && <p className="cfg-hint">{item.reason}</p>}
+
+      {failed.map((call) =>
+        call.error ? (
+          <p role="alert" className="cfg-alert" key={call.call_id}>
+            <b>{call.tool_name}</b>：{call.error}
+          </p>
+        ) : null,
+      )}
+
+      <details className="cfg-tool-schema">
+        <summary>上游输入、本阶段产出与工具调用</summary>
+        <p className="cfg-hint">
+          输入来自：
+          {item.input_from ?? "（根阶段，收到的就是原始任务）"}
+        </p>
+        <pre>
+          {JSON.stringify(
+            { input: item.input, output: item.output, tool_calls: item.tool_calls },
+            null,
+            2,
+          )}
+        </pre>
+      </details>
+    </article>
+  );
+}
+
+/**
+ * 运行记录：当前会话最近一次执行。
+ *
+ * 卡片**就地展开**，不再把整张卡做成「跳到工作台」的入口：日志是要读的，
+ * 跳走之后用户还得自己找回来。展开区里是逐阶段日志，卡片自己的右下角留一个
+ * 显式入口给「要看对话与执行台」这一种需求。
+ *
+ * 取阶段日志的时机是**展开时**，而不是卡片一渲染就取：运行记录页默认只显示终态，
+ * 大多数人不需要逐阶段明细，不该为看一页状态付一次全量轨迹请求。
+ */
 function RunRecords({
   workflow,
   messageCount,
@@ -50,47 +126,164 @@ function RunRecords({
   messageCount: number;
   onOpen: () => void;
 }) {
+  const [open, setOpen] = useState(false);
+  const [trace, setTrace] = useState<WorkflowStageTrace | null>(null);
+  const [traceError, setTraceError] = useState("");
+  const [revision, setRevision] = useState(0);
+  const panelId = useId();
+
+  const workflowId = workflow?.id ?? "";
+  // 正在跑的任务，`updated_at` 每推进一步就变；把它并进依赖，展开区会跟着一起长。
+  const refreshedAt = workflow?.updated_at ?? "";
+
+  // 换了工作流（切会话 / 新任务）就把展开区清干净：否则会拿上一条链路的阶段日志
+  // 冒充本次执行，而且看不出是陈的。
+  useEffect(() => {
+    setTrace(null);
+    setTraceError("");
+  }, [workflowId]);
+
+  useEffect(() => {
+    if (!open || !workflowId) return;
+    let live = true;
+    setTraceError("");
+    void (async () => {
+      try {
+        const value = await api.getWorkflowStages(workflowId);
+        if (live) setTrace(value);
+      } catch (cause) {
+        if (!live) return;
+        setTrace(null);
+        setTraceError(describeError(cause, "阶段日志读取失败。"));
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [open, workflowId, refreshedAt, revision]);
+
   return (
     <section className="cfg-block record-block" aria-label="运行记录">
       <div className="cfg-block-head record-head">
         <div>
           <h3>运行记录</h3>
-          <p>当前会话最近一次执行的终态与检查点。切换其它历史任务请用页头「历史会话」入口。</p>
+          <p>
+            当前会话最近一次执行的终态、失败原因与逐阶段日志，都在这里就地展开；
+            需要对话与执行台时再点卡片内的入口。切换其它历史任务请用页头「历史会话」。
+          </p>
         </div>
       </div>
 
       {workflow ? (
         <div className="record-list">
-          <button type="button" className="record-run" onClick={onOpen}>
-            <span className="record-run-head">
-              <Status status={workflow.status} />
-              <b>协作任务</b>
-              <span className="record-run-id">{workflow.id.slice(0, 8)}</span>
-              <time>{formatTime(workflow.updated_at)}</time>
-            </span>
-            <dl className="record-run-facts">
-              <div>
-                <dt>当前阶段</dt>
-                <dd>{workflow.checkpoint?.current_step ?? workflow.current_step ?? "—"}</dd>
+          <div className={`record-run record-run-detail${open ? " open" : ""}`}>
+            <button
+              type="button"
+              className="record-run-main"
+              aria-expanded={open}
+              {...(open ? { "aria-controls": panelId } : {})}
+              onClick={() => setOpen((value) => !value)}
+            >
+              <span className="record-run-head">
+                <ChevronRight
+                  size={14}
+                  className={`record-run-chevron${open ? " is-open" : ""}`}
+                  aria-hidden="true"
+                />
+                <Status status={workflow.status} />
+                <b>协作任务</b>
+                <span className="record-run-id">{workflow.id.slice(0, 8)}</span>
+                <time>{formatTime(workflow.updated_at)}</time>
+              </span>
+              <dl className="record-run-facts">
+                <div>
+                  <dt>当前阶段</dt>
+                  <dd>{workflow.checkpoint?.current_step ?? workflow.current_step ?? "—"}</dd>
+                </div>
+                <div>
+                  <dt>已完成步骤</dt>
+                  <dd>{workflow.checkpoint?.completed_steps?.length ?? 0} 个</dd>
+                </div>
+                <div>
+                  <dt>会话消息</dt>
+                  <dd>{messageCount} 条</dd>
+                </div>
+                <div>
+                  <dt>状态</dt>
+                  <dd>{STATUS_LABEL[workflow.status] ?? workflow.status}</dd>
+                </div>
+              </dl>
+              <span className="record-run-head record-run-hint">
+                <span className="record-run-id">
+                  {open ? "收起阶段日志" : "展开阶段日志与失败原因"}
+                </span>
+                <ChevronRight size={14} aria-hidden="true" />
+              </span>
+            </button>
+
+            {/* 失败原因放在折叠区**之外**：失败却要先点开才看得到原因，就是这次要修的问题。
+                判据是「有没有原因」而不是「status 是不是 failed」——有些失败没有落 error，
+                那种情况下也不该凭空编一个原因出来。 */}
+            {workflow.error && (
+              <div className="record-run-alert">
+                <p role="alert" className="cfg-alert">
+                  <b>失败原因</b>
+                  <span>{workflow.error}</span>
+                </p>
               </div>
-              <div>
-                <dt>已完成步骤</dt>
-                <dd>{workflow.checkpoint?.completed_steps?.length ?? 0} 个</dd>
+            )}
+
+            {open && (
+              <div className="record-run-body" id={panelId}>
+                <div className="record-series-title">
+                  <b>阶段日志</b>
+                  {trace && (
+                    <Chip tone="slate" title={PLAN_SOURCE_HINT[planSourceKey({ mode: trace.mode })]}>
+                      {PLAN_SOURCE_TEXT[planSourceKey({ mode: trace.mode })]}
+                    </Chip>
+                  )}
+                  <span className="record-label">
+                    {trace ? `${trace.items.length} 步` : "读取中"}
+                  </span>
+                  <button
+                    type="button"
+                    className="cfg-quiet record-log-refresh"
+                    onClick={() => setRevision((value) => value + 1)}
+                  >
+                    <RefreshCw size={13} />
+                    重新读取
+                  </button>
+                </div>
+
+                {traceError && (
+                  <p role="alert" className="cfg-alert">
+                    {traceError}
+                  </p>
+                )}
+
+                {!trace && !traceError && <p className="cfg-hint">读取阶段日志…</p>}
+
+                {trace?.availability === "not_integrated" && (
+                  <p className="cfg-hint">{trace.reason ?? "后端未提供逐阶段轨迹。"}</p>
+                )}
+
+                {trace?.availability === "available" && trace.items.length === 0 && (
+                  <p className="cfg-hint">这条链路还没有可展开的阶段轨迹。</p>
+                )}
+
+                {trace?.items.map((item) => (
+                  <StageLogRow key={item.stage} item={item} />
+                ))}
+
+                <div className="record-run-actions">
+                  <button type="button" className="cfg-quiet" onClick={onOpen}>
+                    在工作台打开对话与执行台
+                    <ChevronRight size={13} aria-hidden="true" />
+                  </button>
+                </div>
               </div>
-              <div>
-                <dt>会话消息</dt>
-                <dd>{messageCount} 条</dd>
-              </div>
-              <div>
-                <dt>状态</dt>
-                <dd>{STATUS_LABEL[workflow.status] ?? workflow.status}</dd>
-              </div>
-            </dl>
-            <span className="record-run-head">
-              <span className="record-run-id">打开工作台查看对话与执行台</span>
-              <ChevronRight size={14} />
-            </span>
-          </button>
+            )}
+          </div>
         </div>
       ) : (
         <EmptyState

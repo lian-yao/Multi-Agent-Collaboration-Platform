@@ -8,6 +8,7 @@ from sqlalchemy.schema import CreateTable
 
 from app.config import AgentSettings
 from app.core import agent_config, checkpoint
+from app.core.agent_config import TOOL_NAMES_MAX_ITEMS
 from app.core.checkpoint import UNSET
 
 
@@ -25,6 +26,7 @@ def test_agent_configs_table_matches_data_model():
         "top_p",
         "max_output_tokens",
         "reasoning_type",
+        "tool_names",
         "updated_by",
         "updated_at",
     ]
@@ -36,6 +38,7 @@ def test_agent_configs_table_matches_data_model():
     assert "top_p FLOAT" in ddl
     assert "max_output_tokens INTEGER" in ddl
     assert "reasoning_type VARCHAR(20)" in ddl
+    assert "tool_names JSONB" in ddl
     assert "updated_by VARCHAR(100)" in ddl
     assert "updated_at TIMESTAMP WITH TIME ZONE NOT NULL" in ddl
     assert table.primary_key.columns.keys() == ["agent_id"]
@@ -126,6 +129,7 @@ def _fake_upsert(captured: dict[str, object]):
         top_p=UNSET,
         max_output_tokens=UNSET,
         reasoning_type=UNSET,
+        tool_names=UNSET,
         updated_by=None,
     ):
         captured.update(
@@ -136,6 +140,7 @@ def _fake_upsert(captured: dict[str, object]):
             top_p=top_p,
             max_output_tokens=max_output_tokens,
             reasoning_type=reasoning_type,
+            tool_names=tool_names,
             updated_by=updated_by,
         )
         return {"agent_id": agent_id}
@@ -148,6 +153,7 @@ _UNTOUCHED = {
     "top_p": UNSET,
     "max_output_tokens": UNSET,
     "reasoning_type": UNSET,
+    "tool_names": UNSET,
     "updated_by": None,
 }
 
@@ -270,12 +276,15 @@ def test_effective_override_keys_lists_only_non_null_columns():
         "top_p": None,
         "max_output_tokens": None,
         "reasoning_type": "none",
+        # 空数组也是**已配置**：它与 NULL 是两种授权状态（取消全部 / 未限制）。
+        "tool_names": [],
     }
 
     assert agent_config.effective_override_keys(row) == [
         "temperature",
         "llm_model_id",
         "reasoning_type",
+        "tool_names",
     ]
     assert agent_config.effective_override_keys(None) == []
 
@@ -300,3 +309,84 @@ def test_update_rejects_invalid_values(monkeypatch, kwargs):
 
     with pytest.raises(agent_config.AgentConfigError):
         agent_config.update_agent_config("collector", **kwargs)
+def test_resolve_agent_tools_distinguishes_unset_from_empty():
+    """`NULL` 与 `[]` 是两种授权状态，必须分得开（ADR-034）。
+
+    把空数组读成「未配置」会把用户刚做的收紧反向放大成放开——这是配置类字段里
+    最容易出的那一类错，所以这条断言比它看起来要重要。
+    """
+
+    assert agent_config.resolve_agent_tools("collector", overrides={}) is None
+    assert (
+        agent_config.resolve_agent_tools(
+            "collector", overrides={"collector": {"tool_names": None}}
+        )
+        is None
+    )
+    assert agent_config.resolve_agent_tools(
+        "collector", overrides={"collector": {"tool_names": []}}
+    ) == []
+    assert agent_config.resolve_agent_tools(
+        "collector",
+        overrides={"collector": {"tool_names": ["calculator", "web_search"]}},
+    ) == ["calculator", "web_search"]
+
+
+def test_resolve_agent_tools_treats_non_list_as_unset():
+    """覆盖值被写坏（不是数组）时按「未配置」处理，不让读侧崩在阶段执行里。"""
+
+    assert (
+        agent_config.resolve_agent_tools(
+            "collector", overrides={"collector": {"tool_names": "calculator"}}
+        )
+        is None
+    )
+
+
+def test_resolve_agent_tools_reads_override_table_when_not_injected(monkeypatch):
+    monkeypatch.setattr(
+        checkpoint,
+        "list_agent_configs",
+        lambda: [{"agent_id": "analyst", "tool_names": ["sql_query"]}],
+    )
+
+    assert agent_config.resolve_agent_tools("analyst") == ["sql_query"]
+    assert agent_config.resolve_agent_tools("collector") is None
+
+
+def test_update_writes_deduped_tool_names(monkeypatch):
+    """去重保序：同一份名单里重复出现的名字只留第一次的位置。"""
+
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(checkpoint, "get_agent_config", lambda agent_id: None)
+    monkeypatch.setattr(checkpoint, "upsert_agent_config", _fake_upsert(captured))
+
+    agent_config.update_agent_config(
+        "analyst", tool_names=["calculator", " calculator ", "sql_query"]
+    )
+
+    assert captured["tool_names"] == ["calculator", "sql_query"]
+
+
+@pytest.mark.parametrize(
+    "tool_names",
+    [
+        "calculator",  # 不是数组
+        [1],  # 元素不是字符串
+        [""],  # 空名
+        ["calculator", "   "],  # 只有空白的名字
+        ["x" * 121],  # 单名超长
+        [f"tool-{index}" for index in range(TOOL_NAMES_MAX_ITEMS + 1)],  # 超量
+    ],
+)
+def test_update_rejects_invalid_tool_names(monkeypatch, tool_names):
+    monkeypatch.setattr(checkpoint, "get_agent_config", lambda agent_id: None)
+    monkeypatch.setattr(
+        checkpoint,
+        "upsert_agent_config",
+        lambda *args, **rest: pytest.fail("非法值不应写入"),
+    )
+
+    with pytest.raises(agent_config.AgentConfigError):
+        agent_config.update_agent_config("collector", tool_names=tool_names)

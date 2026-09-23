@@ -8,18 +8,23 @@
  * 运行（**必须在 `frontend/` 下执行**，静态断言会按 cwd 读 `src/`）：
  *
  * ```bash
- * node_modules/.bin/esbuild rendercheck/workspace-smoke.tsx --bundle --platform=node \
- *   --format=cjs --jsx=automatic --loader:.css=empty --outfile="$TEMP/workspace-smoke.cjs" \
- *   && node "$TEMP/workspace-smoke.cjs"
+ * node node_modules/esbuild/bin/esbuild rendercheck/workspace-smoke.tsx --bundle \
+ *   --platform=node --format=esm --jsx=automatic --loader:.css=empty \
+ *   --packages=external --outfile=_smoke.mjs && node _smoke.mjs
  * ```
+ *
+ * 这两条都按 2026-09-22 实测改过，别照旧写法：`--format=cjs` 会让 react-dom 的服务端渲染
+ * 抛 `Element type is invalid`，必须用 `esm`；`node_modules/.bin/` 在本仓库不存在，
+ * `$TEMP` 在 Git Bash 里也不展开 → 直接调 `node node_modules/esbuild/bin/esbuild`，
+ * 产物写显式相对路径，用完即删。
  *
  * 冒烟本身只跑代码，**不做类型检查**（esbuild 只转译），而 `tsconfig.json` 的
  * `include` 只有 `src`，覆盖不到本目录。改了本文件或 `preview.tsx` 后要单独过一遍：
  *
  * ```bash
- * npx tsc --noEmit --jsx react-jsx --module esnext --moduleResolution bundler \
- *   --target es2022 --lib es2022,dom,dom.iterable --strict --skipLibCheck \
- *   --esModuleInterop --isolatedModules rendercheck/preview.tsx
+ * node node_modules/typescript/bin/tsc --noEmit --jsx react-jsx --module esnext \
+ *   --moduleResolution bundler --target es2022 --lib es2022,dom,dom.iterable \
+ *   --strict --skipLibCheck --esModuleInterop --isolatedModules rendercheck/preview.tsx
  * ```
  *
  * 退出码 0 = 全通过。只跑不依赖 effects 的渲染路径——`TaskUsage` / `Inspector` 这类
@@ -34,6 +39,7 @@ import { CollabCanvas, type CollabConversation } from "../src/workspace/CollabCa
 import { layoutCollaboration } from "../src/workspace/GraphCanvas";
 import {
   buildCollaboration,
+  planSourceKey,
   type CollabGraph,
   type StageMeta,
 } from "../src/workspace/collaboration";
@@ -111,6 +117,7 @@ const collabAgent = (id: string, name: string, override: string[]): Agent => ({
   builtin: true,
   description: null,
   enabled: true,
+  tool_names: null,
 });
 
 const collabAgents: Agent[] = [
@@ -133,6 +140,7 @@ const collabWorkflow: Workflow = {
   created_at: "2026-09-21T10:00:00Z",
   updated_at: "2026-09-21T10:00:30Z",
   completed_at: "2026-09-21T10:00:30Z",
+  error: null,
 };
 
 const collabTraces: WorkflowStageTrace = {
@@ -222,6 +230,55 @@ check("模型：截断标记带出来", collabGraph.nodes[2].truncated);
 check("模型：usageFor 按角色取到该 Agent 的采样", usageFor(collabMetrics, "reporter").length === 1);
 
 /* -------------------------------------------------------------------------- */
+/* 规划窗口：计划没落盘时不许拿固定三步冒充事实（ADR-034）                        */
+/*                                                                             */
+/* 刚提交的运次里 `checkpoint` 是 null（`create_workflow_run` 只建行、不写摘要）， */
+/* 于是「没有计划」同时对应静态链路的常态与动态链路的规划窗口。判据靠提交方声明的   */
+/* `requestedMode`——服务端在这段时间里没有任何字段能说明这件事。                 */
+/* -------------------------------------------------------------------------- */
+
+const draftWorkflow: Workflow = {
+  id: "w-draft",
+  session_id: "s-1",
+  agent_run_id: null,
+  status: "running",
+  current_step: null,
+  checkpoint: null,
+  created_at: "2026-09-22T10:00:00Z",
+  updated_at: "2026-09-22T10:00:03Z",
+  completed_at: null,
+  error: null,
+};
+
+const draftGraph = (requestedMode?: string) =>
+  buildCollaboration({
+    stages: collabStages,
+    agents: collabAgents,
+    workflow: draftWorkflow,
+    completed: new Set(),
+    traces: null,
+    requestedMode,
+  });
+
+check(
+  "模型：动态编排计划未落盘时不出节点，只报在规划",
+  draftGraph("dynamic").planning && draftGraph("dynamic").nodes.length === 0,
+  `planning=${draftGraph("dynamic").planning} nodes=${draftGraph("dynamic").nodes.length}`,
+);
+check(
+  "模型：同一份数据按静态提交时照画固定三步",
+  !draftGraph("static").planning && draftGraph("static").nodes.length === 3,
+  // 静态链路的固定三步是常量，没有规划环节——把它也判成「在规划」是把真话藏起来
+  `planning=${draftGraph("static").planning} nodes=${draftGraph("static").nodes.length}`,
+);
+check(
+  "模型：不知道模式时不猜「在规划」",
+  !draftGraph(undefined).planning,
+  // 历史工作流不带开关：宁可照旧画三步，也不要把静态老任务读成「正在规划」
+  `planning=${draftGraph(undefined).planning}`,
+);
+
+/* -------------------------------------------------------------------------- */
 /* 画布几何：纯函数，先把坐标算对再看渲染                                        */
 /* -------------------------------------------------------------------------- */
 
@@ -276,6 +333,109 @@ check(
 );
 check("画布：量不到宽度时退回默认宽度", layoutCollaboration(collabGraph, 0).width === 720);
 check("画布：侧栏窄档退回更小的默认宽度", layoutCollaboration(collabGraph, 0, true).width === 248);
+
+/* -------------------------------------------------------------------------- */
+/* 画布：规划节点（「任务分配」，只有动态链路有）                                 */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * 分配**结果**已经画在角色节点上了（谁参与、谁依赖谁），所以「画布渲染了任务分配」这件事
+ * 不能只靠角色节点证明——真正缺的是「依据是什么」。三组断言各自对应一件事：
+ * 模型里带了 `planner`、布局里多占了**一行**、浮层里真的写出了理由与逐条分工。
+ */
+const plannerWorkflow: Workflow = {
+  id: "w-plan",
+  session_id: "s-1",
+  agent_run_id: "r-2",
+  status: "running",
+  current_step: "s2",
+  checkpoint: {
+    status: "running",
+    mode: "dynamic",
+    current_step: "s2",
+    plan_source: "llm",
+    plan_rationale: "任务要先取证再核算，最后由专人成文。",
+    completed_steps: ["s1"],
+    plan: [
+      { id: "s1", role: "collector", instruction: "找到权威数据源", depends_on: [], status: "completed" },
+      { id: "s2", role: "analyst", instruction: "算出占比并解释", depends_on: ["s1"], status: "pending" },
+      { id: "s3", role: "reporter", instruction: "写成结论", depends_on: ["s2"], status: "pending" },
+    ],
+  },
+  created_at: "",
+  updated_at: "",
+  completed_at: null,
+  error: null,
+};
+
+const plannerGraph = buildCollaboration({
+  stages: collabStages,
+  agents: collabAgents,
+  workflow: plannerWorkflow,
+  completed: new Set(["s1"]),
+  traces: null,
+});
+
+check(
+  "模型：动态链路带出分配理由与逐条分工",
+  plannerGraph.planner?.rationale === "任务要先取证再核算，最后由专人成文。" &&
+    plannerGraph.planner?.assignments.length === 3 &&
+    plannerGraph.planner?.assignments[1].label === "数据分析" &&
+    plannerGraph.planner?.assignments[2].instruction === "写成结论",
+  JSON.stringify(plannerGraph.planner),
+);
+check(
+  "模型：静态链路没有规划决策（是 null，不是空壳对象）",
+  collabGraph.planner === null,
+  JSON.stringify(collabGraph.planner),
+);
+
+const plannerLayout = layoutCollaboration(plannerGraph, 720);
+check(
+  "画布：规划节点插在任务端子与首个角色节点之间",
+  plannerLayout.nodes[1].kind === "planner" &&
+    plannerLayout.nodes[1].label === "任务分配" &&
+    plannerLayout.nodes[1].y > plannerLayout.nodes[0].y &&
+    plannerLayout.nodes[1].y < plannerLayout.nodes[2].y,
+  plannerLayout.nodes.map((node) => `${node.kind}@${node.y}`).join(" / "),
+);
+check(
+  "画布：规划节点只多占一行，不改变波次",
+  plannerLayout.height === 44 + 74 + 5 * 96 &&
+    plannerGraph.waves.length === 3 &&
+    plannerLayout.nodes.filter((node) => node.kind === "planner").length === 1,
+  `高度 ${plannerLayout.height} / 波数 ${plannerGraph.waves.length}`,
+);
+check(
+  "画布：连线变成 任务→分配→s1→s2→s3→交付",
+  plannerLayout.edges.length === 5 &&
+    plannerLayout.edges.some((edge) => edge.key === "__start->__planner") &&
+    plannerLayout.edges.some((edge) => edge.key === "__planner->s1"),
+  plannerLayout.edges.map((edge) => edge.key).join(" / "),
+);
+
+let plannerSerial = "";
+try {
+  plannerSerial = renderToStaticMarkup(
+    <CollabCanvas open graph={plannerGraph} onClose={() => undefined} />,
+  );
+  check("全屏画布可渲染（含规划节点）", plannerSerial.length > 400, `长度 ${plannerSerial.length}`);
+} catch (cause) {
+  check("全屏画布可渲染（含规划节点）", false, cause instanceof Error ? cause.message : String(cause));
+}
+check("画布画出规划节点", plannerSerial.includes("cv-node kind-planner"), plannerSerial.slice(0, 200));
+check(
+  "规划节点用的是「规划」图标（与配置页同一套解析，不是清一色机器人）",
+  plannerSerial.includes("lucide-list-checks"),
+  "AgentGlyph 的 plan 键 = ListChecks；图标与键错配是静默的，只能这样发现",
+);
+check(
+  "规划节点的浮层写出分配理由与逐条分工",
+  plannerSerial.includes("分配理由") &&
+    plannerSerial.includes("任务要先取证再核算，最后由专人成文。") &&
+    plannerSerial.includes("找到权威数据源"),
+  plannerSerial.slice(plannerSerial.indexOf("cv-pop"), plannerSerial.indexOf("cv-pop") + 200),
+);
 
 /* -------------------------------------------------------------------------- */
 /* 侧栏：紧凑画布                                                              */
@@ -391,8 +551,9 @@ check(
 );
 check(
   "画布：未跑完的那一步不点亮下一条边",
-  // s1/s2 都已完成 → 任务端子进去的两条 + 汇入 s3 的两条都亮；s3 还没跑 → 到交付那条不亮
-  parallelLayout.edges.filter((edge) => edge.active).length === 4,
+  // s1/s2 都已完成 → 任务端子到规划节点那条、规划节点到 s1/s2 的两条 + 汇入 s3 的两条都亮；
+  // s3 还没跑 → 到交付那条不亮。规划节点恒「已走通」：能画出这些根步骤就说明计划已产出。
+  parallelLayout.edges.filter((edge) => edge.active).length === 5,
   `${parallelLayout.edges.filter((edge) => edge.active).length} 条点亮`,
 );
 check(
@@ -565,6 +726,29 @@ check(
   canvas.slice(canvas.indexOf("cv-terminal"), canvas.indexOf("cv-terminal") + 120),
 );
 check("底部一行标注是串行还是并行", canvas.includes("串行流水线"));
+
+// 计划没落盘：侧栏与全屏都只报「正在规划」，一块节点也不摆（否则先画错的、再换成对的）。
+const planningCanvas = renderToStaticMarkup(
+  <CollaborationGraph graph={draftGraph("dynamic")} />,
+);
+check(
+  "画布：计划没落盘时报「正在规划」而不是画固定三步",
+  planningCanvas.includes("正在规划") &&
+    !planningCanvas.includes("cv-canvas") &&
+    !planningCanvas.includes("信息收集"),
+  planningCanvas,
+);
+const planningFull = renderToStaticMarkup(
+  <CollabCanvas open graph={draftGraph("dynamic")} onClose={() => undefined} />,
+);
+check(
+  "画布：全屏视图同样不画固定三步，也不宣称是串行流水线",
+  planningFull.includes("正在规划") &&
+    planningFull.includes("链路未定") &&
+    !planningFull.includes("cv-canvas") &&
+    !planningFull.includes("串行流水线"),
+  planningFull.slice(0, 300),
+);
 check("画布不再铺图例说明", !canvas.includes("collab-canvas-legend") && !canvas.includes("这次对话的具体协作工作流"));
 check(
   "画布未打开时不渲染",
@@ -592,6 +776,7 @@ const agent: Agent = {
   builtin: true,
   description: "整理任务要求与输入资料，为后续分析准备信息。",
   enabled: true,
+  tool_names: null,
 };
 
 const detail: AgentStageDetail = {
@@ -1088,24 +1273,36 @@ try {
       completed={new Set(["collect", "analyze", "report"])}
     />,
   );
-  check("执行活动卡片可渲染", doneRun.length > 300, `长度 ${doneRun.length}`);
+  check("跑完的执行过程可渲染", doneRun.length > 120 && doneRun.includes("run-chain-head"), `长度 ${doneRun.length}`);
 } catch (cause) {
-  check("执行活动卡片可渲染", false, cause instanceof Error ? cause.message : String(cause));
+  check("跑完的执行过程可渲染", false, cause instanceof Error ? cause.message : String(cause));
 }
-check("卡片报出任务终态与进度", doneRun.includes("任务已完成") && doneRun.includes("已完成 3 个阶段"));
+// 跑完只留一行：步数与工具次数是数出来的，用时是 created_at → completed_at 算出来的
+// （fixture 正好 10:00:00Z → 10:00:30Z）。三项都不靠猜，所以能钉死。
 check(
-  "三个 Agent 各自成一行",
-  ["信息收集 Agent", "数据分析 Agent", "报告生成 Agent"].every((n) => doneRun.includes(n)),
+  "跑完收成一行：步数 / 工具次数 / 用时",
+  doneRun.includes("已执行 3 个阶段") &&
+    doneRun.includes("1 次工具调用") &&
+    doneRun.includes("用时 30 秒"),
+  doneRun.slice(0, 300),
 );
 check(
-  "跑完的步骤收成一行，不铺开正文",
-  doneRun.includes("run-steps") && !doneRun.includes("disclosure-body"),
-  "整屏铺开等于把「过程」又变回「流水账」",
+  "跑完默认收起，正文一步都不铺开",
+  !doneRun.includes("run-steps") && !doneRun.includes("disclosure-body"),
+  "整屏铺开等于把「过程」又变回「流水账」；网页 AI 也是跑完就收起",
 );
 check(
-  "摘要行仍写清阶段名与工具次数",
-  doneRun.includes("run-step-label") && doneRun.includes("1 次工具调用"),
-  "收起后这三样必须还在，否则收起就是信息丢失",
+  "收起态不写指向空正文的 aria-controls",
+  doneRun.includes('aria-expanded="false"') && !doneRun.includes("aria-controls"),
+  "指向不存在的 id 会让人以为内容只是被隐藏了",
+);
+// 用户 2026-09-22 反馈「专门卡片区域太突兀」——卡片外壳与「任务分配」块都该没了。
+check(
+  "内联形态没有卡片外壳，也不再重复画布上的任务分配",
+  !doneRun.includes("run-activity-head") &&
+    !doneRun.includes("run-assignment") &&
+    !doneRun.includes("任务分配"),
+  "任务分配已由协作画布的 planner 节点承载（ADR-032），两个面各画一遍正是突兀的来源",
 );
 check(
   "卡片不谎称有思维链，也不再写口径脚注",
@@ -1113,6 +1310,28 @@ check(
     !doneRun.includes("隐藏推理") &&
     !doneRun.includes("本次任务："),
   "评审要求删掉两条解释脚注；卡片只呈现落盘过的事实，口径由执行台弹窗承载（doc/api.md §7）",
+);
+
+// 「0 秒」读起来像坏了。库里确有 `created_at == completed_at` 的早期行，那是数据的事，
+// 前端如实说「不到一秒」，不写「0 秒」也不替它圆成别的数。
+const instantRun = renderToStaticMarkup(
+  <RunActivity
+    workflow={{
+      ...collabWorkflow,
+      created_at: "2026-09-21T10:00:00Z",
+      updated_at: "2026-09-21T10:00:00Z",
+      completed_at: "2026-09-21T10:00:00Z",
+    }}
+    traces={collabTraces}
+    stages={collabStages}
+    agents={collabAgents}
+    completed={new Set(["collect", "analyze", "report"])}
+  />,
+);
+check(
+  "不足一秒写「< 1 秒」而不是「0 秒」",
+  instantRun.includes("1 秒") && !instantRun.includes("0 秒"),
+  instantRun.slice(0, 200),
 );
 
 // 正在跑的那一步必须自动摊开：人要看的就是它。
@@ -1134,6 +1353,22 @@ check(
   "执行中只摊开正在跑的那一步",
   (runningRun.match(/disclosure-body/g) ?? []).length === 1,
   `摊开了 ${(runningRun.match(/disclosure-body/g) ?? []).length} 步`,
+);
+check(
+  "执行中自动摊开外层那一行",
+  runningRun.includes("run-chain-body") && runningRun.includes('aria-expanded="true"'),
+  "运行中不收起来：人要看的就是它",
+);
+check(
+  "三个 Agent 各自成一行",
+  ["信息收集 Agent", "数据分析 Agent", "报告生成 Agent"].every((n) => runningRun.includes(n)),
+);
+check(
+  "每步那一行仍写清阶段名、工具次数与状态",
+  runningRun.includes("run-step-label") &&
+    runningRun.includes("run-step-tools") &&
+    runningRun.includes("run-step-state"),
+  "收起后这几样必须还在，否则收起就是信息丢失",
 );
 check(
   "摊开的正文写明输入来自哪一步、并给出这一步的产出",
@@ -1251,6 +1486,41 @@ check(
   gapRun.slice(0, 400),
 );
 
+// 规划窗口里没有「步」可列：这一行只报在规划，也不该长出一个点了没反应的开关。
+const planningRun = renderToStaticMarkup(
+  <RunActivity
+    workflow={{ ...collabWorkflow, status: "running", current_step: null, checkpoint: null }}
+    traces={null}
+    stages={collabStages}
+    agents={collabAgents}
+    completed={new Set()}
+    requestedMode="dynamic"
+  />,
+);
+check(
+  "内联轨迹：计划没落盘时只报在规划，不摆固定三步",
+  planningRun.includes("正在规划任务分配") &&
+    !planningRun.includes("信息收集") &&
+    !planningRun.includes("run-steps") &&
+    !planningRun.includes("<button"),
+  planningRun,
+);
+const staticDraftRun = renderToStaticMarkup(
+  <RunActivity
+    workflow={{ ...collabWorkflow, status: "running", current_step: null, checkpoint: null }}
+    traces={null}
+    stages={collabStages}
+    agents={collabAgents}
+    completed={new Set()}
+    requestedMode="static"
+  />,
+);
+check(
+  "内联轨迹：按静态提交时照旧列出固定三步",
+  staticDraftRun.includes("信息收集") && !staticDraftRun.includes("正在规划"),
+  staticDraftRun.slice(0, 300),
+);
+
 // 单条工具调用的渲染搬到了 TraceParts，弹窗与对话流共用一份：
 // 两处各写一份必然出现「弹窗标了已截断、对话流把预览当成全部」。
 const sharedStep = renderToStaticMarkup(
@@ -1283,8 +1553,22 @@ try {
   );
   check("样式表保留输入区提示容器", styles.includes(".composer-hint"));
 
+  // 减弱动态效果不该把加载指示器冻成静止图标：「不动」与「卡住了」在屏幕上长得一模一样。
+  // 减动画要减的是**旋转与位移**这类会引发前庭不适的动作，不是「还在跑」这条信息。
+  check(
+    "减弱动态效果下加载指示器仍有动画",
+    /prefers-reduced-motion:reduce\)[\s\S]*?\.spin\s*\{\s*animation:spin-breathe/.test(styles) &&
+      styles.includes("@keyframes spin-breathe"),
+    "全局 animation:none!important 会把所有转圈图标一起冻住",
+  );
+
   // 画布样式在 workspace/workspace.css，不在 styles.css —— 读错文件会让断言恒真。
   const canvasStyles = readFileSync("src/workspace/workspace.css", "utf8");
+  check(
+    "规划中的提示行有独立样式",
+    canvasStyles.includes(".cv-planning"),
+    "计划没落盘时的「正在规划」不能落回 .cv-empty 的文案，两者说的不是一回事",
+  );
 
   const app = readFileSync("src/App.tsx", "utf8");
   check(
@@ -1306,7 +1590,23 @@ try {
     !app.includes("WorkflowInspection") && !inspection.includes("WorkflowInspection"),
     "逐条明细只应留在任务记录页，合体组件应已删除",
   );
-  check("协作链路按波次模型渲染", app.includes("collaborationWaves"));
+  // 判据要是**接线**，不能是名字：`collaborationWaves` 现在只剩注释里有（那段注释还在
+  // 解释它为什么被搬走），拿它当判据是一条恒真的断言——改坏了也照样绿。
+  check(
+    "协作链路按波次模型渲染",
+    (app.match(/buildCollaboration\(\{/g) ?? []).length === 2 && app.includes("dockNodes("),
+    "链路模型只在 workspace/collaboration.ts，侧栏与全屏两处都该调它",
+  );
+  // 「正在规划」要成立，App 必须把**提交时声明的模式**传下去：服务端在规划窗口内没有
+  // 任何字段能说明这次走的是动态编排，漏传这条线就会静默退回「先画固定三步」。
+  check(
+    "规划判据接上了提交时声明的编排模式",
+    app.includes("const planning = isPlanning(workflow, mode);") &&
+      app.includes("requestedMode: mode,") &&
+      app.includes("requestedMode: isLive ? mode : undefined,") &&
+      app.includes("requestedMode={mode}") &&
+    "四条接线缺一处，画布就会把固定三步当成事实",
+  );
 
   // —— 会话生命周期（`doc/api.md` §4.2 / §5.13 / §5.14）——
   // 会话只在提交首条消息时落库；初始化、新建任务、删除回退都不得建会话，否则每次刷新
@@ -1342,7 +1642,7 @@ try {
 
   // —— 欢迎区引导卡与附件入口的版式（用户 2026-09-16 反馈）——
   // 卡片是「任务原型」不是三个功能按钮：每张卡都要写出自己的协作形态，
-  // 而协作形态只有在规划 Agent 真的参与时才成立，所以点卡必须同时切编排模式。
+  // 而协作形态只有在规划 Agent 真的参与时才成立，所以点卡必须同时把策略切到「按任务规划」。
   check(
     "欢迎卡片各自写出协作形态",
     ["通常 1 个 Agent 直答", "调查 → 分析 → 总结", "多步核对与整理", "两路并行 → 汇聚"].every((shape) =>
@@ -1350,7 +1650,7 @@ try {
     ),
   );
   check(
-    "点卡片同时切到自动编排",
+    "点卡片同时切到「按任务规划」",
     app.includes('onChoose(p.text, "dynamic")'),
     "只填文字不换模式，卡片上的协作形态在当前链路下就不成立",
   );
@@ -1358,11 +1658,57 @@ try {
     "填提示词与设模式在同一个函数里",
     app.includes("promptMode: OrchestrationMode") && app.includes("setMode(promptMode)"),
   );
-  check("输入区显式写出当前编排模式", app.includes("welcome-note") && styles.includes(".welcome .welcome-note"));
+  check("输入区显式写出当前策略", app.includes("welcome-note") && styles.includes(".welcome .welcome-note"));
   check(
     "旧横排卡片规则已清理",
     !styles.includes(".suggestions button"),
     "残留的 .suggestions button 会把新卡的图标撑成整宽",
+  );
+
+  /* —— 策略控件：这次执行的「计划从哪来」（ADR-037）——
+     项目里没有两套并列的编排模式：固定链是动态路径的退化情形，计划不由规划节点产出，
+     而是一条常量链。所以控件不能再是两个平级分段——那正是把「固定链」摆成了对等策略。 */
+  check(
+    "策略控件是单按钮 + 浮层，不再是两个平级分段",
+    app.includes("composer-strategy-trigger") &&
+      app.includes("composer-strategy-menu") &&
+      !app.includes("composer-mode"),
+    "平级分段把固定链摆成对等策略，正是这次要取消的特例化",
+  );
+  check(
+    "固定链降级为浮层里的次要项",
+    app.includes('label: "固定链"') &&
+      app.includes("secondary: true") &&
+      styles.includes(".composer-strategy-item.is-secondary"),
+    "次要项没有专属样式，降级在界面上就看不出来",
+  );
+  check(
+    "浮层按需挂载，收起时不渲染空容器",
+    app.includes("{strategyOpen ? ("),
+    "常驻的空容器会让「有没有浮层」这件事从 DOM 上读不出来",
+  );
+  check(
+    "aria-controls 只在展开时指向真实元素",
+    app.includes("aria-controls={strategyOpen ? STRATEGY_MENU_ID : undefined}"),
+    "收起时指向不存在的 id，会让人以为内容只是被隐藏了",
+  );
+  check(
+    "计划来源的四条判据各归其位",
+    planSourceKey({ planning: true }) === "planning" &&
+      planSourceKey({ mode: "dynamic", source: "llm" }) === "planned" &&
+      planSourceKey({ mode: "dynamic", source: "fallback" }) === "fallback" &&
+      planSourceKey({ mode: "static" }) === "fixed" &&
+      planSourceKey({}) === "fixed",
+    "判据顺序错了会把「规划失败回退」读成「规划成功产出」",
+  );
+  const canvasSource = readFileSync("src/workspace/CollabCanvas.tsx", "utf8");
+  check(
+    "画布与记录页共用同一条计划来源口径",
+    canvasSource.includes("planSourceKey(") &&
+      recordsSource.includes("planSourceKey(") &&
+      !canvasSource.includes('graph.mode === "dynamic"') &&
+      !recordsSource.includes('trace.mode === "dynamic"'),
+    "各写一份 mode 三目，就会出现「这边说自动编排、那边说动态编排」的两套说法",
   );
   check(
     "画布节点不再可拖",
@@ -1421,7 +1767,12 @@ try {
     ".composer-files",
     ".composer-file.failed",
     ".conversation-composer.dragging",
-    ".composer-mode button.active",
+    // 策略控件：浮层、「兜底」项的层级各要一条——兜底项没有专属规则，降级就不可见，
+    // 而那正是这次要改的东西（ADR-037）。
+    ".composer-strategy-trigger",
+    '.composer-strategy-trigger[aria-expanded="true"]',
+    ".composer-strategy-menu",
+    ".composer-strategy-item.is-secondary",
     ".message-attachments",
     ".message-attachment-thumb",
     // 原件留档后条目主体是 <a>（ADR-024）：没有这条规则会退化成蓝字下划线。
@@ -1439,9 +1790,11 @@ try {
     ".disclosure-body",
     ".disclosure.is-open",
     ".run-activity",
-    ".run-activity-head",
+    ".run-chain-head",
+    ".run-chain-body",
     ".run-steps",
     ".run-step-tools",
+    ".run-step-state",
     ".run-note",
   ];
   const missingClasses = requiredClasses.filter((sel) => !styles.includes(sel));
@@ -1504,7 +1857,7 @@ try {
   );
   check(
     "执行活动插在报告之前而不是整段对话末尾",
-    app.includes("index === reportIndex") && app.includes("reportIndex < 0"),
+    app.includes("activityByRunId.get(m.agent_run_id)") && app.includes("reportIndex < 0"),
     "过程要出现在结果的上一个位置，排到末尾会看起来像另一个任务",
   );
   check(

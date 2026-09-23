@@ -34,7 +34,7 @@ export interface Attachment {
   created_at: string;
 }
 
-/** 编排模式（ADR-019）：`static` 固定三步链路，`dynamic` 由规划节点按任务分配角色。 */
+/** 计划来源（ADR-019 / ADR-037）：`static` 的计划恒为固定链，`dynamic` 由规划节点按任务分配角色。 */
 export type OrchestrationMode = "static" | "dynamic";
 
 export interface Message {
@@ -76,6 +76,8 @@ export interface PlanStepSummary {
   id: string;
   /** 角色 id（collector / analyst / reporter），不是阶段名。 */
   role: string;
+  /** 该步骤的一句话职责（规划节点产出），供「分配」可视化展示。 */
+  instruction?: string;
   depends_on: string[];
   status: "pending" | "completed" | "failed" | "skipped";
 }
@@ -93,11 +95,21 @@ export interface Workflow {
     updated_at?: string;
     /** 编排模式（ADR-019）：静态链路不写这个字段，动态链路为 `"dynamic"`。 */
     mode?: string;
-    /** `llm` 表示规划节点真的产出了计划，`fallback` 表示降级到固定三步。 */
+    /** `llm` 表示规划节点真的产出了计划，`fallback` 表示降级到固定链。 */
     plan_source?: string;
+    /** 规划节点给出的分配理由（§5.22「计划即落盘」）；降级时为回退原因。 */
+    plan_rationale?: string;
     /** 动态链路才有的协作计划；静态链路下为 undefined。 */
     plan?: PlanStepSummary[];
   } | null;
+  /**
+   * 失败原因（`workflow_runs.error` 原样透传，§4.8）。
+   *
+   * 这列一直存在、也一直被 `finalize_activity` 写入，此前只是没进响应模型——
+   * 于是「执行失败」在界面上只剩一个红标签，说不出失败在哪。成功时通常为 `null`，
+   * 但不要拿它当「成功」的判据：判据是 `status`，这里读不到原因就是读不到。
+   */
+  error: string | null;
   created_at: string;
   updated_at: string;
   completed_at: string | null;
@@ -156,6 +168,37 @@ export interface Agent {
   builtin: boolean;
   description: string | null;
   enabled: boolean;
+  /**
+   * 被授权的工具名（ADR-034）。三种状态必须分开读：
+   * - `null`：未配置 → 执行期沿用全量注册表（可用工具 = 工具目录里的全部）；
+   * - `[]`：显式取消全部授权 → 该角色一个工具也用不了；
+   * - 非空数组：只允许这些。
+   *
+   * 会话级附件工具（`list_session_files` / `read_session_file`）**不在这份名单的管辖内**，
+   * 它们始终可用，也不出现在工具目录里（§5.3）。
+   */
+  tool_names: string[] | null;
+  /**
+   * 角色目录里配置的系统提示词（ADR-036）；`null` / 缺键 = 未配置。
+   * 执行期回退：内置角色用默认人设，自定义角色用通用兜底。
+   */
+  system_prompt?: string | null;
+  /** 图标键（`AgentGlyph` 图标集）；`null` / 缺键 = 按角色键与名称推断。 */
+  icon?: string | null;
+}
+
+/**
+ * `PATCH /api/v1/config/agents/{id}/profile` 的请求体（ADR-036）：角色**目录**字段。
+ * 省略的键不提交；显式 `null` = 清空该字段（只对可空的 description / system_prompt /
+ * icon 成立，name / enabled 传 null 后端直接 422）。与模型参数覆盖端点分开，
+ * 因为两组字段的 `null` 后果不同：清空一列 vs 回退下一层配置。
+ */
+export interface AgentProfileUpdate {
+  name?: string;
+  description?: string | null;
+  system_prompt?: string | null;
+  icon?: string | null;
+  enabled?: boolean;
 }
 
 export interface Provider {
@@ -295,6 +338,12 @@ export interface AgentConfigUpdate {
   top_p?: number | null;
   max_output_tokens?: number | null;
   reasoning_type?: ReasoningType | null;
+  /**
+   * 工具白名单。**与其余字段的 `null` 语义不同**：这里的 `null` 和「省略」都是
+   * 「未配置 = 不加限制」，只有 `[]` 才是「取消全部授权」。所以「恢复不受限」
+   * 要显式传 `null`，不能指望传空数组。
+   */
+  tool_names?: string[] | null;
 }
 
 /** `POST /api/v1/config/agents` 的请求体：新建自定义角色。 */
