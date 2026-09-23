@@ -54,6 +54,7 @@ import { ApprovalCard, APPROVAL_STATUS_TEXT } from "../src/workspace/ApprovalCar
 import type { Approval, ApprovalStatus } from "../src/types/api";
 import { Disclosure } from "../src/components/Disclosure";
 import { RunActivity } from "../src/workspace/RunActivity";
+import { GeneratingBubble } from "../src/workspace/GeneratingBubble";
 import { ToolCallBlock } from "../src/workspace/TraceParts";
 import { TaskUsagePanel, groupUsage, usageFor } from "../src/workspace/TaskUsage";
 import { MessageAttachmentList, PendingFileChips } from "../src/workspace/AttachmentList";
@@ -1841,6 +1842,80 @@ try {
     "长文按总时长反推步长",
     streamSrc.includes("MAX_DURATION_MS") && streamSrc.includes("MS_PER_CHAR"),
     "按固定步长推进会让数千字的报告打十几秒",
+  );
+
+  /* —— 正文落库前的占位气泡（workspace/GeneratingBubble.tsx）——
+   * 正文是终态一次性落库的（ADR-031 §3），在那之前对话流末尾一个「文字位」都没有：
+   * 读的人只看到一行灰字在转，然后整段正文一次冒出来。占位把这 1~2 秒补上。
+   * 判据直接渲染组件来钉——组件在 App.tsx 里是非导出的，源码文本断言盖不住它。 */
+  const bubble = (over: Partial<Parameters<typeof GeneratingBubble>[0]>) =>
+    renderToStaticMarkup(
+      <GeneratingBubble
+        workflowStatus="running"
+        busy={true}
+        hasReport={false}
+        pendingApprovals={0}
+        {...over}
+      />,
+    );
+  const runningBubble = bubble({});
+  check(
+    "执行中：末尾补出「文字位」占位",
+    runningBubble.includes("正在生成答复") && runningBubble.includes("generating-label"),
+    "没有占位，正文落库前末尾一片空白，看起来像卡住",
+  );
+  check(
+    "占位与真正文共用同一支光标",
+    runningBubble.includes("md-body is-streaming"),
+    "另写一套光标，换成真气泡时能看出两支不一样",
+  );
+  check(
+    "占位头部与真消息同构（头像 + 元信息 + 正文区）",
+    runningBubble.includes("message-bubble assistant") &&
+      runningBubble.includes("message-avatar") &&
+      runningBubble.includes("message-meta"),
+    "结构与真气泡不一致，替换的那一瞬会跳动",
+  );
+  check(
+    "已完成但正文未到：改成「正在整理答复」",
+    bubble({ workflowStatus: "completed", busy: false }).includes("正在整理答复"),
+    "状态先落、消息后写的那段间隙里末尾会空着",
+  );
+  check(
+    "审批挂起时不显示占位",
+    bubble({ pendingApprovals: 1 }) === "",
+    "流程是按设计停住等人，说「正在生成」会把「等你决策」误报成「正在跑」",
+  );
+  check(
+    "失败与取消不显示占位",
+    bubble({ workflowStatus: "failed", busy: false }) === "" &&
+      bubble({ workflowStatus: "cancelled", busy: false }) === "",
+    "没有正文可等，原因由执行活动那一行说",
+  );
+  check(
+    "没有 workflow（历史会话刚打开）不显示占位",
+    bubble({ workflowStatus: null, busy: false }) === "",
+    "否则空会话末尾会一直挂着「生成中」",
+  );
+  check(
+    "正文到达后占位让位给真气泡",
+    bubble({ workflowStatus: "completed", busy: false, hasReport: true }) === "",
+    "占位不消失会与真气泡重叠",
+  );
+  check(
+    "对话流里真的挂上了占位组件",
+    app.includes('workspace/GeneratingBubble') && app.includes("<GeneratingBubble"),
+    "组件写好了但没接上，半成品会静默通过",
+  );
+  check(
+    "占位判据只有一份实现",
+    !app.includes("正在生成答复") && !app.includes("正在整理答复"),
+    "文案写死在 App.tsx 里就与模块分叉了",
+  );
+  check(
+    "「生成中」标签与时间同档灰字",
+    /\.generating-label\s*\{[^}]*t-ink-8fa0a8[^}]*font-size:10px/.test(styles),
+    "字号或颜色对不上，占位与真气泡的头部会跳",
   );
 
   const runSrc = readFileSync("src/workspace/RunActivity.tsx", "utf8");

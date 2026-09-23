@@ -3158,6 +3158,62 @@ CDP 实证（headless Chrome 打 `http://127.0.0.1:5173`，用 `Emulation.setEmu
   **像素差分 + 差异区域定位**：证明差异全部落在页脚矩形内，比"整张图字节相同"更能说明问题 ——
   它同时容忍了预期内的改动、又不放过预期外的。
 
+
+### 4.27 对话流的「正文落库前占位」：把终态之前那段空白补上（2026-09-23，成员 D）
+
+**1. 反馈与边界核对**
+
+反馈原话：「当前似乎缺少对话输出的流式渲染，补全」。先核对现状，避免重复劳动：
+
+- **呈现层的流式早就有**：`components/useStreamText.ts` 的渐进揭示（ADR-031 §3），
+  `workspace-smoke` 实测 **258/258**，没有坏在合并上。
+- **传输层的流式是暂缓专项**：ADR-031「备选方案」把「后端开 SSE」记为**暂缓（不是否决）**
+  ——要 B 线在 `app/workflows` 发事件，且生产链路是 Dapr 活动逐步手串，**逐 token 的增量
+  根本拿不到**，现实上限只是「按阶段/工具粒度推送」。跨线 + 要改冻结决策，所以本轮
+  **只做 D 线职责内的呈现层**。
+
+**2. 真正的缺口：终态之前没有「文字位」**
+
+`reportIndex < 0`（正文还没落库）时，对话流末尾只有 `RunActivity` 那一行灰字，
+**没有任何正文占位**。时序读起来是：干等几秒（只有一行灰字在转）→ 正文一次到位 →
+播 0.32–1.8s 揭示。观感就是「干等 + 唰一下」。这是呈现层能补、且不碰 ADR-031 §3
+那条节奏约束的位置。
+
+**3. 改了什么**
+
+| 文件 | 内容 |
+| --- | --- |
+| `frontend/src/workspace/GeneratingBubble.tsx` | 新增。占位气泡 + 判据 `placeholderNote`（唯一实现） |
+| `frontend/src/App.tsx` | transcript 末尾挂 `<GeneratingBubble/>`；补 `pendingApprovals` 判据 |
+| `frontend/src/styles.css` | 新增 `.generating-label`（与 `.message-meta time` 同档灰字） |
+| `frontend/rendercheck/workspace-smoke.tsx` | +11 条断言（258 → 269） |
+
+判据表（`placeholderNote`，冒烟逐条渲染断言）：
+
+| 情形 | 显示 | 文案 |
+| --- | --- | --- |
+| 执行中（含刚提交、排队中） | 是 | 正在生成答复… |
+| 已完成、正文还没轮询回来 | 是 | 正在整理答复… |
+| 有审批挂起 | **否** | —— |
+| 失败 / 取消 / 尚无 workflow / 已有正文 | **否** | —— |
+
+**4. 验证**
+
+```bash
+node node_modules/typescript/bin/tsc --noEmit    # 通过
+node node_modules/vite/bin/vite.js build         # 通过，无 500 kB 告警
+```
+
+- `rendercheck/workspace-smoke.tsx` → **269/269**（258 → 269，+11）
+- 光标复用 `.md-body.is-streaming`，与真正文是**同一支**，没有第二套动画。
+
+**5. 刻意没做的两件事**
+
+- **没动 `useStreamText` 的节奏**（320–1800ms、按总时长反推步长）：那是 ADR-031 §3
+  冻结的，长文「打十几秒让人以为卡住」正是它要避免的。改它等于推翻已决策行为。
+- **没给工具调用条目加「长出」动画**：它依赖 key 稳定性，一旦不稳就退化成每 1.5s
+  全量重播（闪烁），观感比不加更差。而运行中那一行本来就有 `spin` 指示器
+  （`ChainGlyph` 在 `running` 时即 `<LoaderCircle className="spin"/>`），不缺动感。
 ## 5. 失败处理约定
 
 - 任一用例失败：先复现，再定位，修复后将失败模式固化为新的测试或本文档约束；

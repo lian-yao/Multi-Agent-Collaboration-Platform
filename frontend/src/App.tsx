@@ -68,6 +68,7 @@ import { CollaborationGraph } from "./workspace/CollaborationGraph";
 import { CollabCanvas, type CollabConversation } from "./workspace/CollabCanvas";
 import { RunActivity } from "./workspace/RunActivity";
 import { ApprovalCard } from "./workspace/ApprovalCard";
+import { GeneratingBubble } from "./workspace/GeneratingBubble";
 import { WorkspacePanel, type WorkspaceDraft } from "./workspace/WorkspacePanel";
 import { groupUsage, TaskUsagePanel, useWorkflowMetrics } from "./workspace/TaskUsage";
 import {
@@ -1375,6 +1376,9 @@ function Workspace({
         (m) => m.role === "assistant" && m.agent_run_id === workflow.agent_run_id,
       )
     : -1;
+  // 审批挂起时流程是**按设计停住等人**，不能说「正在生成」——那会把「等你决策」
+  // 误报成「正在跑」。占位气泡与审批卡片共用这一个判据。
+  const pendingApprovals = approvals.filter((item) => item.status === "pending").length;
 
   // 每条对话（按 `agent_run_id`）对应的活动卡数据：当前 workflow 实时 + 历史 workflow 回看。
   // 把「当前」与「历史」收敛成同一份映射，transcript 才能对每条对话都渲染活动卡，
@@ -1528,6 +1532,13 @@ function Workspace({
                       />
                     </>
                   )}
+                  {/* 正文落库前的「文字位」。判断在模块里（`placeholderNote`），冒烟直接渲染它。 */}
+                  <GeneratingBubble
+                    workflowStatus={workflow?.status ?? null}
+                    busy={busy}
+                    hasReport={reportIndex >= 0}
+                    pendingApprovals={pendingApprovals}
+                  />
                 </div>
               ) : (
                 <Welcome onChoose={choosePrompt} mode={mode} />

@@ -894,6 +894,16 @@ svg {
 
 
 
+/* 正文落库前的占位气泡（workspace/GeneratingBubble.tsx）。
+ * 「生成中」这一枚小标签占的是普通消息里时间的位置（`.message-meta time`），
+ * 同档灰字、同一行——不然占位气泡与真正文的头部长得不一样，替换的那一瞬会跳动。 */
+.generating-label {
+  color:var(--t-ink-8fa0a8);
+  font-size:10px
+}
+
+
+
 .user .message-meta {
   justify-content:flex-end
 }
