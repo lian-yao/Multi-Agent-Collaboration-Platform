@@ -63,6 +63,13 @@ from app.orchestration.tools import ToolCaller, ToolCallRecord, ToolRegistry, de
 ORCHESTRATION_MODES: tuple[str, ...] = ("static", "dynamic")
 """编排模式取值，对齐 ``AgentSettings.orchestration_mode``。"""
 
+PLANNER_MEMORY_ID = "planner"
+"""规划节点的长期记忆 id。
+
+规划是平台自己的节点，不对应任何已登记角色，所以给它一个**保留 id** 而不是借用某个角色：
+借用的结果是「收集 Agent 的偏好会悄悄影响规划」。写入侧定下来之前它通常是空的。
+"""
+
 DEFAULT_MAX_PLAN_STEPS = 6
 """一次执行允许的最大步骤数。既是成本上限，也是回退判据：超出的计划整份丢弃。"""
 
@@ -294,6 +301,7 @@ def generate_plan(
     max_steps: int = DEFAULT_MAX_PLAN_STEPS,
     workflow_id: str | None = None,
     history: Sequence[SessionMessage] = (),
+    preferences: str = "",
 ) -> DynamicPlan:
     """调用规划模型产出计划；解析失败或调用失败一律回退，不向上抛。
 
@@ -307,7 +315,9 @@ def generate_plan(
         response = llm.invoke(
             [
                 SystemMessage(content=planner_prompt(max_steps)),
-                HumanMessage(content=f"{conversation_block(history)}用户任务：\n{task}"),
+                HumanMessage(
+                    content=f"{preferences}{conversation_block(history)}用户任务：\n{task}"
+                ),
             ]
         )
         text = content_with_tools(response.content)
@@ -390,14 +400,16 @@ def step_input(
     step: PlanStep,
     results: dict[str, StepOutcome],
     history: Sequence[SessionMessage] = (),
+    preferences: str = "",
 ) -> str:
-    """构造步骤的角色输入：会话历史 + 任务 + 依赖步骤的正文 + 本步职责。
+    """构造步骤的角色输入：长期记忆 + 会话历史 + 任务 + 依赖步骤的正文 + 本步职责。
 
     历史放在最前面，与固定三步链路（`pipeline_graph._role_input`）同一形态——两条编排
     对模型呈现的上下文必须一致，否则「同一个会话在两种模式下记忆表现不同」。
+    长期记忆（跨会话偏好）再排在历史之前：约束在前、上下文在后（ADR-036）。
     """
 
-    parts = [f"{conversation_block(history)}用户任务：\n{task}"]
+    parts = [f"{preferences}{conversation_block(history)}用户任务：\n{task}"]
     upstream = [
         f"【{dep} · {get_role(results[dep].role).name}】\n{results[dep].content}"
         for dep in step.depends_on
@@ -418,6 +430,7 @@ def run_plan_step(
     workflow_id: str | None = None,
     attachments: Sequence[AttachmentPayload] = (),
     history: Sequence[SessionMessage] = (),
+    preferences: str = "",
 ) -> StepOutcome:
     """执行一个计划步骤，返回结果；异常被收敛成 ``failed`` 结果而不外抛。
 
@@ -430,7 +443,7 @@ def run_plan_step(
     """
 
     definition = get_role(step.role)
-    prompt = step_input(task, step, results, history)
+    prompt = step_input(task, step, results, history, preferences)
     content = build_human_content(prompt, attachments if not step.depends_on else ())
     messages = [
         SystemMessage(content=definition.system_prompt),

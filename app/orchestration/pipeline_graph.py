@@ -141,14 +141,16 @@ def _role_input(
     task: str,
     previous: dict[str, Any] | None,
     history: Sequence[SessionMessage] = (),
+    preferences: str = "",
 ) -> str:
     """构造角色节点的用户输入。
 
     基础形态是「首节点给原始任务、后续节点带上游结果」；接上会话记忆后，
-    两者前面都会加上最近若干轮的历史（F-06，接线口径见 ADR-019）。
+    两者前面都会加上最近若干轮的历史（F-06，接线口径见 ADR-019）；长期记忆
+    （跨会话偏好）再排在历史**之前**——约束在前、上下文在后（ADR-036）。
     """
 
-    prefix = conversation_block(history)
+    prefix = f"{preferences}{conversation_block(history)}"
     if role is RoleId.COLLECTOR:
         return f"{prefix}用户任务：\n{task}"
     if previous is None or not isinstance(previous.get("content"), str):
@@ -306,11 +308,12 @@ def _run_role_stage(
     caller: ToolCaller | None = None,
     workflow_id: str | None = None,
     history: Sequence[SessionMessage] = (),
+    preferences: str = "",
     attachments: Sequence[AttachmentPayload] = (),
 ) -> dict[str, Any]:
     role = role_for_stage(stage)
     definition = get_role(role)
-    prompt = _role_input(role, task, previous, history)
+    prompt = _role_input(role, task, previous, history, preferences)
     # 附件只进「拿到原始任务」的那一步（`previous is None`）：collector。
     # 下游节点读的是上游正文，再塞一遍附件等于让同一张图在链路上重复计费。
     content = build_human_content(prompt, attachments if previous is None else ())
@@ -374,6 +377,7 @@ def run_role_stage(
     tool_scope: str | None = None,
     workflow_id: str | None = None,
     history: Sequence[SessionMessage] = (),
+    preferences: str = "",
     attachments: Sequence[AttachmentPayload] = (),
 ) -> dict[str, Any]:
     """调用指定阶段对应角色的模型，返回 Workflow 阶段活动使用的载荷。
@@ -414,6 +418,7 @@ def run_role_stage(
         caller,
         workflow_id=workflow_id,
         history=history,
+        preferences=preferences,
         attachments=attachments,
     )
 

@@ -217,9 +217,12 @@ def test_step_activity_feeds_session_history_into_the_step(monkeypatch):
     )
     captured: dict[str, Any] = {}
 
-    def fake_run_plan_step(step, task, results, llm, caller, workflow_id, attachments, history=()):
+    def fake_run_plan_step(
+        step, task, results, llm, caller, workflow_id, attachments, history=(), preferences=""
+    ):
         captured["task"] = task
         captured["history"] = history
+        captured["preferences"] = preferences
         return StepOutcome(
             step_id=step.id,
             role=step.role,

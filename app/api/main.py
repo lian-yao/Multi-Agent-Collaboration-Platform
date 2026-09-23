@@ -76,6 +76,8 @@ from app.core.provider_config import (
 from app.mcp.registry import tool_catalog
 from app.memory import MessageRole, MessageStatus, SessionMessage
 from app.memory.runtime import conversation_memory
+from app.agents.roles import RoleId
+from app.orchestration.long_term import prefetch as prefetch_preferences
 from app.observability.logging import get_logger, log_event
 from app.observability.metrics import render_prometheus_metrics
 from app.sandbox import build_sandbox, get_sandbox_settings
@@ -1276,6 +1278,10 @@ def send_message(session_id: str, payload: MessageRequest) -> MessageAcceptedRes
                 status=MessageStatus.RUNNING,
             ),
         )
+        # 长期记忆**后台预取**（ADR-036）：这里是"离阶段执行还有几秒"的唯一位置，
+        # 预取不阻塞受理、失败也不影响这次执行——阶段里只读进程内缓存。
+        # 覆盖全部角色：走到哪个角色由规划在运行期决定，受理时还不知道。
+        prefetch_preferences(role.value for role in RoleId)
         get_workflow_service().schedule(
             WorkflowTask(
                 workflow_id=workflow_id,

@@ -48,7 +48,9 @@ from app.orchestration.pipeline import (
 )
 from app.memory import MessageRole, MessageStatus, SessionMessage
 from app.memory.runtime import conversation_memory
+from app.agents.roles import get_role
 from app.orchestration.context import CONVERSATION_CONTEXT_LIMIT
+from app.orchestration.long_term import preference_block
 from app.orchestration.pipeline_graph import role_for_stage, run_role_stage
 from app.orchestration.tools import (
     ToolRegistry,
@@ -200,6 +202,7 @@ def advance_pipeline_stage(
             tool_scope=workflow_run_id or workflow_id or run_id,
             workflow_id=workflow_id,
             history=session_history(session_id, agent_run_id),
+            preferences=preference_block(get_role(role_for_stage(stage)).id),
             attachments=attachments,
         )
     updated = complete_step(state, stage, result)

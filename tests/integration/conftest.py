@@ -23,6 +23,7 @@
 from __future__ import annotations
 
 import os
+from typing import Any
 
 REGRESSION_DATABASE_URL = "sqlite+pysqlite:///:memory:"
 """集成回归的默认数据库：进程内 SQLite，不建连、不落盘。"""
@@ -42,6 +43,7 @@ import pytest  # noqa: E402
 from app.core.provider_config import set_redis_factory  # noqa: E402
 from app.memory import SessionMessage  # noqa: E402
 from app.memory.runtime import set_conversation_memory_factory  # noqa: E402
+from app.orchestration import long_term  # noqa: E402
 
 
 class MemoryRedis:
@@ -95,3 +97,24 @@ def memory_conversation() -> MemoryConversationMemory:
     set_conversation_memory_factory(lambda: memory)
     yield memory
     set_conversation_memory_factory(None)
+
+
+class MemoryLongTermMemory:
+    """长期记忆替身（ADR-036）：受理消息会触发一次**后台预取**，测试不该据此去连
+    开发环境的 Redis——读的不是测试数据，但那是一条隐藏依赖，且会让用例变慢。"""
+
+    def __init__(self) -> None:
+        self.data: dict[str, list[Any]] = {}
+
+    def list_entries(self, agent_id: str) -> list[Any]:
+        return list(self.data.get(agent_id, []))
+
+
+@pytest.fixture(autouse=True)
+def memory_long_term() -> MemoryLongTermMemory:
+    memory = MemoryLongTermMemory()
+    long_term.set_memory_factory(lambda: memory)
+    long_term.clear_cache()
+    yield memory
+    long_term.set_memory_factory(None)
+    long_term.clear_cache()

@@ -24,6 +24,7 @@ MCP 注册表快照同理：`app/mcp/registry.py` 的条目快照默认会去读
 from __future__ import annotations
 
 import os
+from typing import Any
 
 REGRESSION_DATABASE_URL = "sqlite+pysqlite:///:memory:"
 """单元回归的默认数据库：进程内 SQLite，不建连、不落盘。"""
@@ -43,6 +44,7 @@ import pytest  # noqa: E402
 from app.core.provider_config import set_redis_factory
 from app.memory import SessionMessage
 from app.memory.runtime import set_conversation_memory_factory
+from app.orchestration import long_term
 from app.observability.metrics import (
     MetricSample,
     MetricsCollector,
@@ -138,6 +140,29 @@ def memory_conversation() -> MemoryConversationMemory:
     set_conversation_memory_factory(lambda: memory)
     yield memory
     set_conversation_memory_factory(None)
+
+
+class MemoryLongTermMemory:
+    """长期记忆替身（ADR-036）：同样的动机——用例不依赖真实 Redis，
+    也不去读开发环境里那份长期记忆。"""
+
+    def __init__(self) -> None:
+        self.data: dict[str, list[Any]] = {}
+
+    def list_entries(self, agent_id: str) -> list[Any]:
+        return list(self.data.get(agent_id, []))
+
+
+@pytest.fixture(autouse=True)
+def memory_long_term() -> MemoryLongTermMemory:
+    """把长期记忆换成内存替身，并清掉预取缓存（缓存是进程级的）。"""
+
+    memory = MemoryLongTermMemory()
+    long_term.set_memory_factory(lambda: memory)
+    long_term.clear_cache()
+    yield memory
+    long_term.set_memory_factory(None)
+    long_term.clear_cache()
 
 
 @pytest.fixture(autouse=True)

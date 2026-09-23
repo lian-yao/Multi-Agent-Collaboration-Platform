@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
-from app.memory import SessionMessage
+from app.memory import MemoryEntry, SessionMessage
 
 CONVERSATION_CONTEXT_LIMIT = 10
 """注入提示词的历史条数上限（按「最近 N 条」读，见 ADR-019 的读点）。"""
@@ -37,4 +37,26 @@ def conversation_block(history: Sequence[SessionMessage]) -> str:
     return "\n".join([header, *lines, ""])
 
 
-__all__ = ["CONVERSATION_CONTEXT_LIMIT", "conversation_block"]
+def long_term_block(entries: Sequence[MemoryEntry]) -> str:
+    """把**长期记忆**渲染成提示词前缀；无内容时返回空串（同样不加空段）。
+
+    形态与会话历史刻意保持一致（只差表头），模型看到的是「约束 → 上下文 → 本轮任务」：
+    长期记忆是跨会话的稳定偏好，排在会话历史之前。
+    """
+
+    lines = [
+        f"{entry.key}: {entry.content.strip()}"
+        for entry in entries
+        if entry.content and entry.content.strip()
+    ]
+    if not lines:
+        return ""
+    header = f"【长期记忆（跨会话，{len(lines)} 条）】"
+    return "\n".join([header, *lines, ""])
+
+
+__all__ = [
+    "CONVERSATION_CONTEXT_LIMIT",
+    "conversation_block",
+    "long_term_block",
+]

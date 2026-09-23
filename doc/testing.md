@@ -2088,6 +2088,33 @@ backend / dapr-sidecar / frontend）→ 本地 sidecar 与后端（绑 127.0.0.1
 tests/integration/test_workspace_api.py` → **961 passed / 12 failed**（仍是缺 `pypdfium2`
 的 PDF 用例）。改进程影响：静态链路的既有断言（无历史时提示词逐字不变）全部保持。
 
+**第八轮（同日）：长期记忆的异步读取（ADR-036）**。使用者要求「通过异步的方式读取用户信息
+与偏好，不要影响主进程」。查证前提：长期记忆（`agent:{id}:memory`，无 TTL）自 `69960e1` 就
+实现完毕，但**一直没有调用方**——运行时 `keys 'agent:*'` 为空，所以本轮先接**读取**。
+
+形态按「增强而非必需」设计：`app/orchestration/long_term.py` 的 `prefetch()` 在**后台线程**
+里读进进程内缓存（TTL 300s，同 id 只允许一个在途请求），`preference_block()` **只读缓存**、
+不等待不抛错，未就绪即空串；调用点在消息受理（写会话记忆的同一处）预取全部角色，阶段执行时
+缓存通常已热。注入位置在会话历史**之前**（约束 → 上下文 → 本轮任务），渲染函数在
+`app/orchestration/context.py`，静态与动态两条编排共用。
+
+**本轮未做（等使用者拍板，已写进 ADR-036 的"待定"）**：
+
+1. **记忆归属**——现有键按**角色**存（ADR-005 只定义了两个键），而需求说的是**用户**维度；
+   本轮先按角色读，因为不改数据契约即可落地。要按用户存得先加 `user:{id}:profile` 并让
+   `user_id` 进 Workflow 链路（`sessions.user_id` 目前只在 API 层用）。
+2. **写入触发**——现在**没有任何写入方**，所以读取管道即使就绪也读不到东西；
+   候选是显式「记住这个」交互／独立抽取流程（要额外模型调用与成本控制）／管理接口手工登记。
+3. **审计与删除**——长期记忆无 TTL，必须有查看与删除入口，否则使用者无法收回模型记住的东西。
+
+验证：`tests/unit/test_long_term_memory.py` 新增 **8 例**——预取在存储阻塞时也**立即返回**
+（<0.5s，用闸门 Event 构造慢存储）、缓存冷时不读存储也不报错、读失败降级为空、
+缓存还热不重复打 Redis、渲染跳过空条目、`_role_input` 与 `step_input` 的段落顺序
+（长期记忆 → 会话历史 → 本轮任务）、`prefetch(wait=True)` 的同步预热口；
+`tests/unit|integration` 的 autouse fixture 增加长期记忆替身（用例不依赖真实 Redis）。
+全量 `pytest tests/unit tests/integration/test_api.py tests/integration/test_workspace_api.py`
+→ **986 passed / 12 failed**（仍是缺 `pypdfium2` 的 PDF 用例）。
+
 **前端容器与服务**：`npm run build` 通过（bundle 441.52 kB，未过告警阈值）；
 `workspace-smoke` **210/210** 未受影响。
 - **`doc/15` 只加了两条**：模块 3 的工作区与出网边界、第五节的三层边界表；该文件是事实源，
