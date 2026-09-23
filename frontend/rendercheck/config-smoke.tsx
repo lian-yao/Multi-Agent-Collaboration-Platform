@@ -55,6 +55,13 @@ import { McpImportModal } from "../src/config/McpImportModal";
 import { SandboxBoundary } from "../src/config/SandboxPanel";
 import { EgressBoundary } from "../src/config/EgressPanel";
 import { MemoryBoundary } from "../src/config/MemoryPanel";
+import {
+  SearchChannelBoundary,
+  SearchChannelPanel,
+  buildSearchUpdate,
+  formFromConfig,
+  switchChannel,
+} from "../src/config/SearchChannelPanel";
 import type {
   Agent,
   LongTermMemoryEntry,
@@ -1215,6 +1222,242 @@ check(
   egressMarkup.includes("本进程还没有拒绝记录") &&
     egressMarkup.includes("macp_egress_blocked_total"),
   egressMarkup.slice(0, 200),
+);
+
+/* ---- §5.24 搜索渠道（ADR-039） ---- */
+
+/** 取某个 `<input id=...>` 的开标签，用于断言受控值与类型。 */
+const inputTagFor = (markup: string, id: string): string => {
+  const at = markup.indexOf(`id="${id}"`);
+  if (at < 0) return "";
+  const open = markup.lastIndexOf("<input", at);
+  const close = markup.indexOf(">", at);
+  return open < 0 || close < 0 ? "" : markup.slice(open, close);
+};
+
+/** 取以某段文案结尾的那个 `<button ...>` 开标签，用于断言 disabled。 */
+const buttonTagFor = (markup: string, text: string): string => {
+  const at = markup.indexOf(text);
+  if (at < 0) return "";
+  const open = markup.lastIndexOf("<button", at);
+  return open < 0 ? "" : markup.slice(open, at);
+};
+
+const SEARCH_CHANNELS = [
+  {
+    id: "duckduckgo",
+    label: "DuckDuckGo 契约",
+    needs_api_key: false,
+    default_endpoint: "https://api.duckduckgo.com/",
+    description: "GET + JSON。",
+  },
+  {
+    id: "volcengine",
+    label: "火山引擎豆包搜索",
+    needs_api_key: true,
+    default_endpoint: "https://open.feedcoopapi.com/search_api/web_search",
+    description: "POST + Bearer key。",
+  },
+];
+
+const searchEnvBaseline = {
+  provider: "duckduckgo",
+  endpoint: "http://search-gateway:8800/search",
+  api_key_configured: false,
+  timeout_seconds: 8,
+  max_results: 5,
+  env_provider: "duckduckgo",
+  env_endpoint: "http://search-gateway:8800/search",
+  env_api_key_configured: false,
+  channels: SEARCH_CHANNELS,
+  updated_by: null,
+  updated_at: null,
+};
+
+/** 容器在无 effects 的静态渲染下只应停在「读取中」，不能崩。 */
+try {
+  const container = renderToStaticMarkup(<SearchChannelPanel />);
+  check(
+    "搜索渠道容器可静态渲染（未取到数据时停在读取中）",
+    container.includes("搜索渠道") && container.includes("读取中"),
+    container.slice(0, 200),
+  );
+} catch (cause) {
+  check(
+    "搜索渠道容器可静态渲染（未取到数据时停在读取中）",
+    false,
+    cause instanceof Error ? cause.message : String(cause),
+  );
+}
+
+// 静态渲染必须给上 handler：少了它，`disabled={... || !onClearOverrides}` 会恒真，
+// 断言就成了「没传回调所以点不动」，而不是「未覆盖所以点不动」。
+const noop = () => {};
+const boundaryProps = {
+  onChange: noop,
+  onSubmit: noop,
+  onReload: noop,
+  onClearOverrides: noop,
+};
+
+// 跟随环境配置、未覆盖：本地网关 + 无需凭据
+const baselineMarkup = renderToStaticMarkup(
+  <SearchChannelBoundary
+    config={searchEnvBaseline}
+    form={formFromConfig(searchEnvBaseline)}
+    {...boundaryProps}
+  />,
+);
+check(
+  "搜索渠道：渠道下拉列出两条出口并标注是否要凭据",
+  baselineMarkup.includes("DuckDuckGo 契约") &&
+    baselineMarkup.includes("火山引擎豆包搜索") &&
+    baselineMarkup.includes("（需要 API key）") &&
+    baselineMarkup.includes("（无需凭据）"),
+  baselineMarkup.slice(0, 300),
+);
+check(
+  "搜索渠道：说明生效值与环境基线的区别",
+  baselineMarkup.includes("http://search-gateway:8800/search") &&
+    baselineMarkup.includes("环境配置") &&
+    baselineMarkup.includes("跟随环境配置"),
+  baselineMarkup.slice(0, 300),
+);
+check(
+  "搜索渠道：凭据只写入不回读（password + 空 value）",
+  inputTagFor(baselineMarkup, "sc-api-key").includes('type="password"') &&
+    inputTagFor(baselineMarkup, "sc-api-key").includes('value=""'),
+  inputTagFor(baselineMarkup, "sc-api-key"),
+);
+check(
+  "搜索渠道：无需凭据的渠道不出现缺凭据告警",
+  !baselineMarkup.includes("未配置豆包搜索 API key"),
+  baselineMarkup.slice(0, 200),
+);
+check(
+  "搜索渠道：未覆盖时「恢复环境配置」不可点",
+  buttonTagFor(baselineMarkup, "恢复环境配置（清除覆盖）").includes("disabled"),
+  buttonTagFor(baselineMarkup, "恢复环境配置（清除覆盖）"),
+);
+check(
+  "搜索渠道：无改动时保存按钮不可点",
+  buttonTagFor(baselineMarkup, "保存配置").includes("disabled"),
+  buttonTagFor(baselineMarkup, "保存配置"),
+);
+check(
+  "搜索渠道：说明保存后无需重启（缓存失效已由后端收口）",
+  baselineMarkup.includes("无需重启"),
+  baselineMarkup.slice(0, 200),
+);
+
+// 已覆盖成豆包、但凭据还没配：这正是截图里那条报错的现场
+const volcengineWithoutKey = {
+  ...searchEnvBaseline,
+  provider: "volcengine",
+  endpoint: "https://open.feedcoopapi.com/search_api/web_search",
+  overridden: true,
+  updated_by: "req-1",
+  updated_at: "2026-09-23T12:00:00+00:00",
+};
+const volcengineMarkup = renderToStaticMarkup(
+  <SearchChannelBoundary
+    config={volcengineWithoutKey}
+    form={formFromConfig(volcengineWithoutKey)}
+    {...boundaryProps}
+  />,
+);
+
+/** 填了凭据、因此 patch 非空（保存按钮应可点，且不再告警）。 */
+const volcengineWithKeyMarkup = renderToStaticMarkup(
+  <SearchChannelBoundary
+    config={volcengineWithoutKey}
+    form={{ ...formFromConfig(volcengineWithoutKey), apiKey: "sk-demo" }}
+    {...boundaryProps}
+  />,
+);
+check(
+  "搜索渠道：需要凭据却没配时给出告警（正是工具报错的那条路径）",
+  volcengineMarkup.includes("未配置豆包搜索 API key") &&
+    volcengineMarkup.includes("API key 并保存即可"),
+  volcengineMarkup.slice(0, 300),
+);
+check(
+  "搜索渠道：已覆盖时标出来，且「恢复环境配置」可点",
+  volcengineMarkup.includes("已覆盖环境配置") &&
+    !buttonTagFor(volcengineMarkup, "恢复环境配置（清除覆盖）").includes("disabled"),
+  buttonTagFor(volcengineMarkup, "恢复环境配置（清除覆盖）"),
+);
+check(
+  "搜索渠道：填了凭据就不再告警",
+  !volcengineWithKeyMarkup.includes("未配置豆包搜索 API key"),
+  "",
+);
+check(
+  "搜索渠道：有改动时保存按钮可点",
+  !buttonTagFor(volcengineWithKeyMarkup, "保存配置").includes("disabled"),
+  buttonTagFor(volcengineWithKeyMarkup, "保存配置"),
+);
+check(
+  "搜索渠道：环境有凭据时不误报缺凭据",
+  !renderToStaticMarkup(
+    <SearchChannelBoundary
+      config={{ ...volcengineWithoutKey, api_key_configured: true }}
+      form={formFromConfig(volcengineWithoutKey)}
+      {...boundaryProps}
+    />,
+  ).includes("未配置豆包搜索 API key"),
+  "",
+);
+
+/* 纯函数：patch 形状（省略 = 不改动、null = 清除） */
+const channelInitial = {
+  provider: "duckduckgo",
+  endpoint: "http://search-gateway:8800/search",
+  apiKey: "",
+};
+check(
+  "搜索渠道 patch：无改动 ⇒ 空 patch（不会把生效值回写成覆盖）",
+  Object.keys(buildSearchUpdate(channelInitial, channelInitial)).length === 0,
+  JSON.stringify(buildSearchUpdate(channelInitial, channelInitial)),
+);
+check(
+  "搜索渠道 patch：换渠道 ⇒ 端点显式置 null，交回后端按渠道取默认",
+  JSON.stringify(
+    buildSearchUpdate(channelInitial, switchChannel(channelInitial, "volcengine")),
+  ) === JSON.stringify({ provider: "volcengine", endpoint: null }),
+  JSON.stringify(
+    buildSearchUpdate(channelInitial, switchChannel(channelInitial, "volcengine")),
+  ),
+);
+check(
+  "搜索渠道 patch：切换渠道会清空端点输入（旧渠道端点不能被当成显式覆盖）",
+  switchChannel(channelInitial, "volcengine").endpoint === "",
+  switchChannel(channelInitial, "volcengine").endpoint,
+);
+check(
+  "搜索渠道 patch：清空端点 ⇒ 显式 null（回退环境端点）",
+  JSON.stringify(buildSearchUpdate(channelInitial, { ...channelInitial, endpoint: "" })) ===
+    JSON.stringify({ endpoint: null }),
+  JSON.stringify(buildSearchUpdate(channelInitial, { ...channelInitial, endpoint: "" })),
+);
+check(
+  "搜索渠道 patch：凭据去空白后单独提交",
+  JSON.stringify(buildSearchUpdate(channelInitial, { ...channelInitial, apiKey: "  sk-1  " })) ===
+    JSON.stringify({ api_key: "sk-1" }),
+  JSON.stringify(buildSearchUpdate(channelInitial, { ...channelInitial, apiKey: "  sk-1  " })),
+);
+
+/* 源码断言：面板挂在「内部工具」分区，且顺序在工具目录之前 */
+check(
+  "搜索渠道面板挂在「内部工具」分区，且在工具目录之前",
+  /<SearchChannelPanel\s*\/>/.test(configPageSource) &&
+    configPageSource.indexOf("<SearchChannelPanel") < configPageSource.indexOf("<InternalToolsPanel"),
+  "",
+);
+check(
+  "搜索渠道分区释义已写进页签",
+  configPageSource.includes("§5.24") && configPageSource.includes("§5.3"),
+  "",
 );
 
 const passed = results.filter(([ok]) => ok).length;

@@ -8,6 +8,7 @@ import { ProviderPanel } from "./ProviderPanel";
 import { DefaultRoutePanel } from "./DefaultRoutePanel";
 import { McpPanel } from "./McpPanel";
 import { InternalToolsPanel } from "./InternalToolsPanel";
+import { SearchChannelPanel } from "./SearchChannelPanel";
 import { SandboxPanel } from "./SandboxPanel";
 import { EgressPanel } from "./EgressPanel";
 import { MemoryPanel } from "./MemoryPanel";
@@ -20,7 +21,7 @@ export type ConfigTabId = "providers" | "defaults" | "tools" | "mcp" | "memory" 
  * 同一份数据只在一个分区里写，别的页面只读。
  * - providers：多端点登记、批量引入模型、逐条特化调参
  * - defaults：兜底模型与 legacy 五列
- * - tools：平台内置工具目录（§5.3）——进入即读取，含输入 Schema
+ * - tools：搜索渠道（§5.24）与平台内置工具目录（§5.3）——目录进入即读取，含输入 Schema
  * - mcp：多 Server 与紧凑工具卡片
  * - memory：长期记忆（§5.22、ADR-036）——**只列与删**，写入回到对话里的 `记住：…`
  * - sandbox：执行边界 + 出网策略（§5.15 / §5.21），**只读**（都是部署期安全边界）
@@ -40,7 +41,7 @@ export const CONFIG_TABS: readonly PageTab<ConfigTabId>[] = [
     id: "tools",
     label: "内部工具",
     icon: Boxes,
-    title: "平台内置工具目录（§5.3）：进入即读取，含输入 Schema",
+    title: "搜索渠道（§5.24）与内置工具目录（§5.3）",
   },
   { id: "mcp", label: "MCP 工具", icon: Plug, title: "多 Server 与紧凑工具卡片" },
   {
@@ -113,7 +114,12 @@ export function ConfigPage() {
       <div className="cfg-tab-panel" role="tabpanel" id={`cfg-panel-${tab}`}>
         {tab === "providers" && <ProviderPanel catalog={catalog} />}
         {tab === "defaults" && <DefaultRoutePanel />}
-        {tab === "tools" && <InternalToolsPanel />}
+        {tab === "tools" && (
+          <>
+            <SearchChannelPanel />
+            <InternalToolsPanel />
+          </>
+        )}
         {tab === "mcp" && <McpPanel />}
         {tab === "memory" && <MemoryPanel />}
         {tab === "sandbox" && (

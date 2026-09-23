@@ -389,6 +389,42 @@ export interface ProviderConfigUpdate {
 }
 
 /* -------------------------------------------------------------------------- */
+/* §5.24 搜索渠道（ADR-039）                                                     */
+/* -------------------------------------------------------------------------- */
+
+/** 一个可选搜索渠道；`needs_api_key` 决定凭据输入的提示口径。 */
+export interface SearchChannelOption {
+  id: string;
+  label: string;
+  needs_api_key: boolean;
+  default_endpoint: string;
+  description: string;
+}
+
+export interface SearchConfig {
+  provider: string;
+  endpoint: string;
+  api_key_configured: boolean;
+  timeout_seconds: number;
+  max_results: number;
+  /** 环境基线（`TOOL_*`）：界面据此说明「这个值从哪来、有没有被覆盖」。 */
+  env_provider: string;
+  env_endpoint: string;
+  env_api_key_configured: boolean;
+  overridden: boolean;
+  channels: SearchChannelOption[];
+  updated_by: string | null;
+  updated_at: string | null;
+}
+
+export interface SearchConfigUpdate {
+  provider?: string | null;
+  endpoint?: string | null;
+  /** 省略 = 不修改；显式 `null` = 清除已存密钥、回退环境变量。 */
+  api_key?: string | null;
+}
+
+/* -------------------------------------------------------------------------- */
 /* §5.9 Provider 注册表                                                        */
 /* -------------------------------------------------------------------------- */
 

@@ -22,6 +22,7 @@ from typing import Any, Callable
 
 from pydantic import BaseModel, Field
 
+from app.observability.logging import get_logger, log_event
 from app.tools.base import BuiltinTool, ToolExecutionError
 from app.tools.config import ToolSettings, get_tool_settings
 from app.security.egress import (
@@ -30,6 +31,8 @@ from app.security.egress import (
     fetch_json as egress_fetch_json,
     http_post as egress_http_post,
 )
+
+logger = get_logger("tools.search")
 
 USER_AGENT = "macp-agent/0.1 (+multi-agent-collaboration-platform)"
 
@@ -65,6 +68,18 @@ class WebSearchTool(BuiltinTool):
         self._settings = settings or get_tool_settings()
         self._fetch_json = fetch_json or _egress_get_json
         self._fetch_post_json = fetch_post_json or _egress_post_json
+        # 配错端点与渠道的组合不会当场炸，只会在解析响应时以**无关的**错误信息失败
+        # （见 `endpoint_provider_mismatch`）。构造时记一条，别让它只活在失败现场里。
+        # 工具实例被注册表按进程缓存，所以这条警告的频次约等于「配置变了几次」。
+        mismatch = self._settings.endpoint_provider_mismatch()
+        if mismatch:
+            log_event(
+                logger,
+                "tool.search.endpoint_provider_mismatch",
+                level=30,
+                endpoint=self._settings.search_endpoint,
+                hint=mismatch,
+            )
 
     def _get(self, endpoint: str, params: dict[str, str]) -> Any:
         """GET 取数；网络层故障归一为**可重试**的 `ToolExecutionError`（ADR-037 §5）。"""

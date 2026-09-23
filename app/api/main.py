@@ -83,6 +83,12 @@ from app.core.provider_config import (
     update_provider_config,
 )
 from app.mcp.registry import tool_catalog
+from app.tools.config import env_tool_settings
+from app.tools.search_config import (
+    SearchConfigError,
+    effective_search_view,
+    update_search_config,
+)
 from app.memory import MessageRole, MessageStatus, SessionMessage
 from app.memory.runtime import conversation_memory
 from app.orchestration.long_term import (
@@ -534,6 +540,58 @@ class ProviderConfigUpdateRequest(BaseModel):
                 "至少需要提供 provider/model/base_url/api_key/temperature/default_llm_model_id 之一"
             )
         return self
+
+class SearchChannelOption(BaseModel):
+    """`GET/PUT /api/v1/config/search` 响应里的可选渠道（`doc/api.md` §5.24）。"""
+
+    id: str
+    label: str
+    needs_api_key: bool
+    default_endpoint: str
+    description: str
+
+
+class SearchConfigResponse(BaseModel):
+    """搜索渠道配置的**生效值**（`doc/api.md` §5.24、ADR-039）。
+
+    永不包含 API key 原值，只回 `api_key_configured`。`env_*` 三项是环境基线
+    （`TOOL_*`）：界面据此说明「这个值从哪来、有没有被覆盖」。
+    """
+
+    provider: str
+    endpoint: str
+    api_key_configured: bool
+    timeout_seconds: float
+    max_results: int
+    env_provider: str
+    env_endpoint: str
+    env_api_key_configured: bool
+    overridden: bool
+    channels: list[SearchChannelOption]
+    updated_by: str | None = None
+    updated_at: datetime | None = None
+
+
+class SearchConfigUpdateRequest(BaseModel):
+    """`PUT /api/v1/config/search` 的请求体（`doc/api.md` §5.24、ADR-039）。
+
+    字段缺省 = 不改动；显式 `null` = 清除该字段的覆盖、回退环境配置。
+
+    **换渠道会自动带上端点**：`provider` 与当前生效渠道不同、且 `endpoint` 缺省或为空时，
+    服务端会把它落库为该渠道的默认地址。理由见 `app/tools/search_config.py` 的模块
+    文档——沿用上一条渠道的端点必然打不对解析契约。
+    """
+
+    provider: str | None = Field(default=None, max_length=20)
+    endpoint: str | None = Field(default=None, max_length=500)
+    api_key: str | None = Field(default=None, max_length=500)
+
+    @model_validator(mode="after")
+    def _require_any_field(self) -> SearchConfigUpdateRequest:
+        if not self.model_fields_set:
+            raise ValueError("至少需要提供 provider/endpoint/api_key 之一")
+        return self
+
 
 
 # --------------------------------------------------------------------------- #
@@ -1813,6 +1871,39 @@ def put_model_provider_config(
         raise ApiError("DATA_SOURCE_UNAVAILABLE", "配置写入失败，请稍后重试", 503) from exc
     settings = resolve_provider_settings(get_settings())
     return ProviderConfigResponse(**effective_provider_view(settings))
+
+
+@app.get("/api/v1/config/search", response_model=SearchConfigResponse)
+def get_search_config() -> SearchConfigResponse:
+    """读取生效的搜索渠道配置（不返回 API key，见 doc/api.md §5.24）。"""
+
+    return SearchConfigResponse(**effective_search_view(env_tool_settings()))
+
+
+@app.put("/api/v1/config/search", response_model=SearchConfigResponse)
+def put_search_config(
+    payload: SearchConfigUpdateRequest,
+    request: Request,
+) -> SearchConfigResponse:
+    """写入搜索渠道覆盖值，并失效两层工具缓存；下一次任务即按新渠道执行。"""
+
+    # 环境基线只解析一次：换渠道时要拿它决定端点落哪个（见 search_config 模块文档）。
+    env = env_tool_settings()
+    try:
+        update_search_config(
+            provider=_patch_field(payload, "provider"),
+            endpoint=_patch_field(payload, "endpoint"),
+            api_key=_patch_field(payload, "api_key"),
+            env=env,
+            actor=request.headers.get("X-Request-ID"),
+        )
+    except SearchConfigError as exc:
+        raise ApiError(
+            "VALIDATION_ERROR", str(exc), status.HTTP_422_UNPROCESSABLE_ENTITY
+        ) from exc
+    except (SQLAlchemyError, OSError, ValueError, KeyError) as exc:
+        raise ApiError("DATA_SOURCE_UNAVAILABLE", "配置写入失败，请稍后重试", 503) from exc
+    return SearchConfigResponse(**effective_search_view(env_tool_settings()))
 
 
 @app.get("/api/v1/providers", response_model=ProviderListResponse)

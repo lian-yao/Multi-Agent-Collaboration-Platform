@@ -52,13 +52,22 @@ services:
       # 工具集与 GET /api/v1/tools。代码默认关闭（免让工具目录依赖配置库），部署侧
       # 显式打开；要退回「只暴露平台内置工具」设 MCP_INCLUDE_REGISTERED_SERVERS=false。
       MCP_INCLUDE_REGISTERED_SERVERS: ${MCP_INCLUDE_REGISTERED_SERVERS:-true}
-      # Agent 的网页搜索出口（ADR-037）：默认火山引擎豆包搜索 Custom，按量付费 key 从
-      # compose 同级 `.env` 的 TOOL_SEARCH_API_KEY 传进来（**不要写进本文件**）。
-      # 端点留空＝按 provider 取代码默认；要回到同网络的 search-gateway（ADR-032）就设
-      # TOOL_SEARCH_PROVIDER=duckduckgo 并显式给 TOOL_SEARCH_ENDPOINT=http://search-gateway:8800/search。
-      TOOL_SEARCH_PROVIDER: ${TOOL_SEARCH_PROVIDER:-volcengine}
+      # Agent 的网页搜索出口（ADR-032 / ADR-037 / ADR-039）：**默认走同网络的
+      # search-gateway**——免费、不需要任何凭证，而且下面已经把网关跑起来了（它不发布
+      # 宿主端口，只服务同网络的 backend）。
+      #
+      # 默认值刻意写在这里而不是 `.env`：`.env` 被 `.gitignore` 挡住，靠它当默认等于
+      # 「新克隆的人开箱就是坏的」——实测踩到过一次（搜索报「未配置豆包搜索 API key」）。
+      #
+      # 换豆包（火山引擎，按量付费）：设 TOOL_SEARCH_PROVIDER=volcengine，把 key 写进
+      # compose 同级 `.env` 的 TOOL_SEARCH_API_KEY（**不要写进本文件**）。端点可以留空——
+      # 「渠道=volcengine 却指向内置网关」这类契约不匹配由应用侧自纠为官方端点。
+      #
+      # 也可以完全不动这里：运行期在配置页「内部工具 → 搜索渠道」改（§5.24、ADR-039），
+      # 那条路径不需要重建容器。
+      TOOL_SEARCH_PROVIDER: ${TOOL_SEARCH_PROVIDER:-duckduckgo}
       TOOL_SEARCH_API_KEY: ${TOOL_SEARCH_API_KEY:-}
-      TOOL_SEARCH_ENDPOINT: ${TOOL_SEARCH_ENDPOINT:-}
+      TOOL_SEARCH_ENDPOINT: ${TOOL_SEARCH_ENDPOINT:-http://search-gateway:8800/search}
       # 工作区（ADR-033 阶段 1）：容器内根固定 /workspace，宿主目录由下面的卷挂载决定。
       # 阶段 1 只有只读档位；写档位与沙箱挂载在阶段 2。
       # **形态必须显式声明**（ADR-035）：代码默认是 `host`（宿主直跑，用户当场选文件夹），

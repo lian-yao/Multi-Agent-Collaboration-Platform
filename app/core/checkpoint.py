@@ -235,6 +235,9 @@ UNSET = object()
 PROVIDER_CONFIG_ID = "default"
 """`provider_configs` 单行表的主键固定值（`doc/data-model.md` §3）。"""
 
+TOOL_CONFIG_ID = "default"
+"""`tool_configs` 单行表的主键固定值（ADR-039）。"""
+
 
 class AgentConfigRecord(Base):
     """`agent_configs` 表：Agent 模型的覆盖配置（`doc/data-model.md` §3）。
@@ -322,6 +325,37 @@ class ProviderConfigRecord(Base):
     api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     temperature: Mapped[float | None] = mapped_column(Float, nullable=True)
     default_llm_model_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    updated_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
+    )
+
+
+class ToolConfigRecord(Base):
+    """`tool_configs` 表：内置工具的运行期覆盖（ADR-039）。
+
+    单行表（`id='default'`），只存**被覆盖的字段**：列值为 NULL 表示回退 API 进程的
+    环境配置（`TOOL_*`）。写入方是 `PUT /api/v1/config/search`（`doc/api.md` §5.24），
+    读取方是 `app/tools/search_config.py`（API 与工具构造共用）。
+
+    为什么不复用 `provider_configs`：那张表描述的是**模型出口**，而这里描述的是
+    **工具出口**（搜索渠道）。两者的生效链路、校验与"恢复默认"语义都不一样，
+    挤进同一行会让「清空模型覆盖」顺手把搜索配置也清掉。
+
+    为什么不像 `provider_configs` 那样再镜像一份进 Redis：那张表在每次构造模型时
+    都要读（热路径），本表只在**构建工具注册表**时读一次（单行主键查询）。
+    为一次 PK 查询引入第二份事实源不划算，所以这里只有 PostgreSQL 一个来源。
+
+    `search_api_key` 以明文存储，属于运行期凭据：不回传、不落日志，访问边界由
+    数据库权限与部署网络保证（ADR-014、ADR-015）。
+    """
+
+    __tablename__ = "tool_configs"
+
+    id: Mapped[str] = mapped_column(String(20), primary_key=True)
+    search_provider: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    search_endpoint: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    search_api_key: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_by: Mapped[str | None] = mapped_column(String(100), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, onupdate=_utcnow, nullable=False
@@ -564,6 +598,55 @@ def upsert_provider_config(
         session.commit()
         session.refresh(row)
         return _provider_config_to_dict(row)
+
+
+def _tool_config_to_dict(row: ToolConfigRecord) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "search_provider": row.search_provider,
+        "search_endpoint": row.search_endpoint,
+        "search_api_key": row.search_api_key,
+        "updated_by": row.updated_by,
+        "updated_at": row.updated_at,
+    }
+
+
+def get_tool_config() -> dict[str, Any] | None:
+    """返回内置工具的运行期覆盖行；没有写入过返回 None。"""
+
+    with get_session_factory()() as session:
+        row = session.get(ToolConfigRecord, TOOL_CONFIG_ID)
+        return _tool_config_to_dict(row) if row else None
+
+
+def upsert_tool_config(
+    *,
+    search_provider: Any = UNSET,
+    search_endpoint: Any = UNSET,
+    search_api_key: Any = UNSET,
+    updated_by: str | None = None,
+) -> dict[str, Any]:
+    """写入内置工具覆盖值；未传的字段保持原值，显式传 None 表示清除该字段。"""
+
+    with get_session_factory()() as session:
+        row = session.get(ToolConfigRecord, TOOL_CONFIG_ID)
+        if row is None:
+            row = ToolConfigRecord(id=TOOL_CONFIG_ID)
+            session.add(row)
+        values = {
+            "search_provider": search_provider,
+            "search_endpoint": search_endpoint,
+            "search_api_key": search_api_key,
+        }
+        for field, value in values.items():
+            if value is not UNSET:
+                setattr(row, field, value)
+        if updated_by is not None:
+            row.updated_by = updated_by
+        row.updated_at = _utcnow()
+        session.commit()
+        session.refresh(row)
+        return _tool_config_to_dict(row)
 
 
 def _agent_config_to_dict(row: AgentConfigRecord) -> dict[str, Any]:
