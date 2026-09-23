@@ -447,7 +447,12 @@ class ScriptedStageModel(BaseChatModel):
 
 
 def _prompt_text(messages: Any) -> str:
-    """把消息列表拼成一段文本，用来判别"这是哪个节点的提示词"。"""
+    """把消息列表拼成一段文本。
+
+    **只用于失败信息与调试**：按提示词判别节点类型请用 `_system_text`——角色提示词里也会出现
+    「合成器」「上游」「并行」这些词，用整段文本判别会把 worker 认成合成器（2026-09-24 实测：
+    给角色提示词补上「产出会被合成器合并」之后，静态用例集体走错分支）。
+    """
 
     parts: list[str] = []
     for message in messages:
@@ -459,6 +464,15 @@ def _prompt_text(messages: Any) -> str:
                 str(block.get("text", "")) for block in content if isinstance(block, dict)
             )
     return "\n".join(parts)
+
+
+def _system_text(messages: Any) -> str:
+    """只取 system 消息（messages[0]）：平台节点的提示词是**各自独有**的，判别不会串。"""
+
+    if not messages:
+        return ""
+    content = getattr(messages[0], "content", "")
+    return content if isinstance(content, str) else _prompt_text([messages[0]])
 
 
 def _json_message(payload: dict[str, Any]) -> ChatResult:
@@ -501,7 +515,7 @@ class ScriptedE2EModel(ScriptedStageModel):
         return "scripted-e2e-model"
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):  # noqa: ANN001
-        text = _prompt_text(messages)
+        text = _system_text(messages)
         if "问题理解 Agent" in text:
             self.calls.append(list(messages))
             return _json_message(
@@ -521,7 +535,9 @@ class ScriptedE2EModel(ScriptedStageModel):
         if "结果校验 Agent" in text:
             self.calls.append(list(messages))
             return _json_message({"satisfied": True, "defects": [], "missing": []})
-        if "合成器" in text:
+        # 合成器的系统提示词 = reporter 角色 + 合成职责段；用职责段里的独有句判别，
+        # 不要用「合成器」两个字——角色提示词自己也提到了它。
+        if "本次是「合成器」节点" in text:
             self.calls.append(list(messages))
             return ChatResult(
                 generations=[ChatGeneration(message=AIMessage(content="合成后的对比报告"))]
