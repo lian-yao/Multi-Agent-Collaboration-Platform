@@ -729,6 +729,15 @@ class DiscoveredModelResponse(BaseModel):
     owned_by: str | None = None
 
 
+class MissingModelResponse(BaseModel):
+    """已登记但远端清单不再返回的条目（`doc/api.md` §5.10）。"""
+
+    id: str
+    model: str
+    name: str | None = None
+    enabled: bool = True
+
+
 class ModelDiscoveryResponse(BaseModel):
     """`GET /api/v1/config/providers/{id}/models/discover`（`doc/api.md` §5.10）。"""
 
@@ -737,6 +746,7 @@ class ModelDiscoveryResponse(BaseModel):
     source_url: str | None = None
     items: list[DiscoveredModelResponse] = Field(default_factory=list)
     existing: list[str] = Field(default_factory=list)
+    missing: list[MissingModelResponse] = Field(default_factory=list)
     total: int = 0
 
 

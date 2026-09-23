@@ -842,6 +842,7 @@ Token 归到具体 Agent 的标签；`agent_id` 在采样里目前不存在。�
   "source": "remote",
   "items": [{ "id": "gpt-4o-mini", "name": "gpt-4o-mini", "owned_by": "openai" }],
   "existing": ["gpt-4o-mini"],
+  "missing": [{ "id": "gateway-main:gpt-4o", "model": "gpt-4o", "name": "GPT-4o", "enabled": true }],
   "total": 1
 }
 ```
@@ -853,6 +854,10 @@ Token 归到具体 Agent 的标签；`agent_id` 在采样里目前不存在。�
   `gemini` → `{base_url}/v1beta/models`；`ollama` 预设 → `{base_url}/api/tags`。
 - `amazon-bedrock` 不支持发现，返回 `502 PROVIDER_DISCOVERY_FAILED` 并在 `message` 说明原因。
 - `existing` 列出该 Provider 下**已经登记**的模型名，供前端在批量导入前提示去重。
+- `missing` 列出该 Provider 下**已经登记、但远端清单不再返回**的条目（`id` / `model` /
+  `name` / `enabled`，按登记条目的 `model` 名与远端清单精确匹配）。Provider 下架模型后
+  注册表不会自动收缩，前端据此提供「对照远端清理」（批量停用或删除）；该接口本身仍不写库，
+  清理动作由客户端再走 `PATCH|DELETE /api/v1/config/models/{model_id}` 完成。
 - 超时 10 秒、响应体积上限 2 MiB；失败统一返回 `502 PROVIDER_DISCOVERY_FAILED`，
   `message` 不含凭据。该接口不写数据库。
 

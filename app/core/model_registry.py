@@ -1232,9 +1232,20 @@ def discover_provider_models(
         raise ProviderNotFoundError(provider_id)
     models: list[DiscoveredModel]
     models, source_url = discover_models(row, fetcher=fetcher)
-    existing = [
-        item["model"]
-        for item in checkpoint.list_llm_models(provider_id=provider_id)
+    registered = checkpoint.list_llm_models(provider_id=provider_id)
+    existing = [item["model"] for item in registered]
+    # 「已登记但远端不再提供」的差集：Provider 下架模型后注册表不会自动收缩，
+    # 前端据 `missing` 提供对照清理（批量停用/删除）；本函数仍不写库。
+    remote_ids = {model.id for model in models}
+    missing = [
+        {
+            "id": item["id"],
+            "model": item["model"],
+            "name": item.get("name"),
+            "enabled": bool(item.get("enabled", True)),
+        }
+        for item in registered
+        if item["model"] not in remote_ids
     ]
     return {
         "provider_id": provider_id,
@@ -1245,6 +1256,7 @@ def discover_provider_models(
             for model in models
         ],
         "existing": existing,
+        "missing": missing,
         "total": len(models),
     }
 

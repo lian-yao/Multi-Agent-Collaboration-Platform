@@ -887,6 +887,8 @@ def test_default_fetcher_redacts_url_in_http_error(monkeypatch):
 def test_discover_provider_models_reports_existing(store):
     store.add_provider("gw", base_url="https://gw.example.com/v1")
     model_registry.create_model(provider_id="gw", model="gpt-4o-mini")
+    # 远端已下架、但注册表里还挂着的条目：应出现在 missing 里（对照清理的数据源）。
+    model_registry.create_model(provider_id="gw", model="retired-model", name="已下架")
     fetcher = RecordingFetcher(
         {
             "https://gw.example.com/v1/models": {
@@ -903,7 +905,15 @@ def test_discover_provider_models_reports_existing(store):
     assert result["source"] == "remote"
     assert result["source_url"] == "https://gw.example.com/v1/models"
     assert result["total"] == 2
-    assert result["existing"] == ["gpt-4o-mini"]
+    assert result["existing"] == ["gpt-4o-mini", "retired-model"]
+    assert result["missing"] == [
+        {
+            "id": "gw:retired-model",
+            "model": "retired-model",
+            "name": "已下架",
+            "enabled": True,
+        }
+    ]
     assert result["items"][0] == {
         "id": "gpt-4o-mini",
         "name": "gpt-4o-mini",
