@@ -187,13 +187,24 @@ def _fallback(task: str, *, reason: str) -> dict[str, Any]:
     }
 
 
-def _resolve_settings() -> AgentSettings:
-    """按平台节点的口径解析模型配置；解析失败退回环境配置（与规划节点同口径）。"""
+def resolve_platform_settings() -> AgentSettings:
+    """按平台节点的口径解析模型配置；解析失败退回环境配置（与规划节点同口径）。
+
+    平台节点 = 改写 / intake / 规划 / 校验：它们都不对应使用者可见的协作角色，
+    共用同一个 `agent_configs` 解析 id（[ADR-037] §1）。**不能用裸环境配置**——
+    使用者在「工具与配置」里配好的模型是通过数据库生效的。
+    """
 
     try:
         return resolve_agent_settings(PLATFORM_AGENT_ID)
     except Exception:  # 配置查询失败不该让改写失败，更不该让执行失败
         return get_settings()
+
+
+def _resolve_settings() -> AgentSettings:
+    """[向后兼容] 旧私有名，行为与 `resolve_platform_settings` 一致。"""
+
+    return resolve_platform_settings()
 
 
 def _plain_text(content: str | list[Any]) -> str:
@@ -224,6 +235,7 @@ __all__ = [
     "PLATFORM_AGENT_ID",
     "REWRITE_SOURCE_MODEL",
     "REWRITE_SOURCE_ORIGINAL",
+    "resolve_platform_settings",
     "rewrite_prompt",
     "rewrite_prompt_input",
     "rewrite_task",

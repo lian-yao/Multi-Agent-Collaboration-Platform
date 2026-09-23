@@ -73,6 +73,23 @@ class AgentSettings(BaseSettings):
     max_plan_steps: int = 6
     """动态编排单次执行允许的最大步骤数；既是成本上限，也是回退判据。"""
 
+    # ---- 自动编排升级：波次并行 / 合成 / 校验（ADR-038）----
+    max_parallel_workers: int = 3
+    """同波并行子任务上限。并行会放大 token，因此并发本身也是一道成本闸门；
+    `<= 0` 视为 1（顺序执行），不允许出现「无上限并行」。"""
+
+    subtask_max_attempts: int = 3
+    """单个子任务的默认最大尝试次数（含首次）。可被计划里该步的 `retry` 覆盖。"""
+
+    subtask_timeout_seconds: int = 300
+    """单个子任务模型调用的超时（秒）。可被计划里该步的 `timeout_seconds` 覆盖。"""
+
+    validation_enabled: bool = True
+    """是否执行结果校验节点。关闭即「合成后直接交付」，省一次平台模型调用。"""
+
+    max_plan_rounds: int = 1
+    """校验不达标时允许的重编排轮数上限；硬上限 1（再多就是烧钱循环）。"""
+
 
 @lru_cache
 def get_settings() -> AgentSettings:
