@@ -67,14 +67,30 @@ if ($selected.StartsWith($projectRoot, [System.StringComparison]::OrdinalIgnoreC
     Write-Error "不要选仓库目录或其子目录（$projectRoot）——阶段 2 起沙箱对它可写。请另选一个目录。"
 }
 
+# `@(...)` 不能省：`Get-Content | Where-Object` 在**只剩一行**时返回的是字符串而不是
+# 数组，`$lines += "..."` 于是退化成字符串拼接，把变量并进上一行；若上一行是注释，
+# compose 就把整行当注释读，`WORKSPACE_HOST_ROOT` 静默回落到默认根（仓库里的
+# `workspaces/`），而脚本照样打印“已写入”。换根是本脚本最常见的用法，这条必然踩到。
+# 同时按前缀剔掉上一次生成的注释行：重复运行要收敛成「注释 + 变量」两行，而不是越滚越多。
 $lines = @()
 if (Test-Path $envFile) {
-    $lines = Get-Content -Path $envFile | Where-Object { $_ -notmatch '^WORKSPACE_HOST_ROOT=' }
-} else {
-    $lines = @("# 由 scripts/pick_work_dir.ps1 生成；不要提交（.env 已在 .gitignore 中）。")
+    $lines = @(
+        Get-Content -Path $envFile | Where-Object {
+            $_ -notmatch '^\s*WORKSPACE_HOST_ROOT=' -and
+            $_ -notmatch '^\s*#\s*由 scripts/pick_work_dir\.ps1 生成'
+        }
+    )
 }
+$lines += @("# 由 scripts/pick_work_dir.ps1 生成；不要提交（.env 已在 .gitignore 中）。")
 $lines += "WORKSPACE_HOST_ROOT=$selected"
 Set-Content -Path $envFile -Value $lines -Encoding UTF8
+
+# 回读确认变量**独占一行**：上面那类拼接错误不会报错，只会让配置静默失效。
+# 与其打印一句假的“已写入”，不如在这里显式失败。
+$written = @(Get-Content -Path $envFile)
+if (-not ($written | Where-Object { $_ -match '^\s*WORKSPACE_HOST_ROOT=' })) {
+    Write-Error "$envFile 里没有独立的 WORKSPACE_HOST_ROOT 行，配置不会生效，请检查该文件。"
+}
 
 Write-Host ""
 Write-Host "工作区根已写入 $envFile ：" -ForegroundColor Green
