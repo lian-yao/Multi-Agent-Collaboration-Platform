@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import { FolderTree, HardDrive, ShieldAlert } from "lucide-react";
 import { api } from "../api/client";
 import { InlineConfirm } from "../components/InlineConfirm";
-import { fileToBase64 } from "../workspace/attachments";
+import { fileToBase64 } from "./attachments";
 import type {
   Workspace,
   WorkspaceEntry,
@@ -19,22 +19,38 @@ import {
   formatTime,
   truncate,
   type NoticeState,
-} from "./shared";
+} from "../config/shared";
+// 工作区面板用的是 cfg 设计系统（`.cfg-*` 在 config/config.css 里定义）；
+// 工作台里其它跨视图组件（CollabCanvas / AgentStageModal）同样这样引用。
+import "../config/config.css";
+import "./workspace.css";
 
 /**
  * 工作区（`doc/api.md` §5.19 / §7.1、ADR-033）。
  *
- * 三件刻意的事：
+ * 入口在**工作台**（2026-09-23 从「工具与配置」搬过来）：工作区按 `session_id` 生效——
+ * 会话级注册表只挑**绑定本会话**的那一条，别的登记不会给这次执行的 Agent 任何文件工具。
  *
- * 1. **「选择文件夹」按钮导入的是副本**：浏览器能给的只有相对路径 + 内容
+ * 四件刻意的事：
+ *
+ * 1. **草稿态只是暂存**：工作台起步于 `session = null`（§4.2 草稿态），此时选好的
+ *    「路径 + 档位」只记在前端，等首条消息把会话建出来再补一次登记。不提前建会话，
+ *    也不造 `session_id=null` 的工作区——那是一条不会被选中、Agent 什么也拿不到的记录。
+ * 2. **「选择文件夹」按钮导入的是副本**：浏览器能给的只有相对路径 + 内容
  *    （`<input type="file" webkitdirectory>`），拿不到宿主绝对路径，所以这条路的语义是
  *    「把这份文件夹导入工作区」。想让 Agent 直接操作你本机那个目录，走宿主侧脚本 +
  *    bind mount（`scripts/pick_work_dir.ps1`）。界面文案必须写清这个区别。
- * 2. **档位只有两档**且提档是**人的动作**：`read_only` ⇄ `workspace_write`。
+ * 3. **档位只有两档**且提档是**人的动作**：`read_only` ⇄ `workspace_write`。
  *    不出现 `full_access`（没实现），也不做「Agent 申请提权」的入口（ADR-033 §3）。
- * 3. **目录树只读**：指向工作区之外的符号链接要标出来、且不可展开——它们不是可读内容，
+ * 4. **目录树只读**：指向工作区之外的符号链接要标出来、且不可展开——它们不是可读内容，
  *    看起来像普通目录会让人误判「Agent 能看到那些」。
  */
+
+/** 草稿态（还没有会话）里先记下的工作区选择；首条消息建出会话后再登记。 */
+export interface WorkspaceDraft {
+  path: string;
+  mode: WorkspaceMode;
+}
 
 export function formatBytes(value: number): string {
   if (!Number.isFinite(value) || value < 0) return "—";
@@ -135,6 +151,8 @@ export function WorkspaceBoundary({
   selectedId,
   tree,
   treeError,
+  sessionId = null,
+  draft = null,
   busy = false,
   importBusy = false,
   notice,
@@ -143,11 +161,16 @@ export function WorkspaceBoundary({
   onToggleMode,
   onDelete,
   onImportFolder,
+  onClearDraft,
 }: {
   workspaces: Workspace[];
   selectedId: string | null;
   tree: WorkspaceTree | null;
   treeError?: string;
+  /** 当前会话 id；`null` = 草稿态（还没发第一条消息）。 */
+  sessionId?: string | null;
+  /** 草稿态里暂存的选择。 */
+  draft?: WorkspaceDraft | null;
   busy?: boolean;
   importBusy?: boolean;
   notice?: NoticeState;
@@ -157,6 +180,7 @@ export function WorkspaceBoundary({
   onDelete?: (workspace: Workspace) => void;
   /** 「选择文件夹」：拿到浏览器给的 FileList（相对路径 + 内容），由容器上传。 */
   onImportFolder?: (files: FileList, overwrite: boolean) => void;
+  onClearDraft?: () => void;
 }) {
   const selected = workspaces.find((item) => item.id === selectedId) ?? null;
   const [path, setPath] = useState("");
@@ -178,7 +202,8 @@ export function WorkspaceBoundary({
           <div>
             <h3>工作区</h3>
             <p>
-              Agent 的文件业务限定在这里。路径是工作区根之下的相对路径——
+              Agent 的文件业务限定在这里，而且按会话生效：选中的工作区绑定当前会话，
+              它的文件工具才会进这次执行的工具集。路径是工作区根之下的相对路径——
               浏览器拿不到宿主路径，所以没有「选择本地文件夹」这一步。
             </p>
           </div>
@@ -190,11 +215,37 @@ export function WorkspaceBoundary({
 
       <NoticeBar notice={notice ?? null} />
 
+      {/* 草稿态与已绑定的区别必须写在界面上：否则用户以为「已经选好了」，
+          而真正的登记要等首条消息。 */}
+      {!sessionId && (
+        <p className="cfg-hint">
+          当前是草稿态（还没有会话）：这里选的路径与档位先记在草稿里，
+          <b>发出第一条消息</b>、会话建好之后才登记并绑定。
+        </p>
+      )}
+      {!sessionId && draft && (
+        <p className="cfg-hint">
+          草稿工作区：<b>{draft.path || "/（工作区根）"}</b> · {MODE_LABEL[draft.mode]}
+          <button type="button" className="cfg-quiet" onClick={() => onClearDraft?.()}>
+            清除
+          </button>
+        </p>
+      )}
+
       {workspaces.length === 0 ? (
-        <EmptyState
-          title="还没有登记工作区"
-          hint="留空路径登记时，服务端会按会话建 sessions/<会话 id>/。"
-        />
+        // 草稿态的措辞不能说成「还没有登记工作区」：草稿态根本没列过列表，
+        // 这句话会让人以为库里的登记没了（它们只是不属于本会话）。
+        sessionId ? (
+          <EmptyState
+            title="还没有登记工作区"
+            hint="留空路径登记时，服务端会按会话建 sessions/<会话 id>/。"
+          />
+        ) : (
+          <EmptyState
+            title="还没有选工作区"
+            hint="在下面填好路径与档位：发出第一条消息时登记并绑定本会话。留空路径 = sessions/<会话 id>/。"
+          />
+        )
       ) : (
         <ul className="cfg-ws-list">
           {workspaces.map((workspace) => (
@@ -367,7 +418,16 @@ export function WorkspaceBoundary({
 }
 
 /** 容器：负责取数与动作，展示交给 `WorkspaceBoundary`。 */
-export function WorkspacePanel() {
+export function WorkspacePanel({
+  sessionId,
+  draft,
+  onDraftChange,
+}: {
+  /** 当前会话 id；`null` = 草稿态（还没发第一条消息）。 */
+  sessionId: string | null;
+  draft: WorkspaceDraft | null;
+  onDraftChange: (draft: WorkspaceDraft | null) => void;
+}) {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [tree, setTree] = useState<WorkspaceTree | null>(null);
@@ -388,8 +448,17 @@ export function WorkspacePanel() {
 
   const reload = useCallback(
     async (select?: string) => {
+      // 没有会话就不问服务端：草稿态下 `GET /workspaces` 返回的是**所有**登记，
+      // 摆在这里会让人以为「已经选好了」。草稿的选择只存在于本地 draft 里。
+      if (!sessionId) {
+        setWorkspaces([]);
+        setSelectedId(null);
+        setTree(null);
+        setTreeError("");
+        return;
+      }
       try {
-        const listing = await api.listWorkspaces();
+        const listing = await api.listWorkspaces(sessionId);
         setWorkspaces(listing.items);
         const next = select ?? selectedId;
         if (next && listing.items.some((item) => item.id === next)) {
@@ -406,20 +475,38 @@ export function WorkspacePanel() {
         setNotice({ tone: "bad", text: describeError(cause, "工作区列表读取失败") });
       }
     },
-    [loadTree, selectedId],
+    [loadTree, selectedId, sessionId],
   );
 
   useEffect(() => {
     void reload();
-    // 只在挂载时拉一次；之后的刷新都由动作触发（避免与配置页其它分区抢轮询）。
+    // 会话切换时重拉（草稿 → 首条消息建出会话，这时才可能有绑定结果）；
+    // 其余刷新一律由动作触发，避免与其它视图抢轮询。
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [sessionId]);
 
   const create = async (path: string, mode: WorkspaceMode) => {
+    // 草稿态只暂存：这里就发 `POST /workspaces` 的话，拿到的是 `session_id=null`
+    // 的记录——会话级注册表不会选它，Agent 一个文件工具也拿不到。
+    if (!sessionId) {
+      onDraftChange({ path, mode });
+      setNotice({
+        tone: "info",
+        text: `已记在草稿：${path || "/（工作区根）"} · ${MODE_LABEL[mode]}。发出第一条消息时登记并绑定本会话。`,
+      });
+      return;
+    }
     setBusy(true);
     try {
-      const created = await api.createWorkspace({ path: path || null, mode });
-      setNotice({ tone: "ok", text: `已登记 ${created.path || "/（工作区根）"}` });
+      const created = await api.createWorkspace({
+        session_id: sessionId,
+        path: path || null,
+        mode,
+      });
+      setNotice({
+        tone: "ok",
+        text: `已登记并绑定本会话：${created.path || "/（工作区根）"}`,
+      });
       await reload(created.id);
     } catch (cause) {
       setNotice({ tone: "bad", text: describeError(cause, "登记失败") });
@@ -523,10 +610,13 @@ export function WorkspacePanel() {
       selectedId={selectedId}
       tree={tree}
       treeError={treeError}
+      sessionId={sessionId}
+      draft={draft}
       busy={busy}
       importBusy={importBusy}
       notice={notice}
       onCreate={(path, mode) => void create(path, mode)}
+      onClearDraft={() => onDraftChange(null)}
       onSelect={(id) => {
         setSelectedId(id);
         void loadTree(id);

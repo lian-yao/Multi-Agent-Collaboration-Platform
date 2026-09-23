@@ -18,6 +18,7 @@ import {
   FileText,
   Gauge,
   GitFork,
+  HardDrive,
   History,
   LoaderCircle,
   Maximize2,
@@ -63,6 +64,7 @@ import { CollaborationGraph } from "./workspace/CollaborationGraph";
 import { CollabCanvas, type CollabConversation } from "./workspace/CollabCanvas";
 import { RunActivity } from "./workspace/RunActivity";
 import { ApprovalCard } from "./workspace/ApprovalCard";
+import { WorkspacePanel, type WorkspaceDraft } from "./workspace/WorkspacePanel";
 import { groupUsage, TaskUsagePanel, useWorkflowMetrics } from "./workspace/TaskUsage";
 import {
   buildCollaboration,
@@ -151,6 +153,15 @@ export function App() {
   const [mobileNav, setMobileNav] = useState(false);
   const [dockOpen, setDockOpen] = useState(true);
   const [inspectorOpen, setInspectorOpen] = useState(false);
+  /* ---------------------------------------------------------------------- */
+  /* 工作区（`doc/api.md` §5.19 / §7.1）                                     */
+  /*                                                                        */
+  /* 入口在工作台：顶栏「工作区」开关 + 右侧抽屉。工作区**按会话生效**，而工作台  */
+  /* 起步是草稿态（§4.2），所以草稿里的选择只存在这里，等首条消息把会话建出来再  */
+  /* 补一次登记——不提前建会话，也不造 `session_id=null` 那种不会被选中的记录。   */
+  /* ---------------------------------------------------------------------- */
+  const [workspaceOpen, setWorkspaceOpen] = useState(false);
+  const [workspaceDraft, setWorkspaceDraft] = useState<WorkspaceDraft | null>(null);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const finalRefreshDone = useRef<string | null>(null);
   /* ---------------------------------------------------------------------- */
@@ -365,12 +376,32 @@ export function App() {
     // 草稿态（session = null）：首条消息才把会话落到库里，用户只感知到「发出去了一条消息」。
     let sessionId: string | null = session?.id ?? null;
     let created = false;
+    // 部分失败不吞掉消息，但必须说出来：附件没附上、草稿工作区没绑上都是这一类。
+    const warnings: string[] = [];
     try {
       if (!sessionId) {
         const fresh = await api.createSession();
         sessionId = fresh.id;
         created = true;
         setSession(fresh);
+      }
+      if (created && workspaceDraft) {
+        // 草稿里选的工作区在这里补登记（`doc/api.md` §7.1）。放在发消息**之前**：
+        // 编排一开跑就用当时的绑定解析会话级工具，晚一步提交可能让这次执行拿不到
+        // 文件工具。绑定失败不影响发消息；若随后发消息失败、会话被回滚，
+        // `workspaces.session_id` 的 ON DELETE CASCADE 会把这条登记一起带走。
+        try {
+          await api.createWorkspace({
+            session_id: sessionId,
+            path: workspaceDraft.path || null,
+            mode: workspaceDraft.mode,
+          });
+          setWorkspaceDraft(null);
+        } catch (cause) {
+          warnings.push(
+            `工作区没能绑定（${cause instanceof Error ? cause.message : String(cause)}）`,
+          );
+        }
       }
       const accepted = await api.sendMessage(sessionId, content.trim(), {
         attachmentIds: ready.map((item) => item.id as string),
@@ -380,10 +411,11 @@ export function App() {
       setAttachments([]);
       if (accepted.unattached_attachment_ids.length) {
         // 消息发出去了，附件缺了几个 —— 部分失败单独提示，不能并进提交失败里。
-        setError(
-          `消息已发送，但有 ${accepted.unattached_attachment_ids.length} 个附件没能附上，请重新上传。`,
+        warnings.push(
+          `有 ${accepted.unattached_attachment_ids.length} 个附件没能附上，请重新上传`,
         );
       }
+      if (warnings.length) setError(`消息已发送，但${warnings.join("；")}。`);
       setWorkflow(await api.getWorkflow(accepted.workflow_id));
       setMessages(await api.getMessages(sessionId));
       finalRefreshDone.current = null;
@@ -414,6 +446,8 @@ export function App() {
       if (item.id) void api.deleteAttachment(item.id).catch(() => undefined);
     });
     setAttachments([]);
+    // 草稿工作区同理：它只存在于前端，新任务要重新选（选择本身会写进新会话的登记）。
+    setWorkspaceDraft(null);
     finalRefreshDone.current = null;
     setView("workspace");
   };
@@ -446,6 +480,9 @@ export function App() {
           : null,
       );
       setContent("");
+      // 历史会话自带它自己的绑定关系；草稿里那份选择不能跟过来，
+      // 否则会在下一次「首条消息」时凭空绑上一个用户没再确认过的工作区。
+      setWorkspaceDraft(null);
       finalRefreshDone.current = null;
       setView("workspace");
     } catch (cause) {
@@ -590,6 +627,15 @@ export function App() {
             <span className={`connection ${error ? "bad" : ""}`}><i />{error ? "连接异常" : "API 已连接"}</span>
             <button className="icon-button" onClick={() => void refresh()} title="刷新状态" aria-label="刷新状态"><RefreshCw size={16} className={refreshing ? "spin" : ""} /></button>
             {view === "workspace" && <>
+              <button
+                className={`icon-button toolbar-toggle ${workspaceOpen ? "is-active" : ""}`}
+                onClick={() => setWorkspaceOpen(!workspaceOpen)}
+                title={workspaceOpen ? "隐藏工作区" : "工作区：选 Agent 在哪个文件夹里干活"}
+                aria-label={workspaceOpen ? "隐藏工作区" : "打开工作区"}
+                aria-pressed={workspaceOpen}
+              >
+                <HardDrive size={16} />
+              </button>
               <button className={`icon-button toolbar-toggle ${dockOpen ? "is-active" : ""}`} onClick={() => setDockOpen(!dockOpen)} title={dockOpen ? "隐藏 Agent 执行台" : "显示 Agent 执行台"} aria-label={dockOpen ? "隐藏 Agent 执行台" : "显示 Agent 执行台"} aria-pressed={dockOpen}><MorphStateIcon state="panel-open" /></button>
               <button className={`icon-button toolbar-toggle ${inspectorOpen ? "is-active" : ""}`} onClick={() => setInspectorOpen(!inspectorOpen)} title={inspectorOpen ? "隐藏协作详情" : "显示协作详情"} aria-label={inspectorOpen ? "隐藏协作详情" : "显示协作详情"} aria-pressed={inspectorOpen}><MorphStateIcon state="panel" /></button>
             </>}
@@ -627,6 +673,10 @@ export function App() {
               setDockOpen={setDockOpen}
               inspectorOpen={inspectorOpen}
               setInspectorOpen={setInspectorOpen}
+              workspaceOpen={workspaceOpen}
+              setWorkspaceOpen={setWorkspaceOpen}
+              workspaceDraft={workspaceDraft}
+              setWorkspaceDraft={setWorkspaceDraft}
               submit={submit}
               toggleSession={toggleSession}
               onOpenRecords={() => {
@@ -851,6 +901,12 @@ type WorkspaceProps = {
   setDockOpen: (value: boolean) => void;
   inspectorOpen: boolean;
   setInspectorOpen: (value: boolean) => void;
+  /** 工作区抽屉（§5.19 / §7.1）：入口在工作台，选择按会话绑定。 */
+  workspaceOpen: boolean;
+  setWorkspaceOpen: (value: boolean) => void;
+  /** 草稿态里暂存的选择；会话建出来之后由 `App.submit` 补登记。 */
+  workspaceDraft: WorkspaceDraft | null;
+  setWorkspaceDraft: (value: WorkspaceDraft | null) => void;
   submit: (e: FormEvent) => void;
   toggleSession: () => void;
   /** 跳到「任务记录」页看逐条采样与工具调用（侧栏与弹窗都只给入口，不重复渲染）。 */
@@ -1014,6 +1070,10 @@ function Workspace({
   setDockOpen,
   inspectorOpen,
   setInspectorOpen,
+  workspaceOpen,
+  setWorkspaceOpen,
+  workspaceDraft,
+  setWorkspaceDraft,
   submit,
   toggleSession,
   onOpenRecords,
@@ -1390,6 +1450,35 @@ function Workspace({
         sessionId={session?.id ?? null}
         onOpenRecords={onOpenRecords}
       />
+      {/*
+        工作区抽屉（§5.19 / §7.1）：从「工具与配置」搬过来的入口。
+        只在打开时挂载——面板挂载即 `GET /workspaces`，没打开就不该发这个请求。
+      */}
+      {workspaceOpen && (
+        <aside className="workspace-drawer" aria-label="工作区">
+          <div className="workspace-drawer-head">
+            <span>
+              <HardDrive size={15} />
+              工作区
+            </span>
+            <button
+              type="button"
+              className="icon-button"
+              onClick={() => setWorkspaceOpen(false)}
+              aria-label="关闭工作区"
+            >
+              <X size={15} />
+            </button>
+          </div>
+          <div className="workspace-drawer-body">
+            <WorkspacePanel
+              sessionId={session?.id ?? null}
+              draft={workspaceDraft}
+              onDraftChange={setWorkspaceDraft}
+            />
+          </div>
+        </aside>
+      )}
       </section>
       {detail && (
         <AgentStageModal

@@ -817,3 +817,56 @@
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0 14px;
 }
+
+/* -------------------------------------------------------------------------- */
+/* 工作区抽屉（`doc/api.md` §5.19 / §7.1）                                     */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * 从「工具与配置」搬到工作台：顶栏「工作区」开关打开。
+ * 与 `.inspector` 同属工作台内的浮层，区别是它**写配置**（登记 / 提档会改变 Agent
+ * 的能力边界），所以更宽、可滚动，且内层直接复用 cfg 设计系统。
+ * 定位沿用工作台浮层的口径（top/right/bottom 与 `.inspector` 对齐），
+ * 不参与 `.conversation-shell` 的 grid——抽屉开关不该把对话流挤变形。
+ */
+.workspace-drawer {
+  position: absolute;
+  z-index: 9;
+  top: 13px;
+  right: 18px;
+  bottom: 105px;
+  display: flex;
+  flex-direction: column;
+  width: min(560px, calc(100% - 36px));
+  border: 1px solid #d9e4e8;
+  border-radius: 10px;
+  box-shadow: 0 14px 40px #19364226;
+  background: #fbfcfd;
+  overflow: hidden;
+}
+
+.workspace-drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 52px;
+  padding: 0 16px;
+  border-bottom: 1px solid #e6ecef;
+  border-radius: 10px 10px 0 0;
+  background: #fff;
+}
+
+.workspace-drawer-head > span {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #68808d;
+  font-size: 12px;
+}
+
+.workspace-drawer-body {
+  flex: 1;
+  min-height: 0;
+  padding: 0 16px 18px;
+  overflow: auto;
+}

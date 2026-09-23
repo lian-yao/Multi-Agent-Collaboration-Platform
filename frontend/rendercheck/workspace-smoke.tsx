@@ -51,6 +51,7 @@ import { RunActivity } from "../src/workspace/RunActivity";
 import { ToolCallBlock } from "../src/workspace/TraceParts";
 import { TaskUsagePanel, groupUsage, usageFor } from "../src/workspace/TaskUsage";
 import { MessageAttachmentList, PendingFileChips } from "../src/workspace/AttachmentList";
+import { WorkspaceBoundary, folderTargets } from "../src/workspace/WorkspacePanel";
 import {
   ATTACHMENT_EXTENSIONS,
   MAX_ATTACHMENT_BYTES,
@@ -67,6 +68,8 @@ import type {
   Attachment,
   Metric,
   StageTraceItem,
+  Workspace,
+  WorkspaceTree,
   Workflow,
   WorkflowStageTrace,
 } from "../src/types/api";
@@ -1610,6 +1613,194 @@ check(
     /className="nav-badge"/.test(conversationSource) &&
     /pendingApprovals = approvals\.filter/.test(conversationSource),
   "",
+);
+
+/* -------------------------------------------------------------------------- */
+/* 工作区抽屉（§5.19 / §7.1）：入口在工作台，不再在配置页                        */
+/* -------------------------------------------------------------------------- */
+
+const configPageSource = readFileSync(
+  join(process.cwd(), "src", "config", "ConfigPage.tsx"),
+  "utf8",
+);
+const workspacePanelSource = readFileSync(
+  join(process.cwd(), "src", "workspace", "WorkspacePanel.tsx"),
+  "utf8",
+);
+check(
+  "工作区入口在工作台：顶栏开关 + 抽屉，且面板组件已搬进 workspace/",
+  /setWorkspaceOpen/.test(conversationSource) &&
+    /className="workspace-drawer"/.test(conversationSource) &&
+    /<WorkspacePanel[\s\S]{0,200}sessionId=/.test(conversationSource) &&
+    // 归属不重复：配置页不再挂这块面板，也没有这个分区
+    // （只看**渲染**：注释里说明「这块搬到哪去了」是允许的）
+    !/<WorkspacePanel\s*\/>/.test(configPageSource) &&
+    !/id:\s*"workspaces"/.test(configPageSource),
+  "",
+);
+check(
+  "工作区按会话绑定：登记时带 session_id，草稿态只暂存不登记",
+  /createWorkspace\(\{[\s\S]{0,120}session_id: sessionId/.test(workspacePanelSource) &&
+    // 草稿态提前分支：先 `onDraftChange` 再 return，绝不能走到 POST
+    /if \(!sessionId\) \{[\s\S]{0,200}onDraftChange\(\{ path, mode \}\)[\s\S]{0,200}return;/.test(
+      workspacePanelSource,
+    ) &&
+    // 草稿态不拉列表：返回的会是所有登记，摆出来像「已经选好了」
+    /if \(!sessionId\) \{[\s\S]{0,200}setWorkspaces\(\[\]\)/.test(workspacePanelSource),
+  "",
+);
+check(
+  "草稿态 → 会话建好时补登记：绑定失败不吞掉消息，但要说出来",
+  /created && workspaceDraft[\s\S]{0,600}api\.createWorkspace\(\{[\s\S]{0,120}session_id: sessionId/.test(
+    conversationSource,
+  ) &&
+    /warnings\.push\([\s\S]{0,200}工作区没能绑定/.test(conversationSource) &&
+    /消息已发送，但\$\{warnings\.join\("；"\)\}/.test(conversationSource),
+  "",
+);
+
+const workspaceTree: WorkspaceTree = {
+  workspace_id: "w-1",
+  path: "",
+  depth: 2,
+  truncated: false,
+  limit: 500,
+  entries: [
+    {
+      name: "reports",
+      path: "reports",
+      kind: "dir",
+      outside: false,
+      size_bytes: null,
+      modified_at: null,
+      children: [
+        {
+          name: "summary.md",
+          path: "reports/summary.md",
+          kind: "file",
+          outside: false,
+          size_bytes: 2048,
+          modified_at: null,
+        },
+      ],
+    },
+    {
+      name: "escape",
+      path: "escape",
+      kind: "symlink",
+      outside: true,
+      size_bytes: null,
+      modified_at: null,
+    },
+  ],
+};
+const workspaceRow: Workspace = {
+  id: "w-1",
+  session_id: "s-1",
+  path: "project/reports",
+  mode: "read_only",
+  name: null,
+  quota: { max_file_bytes: 5242880, max_total_bytes: 268435456, max_entries: 2000 },
+  usage: { available: true, total_bytes: 2048, entries: 2, truncated: false },
+  created_by: null,
+  updated_by: null,
+  created_at: "2026-09-23T02:00:00Z",
+};
+const workspaceMarkup = renderToStaticMarkup(
+  <WorkspaceBoundary
+    workspaces={[workspaceRow]}
+    selectedId="w-1"
+    tree={workspaceTree}
+    sessionId="s-1"
+  />,
+);
+check(
+  "工作区：列表、档位、用量与配额都渲染出来",
+  workspaceMarkup.includes("project/reports") &&
+    workspaceMarkup.includes("只读") &&
+    workspaceMarkup.includes("2.0 KB") &&
+    workspaceMarkup.includes("256.0 MB"),
+  workspaceMarkup.slice(0, 200),
+);
+check(
+  "工作区：越界符号链接被标出来且不展开",
+  workspaceMarkup.includes("工作区外") &&
+    // 越界链接没有子项，所以 only 工作区内的目录才带下一层
+    workspaceMarkup.includes("summary.md"),
+  workspaceMarkup.slice(0, 200),
+);
+check(
+  "工作区：提档是显式动作，且没有 full_access 这一档",
+  workspaceMarkup.includes("提档为可写") && !workspaceMarkup.includes("full_access"),
+  workspaceMarkup.slice(0, 200),
+);
+check(
+  "工作区：明确说明覆盖与删除需要人工审批",
+  workspaceMarkup.includes("人工审批"),
+  workspaceMarkup.slice(0, 200),
+);
+
+const draftMarkup = renderToStaticMarkup(
+  <WorkspaceBoundary
+    workspaces={[]}
+    selectedId={null}
+    tree={null}
+    sessionId={null}
+    draft={{ path: "sessions/draft", mode: "workspace_write" }}
+  />,
+);
+check(
+  "工作区：草稿态说清「发出第一条消息才登记」，并回显暂存的选择",
+  draftMarkup.includes("草稿态") &&
+    draftMarkup.includes("发出第一条消息") &&
+    draftMarkup.includes("sessions/draft") &&
+    draftMarkup.includes("可写") &&
+    draftMarkup.includes("清除"),
+  draftMarkup.slice(0, 200),
+);
+check(
+  "工作区：草稿态不渲染「已登记」的列表（避免看起来像选好了）",
+  !draftMarkup.includes("cfg-ws-list") &&
+    draftMarkup.includes("还没有选工作区") &&
+    !draftMarkup.includes("还没有登记工作区"),
+  draftMarkup.slice(0, 200),
+);
+
+check(
+  "工作区面板：选择文件夹走「导入副本」，不用只在浏览器里有效的目录句柄",
+  // `webkitdirectory` 是**允许**的：浏览器给相对路径 + 内容，正好用来导入副本。
+  // `showDirectoryPicker`（Web File System Access API）则不行——句柄只存在于浏览器，
+  // 服务端 Agent 用不上，做了就是个只能看不能用的假入口。
+  /webkitdirectory/.test(workspacePanelSource) &&
+    !/showDirectoryPicker/.test(workspacePanelSource) &&
+    // 只看**渲染结果**：源码注释里解释「为什么不提供这一档 / 这个入口」是允许的。
+    !/full_access|提权/.test(workspaceMarkup),
+  workspaceMarkup.slice(0, 120),
+);
+check(
+  "工作区面板：写清「导入的是副本」，并给出宿主侧直连的出口",
+  workspaceMarkup.includes("复制") &&
+    workspaceMarkup.includes("pick_work_dir.ps1") &&
+    workspaceMarkup.includes("选择文件夹并导入"),
+  workspaceMarkup.slice(0, 160),
+);
+check(
+  "审批入口指向对话流而不是工作区面板（归属不重复）",
+  workspacePanelSource.includes("审批入口在对话流") &&
+    !/decideApproval/.test(workspacePanelSource),
+  "",
+);
+
+const folder = folderTargets([
+  { name: "a.md", webkitRelativePath: "myproject/docs/a.md", size: 10 } as File,
+  { name: "b.bin", webkitRelativePath: "myproject/b.bin", size: 30 * 1024 * 1024 } as File,
+  { name: "root.txt", webkitRelativePath: "myproject/root.txt", size: 5 } as File,
+]);
+check(
+  "选择文件夹：剥掉顶层目录名，超过单文件上限的单独挑出来",
+  folder.targets.map((item) => item.path).join(",") === "docs/a.md,root.txt" &&
+    folder.oversized.join(",") === "b.bin",
+  JSON.stringify(folder.targets.map((item) => item.path)) + " / " + folder.oversized.join(","),
 );
 
 const passed = results.filter(([ok]) => ok).length;

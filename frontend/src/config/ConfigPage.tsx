@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Settings2, Sliders, Route, Plug, ShieldCheck, HardDrive } from "lucide-react";
+import { Settings2, Sliders, Route, Plug, ShieldCheck } from "lucide-react";
 import { api } from "../api/client";
 import { PageTabs, type PageTab } from "../components/PageTabs";
 import type { ProviderPresetCatalog } from "../types/api";
@@ -9,10 +9,9 @@ import { DefaultRoutePanel } from "./DefaultRoutePanel";
 import { McpPanel } from "./McpPanel";
 import { SandboxPanel } from "./SandboxPanel";
 import { EgressPanel } from "./EgressPanel";
-import { WorkspacePanel } from "./WorkspacePanel";
 import "./config.css";
 
-export type ConfigTabId = "providers" | "defaults" | "mcp" | "workspaces" | "sandbox";
+export type ConfigTabId = "providers" | "defaults" | "mcp" | "sandbox";
 
 /**
  * 四个分区的职责边界（ADR-017 / ADR-018 / doc/api.md §7）：
@@ -20,9 +19,10 @@ export type ConfigTabId = "providers" | "defaults" | "mcp" | "workspaces" | "san
  * - providers：多端点登记、批量引入模型、逐条特化调参
  * - defaults：兜底模型与 legacy 五列
  * - mcp：多 Server 与紧凑工具卡片
- * - workspaces：工作区登记与档位（§5.19）——**提档是人的动作**，本页唯一会改变
- *   Agent 能力边界的分区，所以归在「写配置」这一组
  * - sandbox：执行边界 + 出网策略（§5.15 / §5.21），**只读**（都是部署期安全边界）
+ *
+ * 「工作区」不在这里：它按 `session_id` 生效，入口跟着会话走 —— 工作台顶栏的
+ * 「工作区」抽屉（`workspace/WorkspacePanel.tsx`，`doc/api.md` §7.1）。
  */
 export const CONFIG_TABS: readonly PageTab<ConfigTabId>[] = [
   {
@@ -33,12 +33,6 @@ export const CONFIG_TABS: readonly PageTab<ConfigTabId>[] = [
   },
   { id: "defaults", label: "默认路由", icon: Route, title: "兜底模型与 legacy 五列" },
   { id: "mcp", label: "MCP 工具", icon: Plug, title: "多 Server 与紧凑工具卡片" },
-  {
-    id: "workspaces",
-    label: "工作区",
-    icon: HardDrive,
-    title: "Agent 能碰哪些文件、以什么档位（只读 / 可写）",
-  },
   {
     id: "sandbox",
     label: "执行边界",
@@ -104,7 +98,6 @@ export function ConfigPage() {
         {tab === "providers" && <ProviderPanel catalog={catalog} />}
         {tab === "defaults" && <DefaultRoutePanel />}
         {tab === "mcp" && <McpPanel />}
-        {tab === "workspaces" && <WorkspacePanel />}
         {tab === "sandbox" && (
           <>
             <SandboxPanel />
