@@ -39,7 +39,10 @@ import { CollabCanvas, type CollabConversation } from "../src/workspace/CollabCa
 import { layoutCollaboration } from "../src/workspace/GraphCanvas";
 import {
   buildCollaboration,
+  metricStageOf,
+  modelLabelOf,
   planSourceKey,
+  runModelFor,
   type CollabGraph,
   type StageMeta,
 } from "../src/workspace/collaboration";
@@ -229,6 +232,84 @@ check("模型：根节点回落成整条任务原文", collabGraph.nodes[0].prom
 check("模型：下游节点标注输入来自哪一步", collabGraph.nodes[1].promptFrom === "collect");
 check("模型：截断标记带出来", collabGraph.nodes[2].truncated);
 check("模型：usageFor 按角色取到该 Agent 的采样", usageFor(collabMetrics, "reporter").length === 1);
+check(
+  "本次调用：没带 model 标签的采样不给模型编值，回落成当前配置",
+  collabGraph.nodes.every((n) => n.modelAtRun === "") &&
+    collabGraph.nodes.every((n) => n.params.every((p) => p.key !== "model" || p.source === "config")),
+  JSON.stringify(collabGraph.nodes.map((n) => [n.modelAtRun, n.model])),
+);
+
+/**
+ * 老对话（改过角色绑定之后）的考题：采样里写下的 `model` 是**当时**跑的，与角色
+ * **当前**配置不同。画布必须报采样值——报当前配置就是在替一次已经跑完的执行编造参数。
+ */
+const staleModelGraph: CollabGraph = buildCollaboration({
+  stages: collabStages,
+  agents: collabAgents,
+  workflow: collabWorkflow,
+  completed: new Set(["collect", "analyze", "report"]),
+  traces: collabTraces,
+  metrics: [
+    {
+      metric_name: "total_tokens",
+      value: 883,
+      labels: { role: "collector", stage: "collect", model: "deepseek-flash" },
+      recorded_at: "",
+    },
+  ],
+});
+const staleNode = staleModelGraph.nodes[0];
+const staleModelParam = staleNode.params.find((p) => p.key === "model");
+check(
+  "本次调用：模型取采样值而不是当前配置",
+  staleNode.modelAtRun === "deepseek-flash" &&
+    staleModelParam?.source === "run" &&
+    staleModelParam.value === "deepseek-flash",
+  JSON.stringify(staleModelParam),
+);
+check(
+  "本次调用：与当前配置不同时并排给出当前配置",
+  staleModelParam?.configured === "gpt-5.5" && staleNode.model === "gpt-5.5",
+  `configured=${staleModelParam?.configured} 当前 model=${staleNode.model}`,
+);
+check(
+  "本次调用：采样值不挂「显式覆盖」标记",
+  staleModelParam?.overridden === false,
+  "覆盖标记说的是角色当前配置的来源，不是采样",
+);
+check(
+  "本次调用：没记下来的几项一律标成当前配置",
+  staleNode.params.filter((p) => p.key !== "model").every((p) => p.source === "config") &&
+    staleNode.params.every((p) => p.key === "model" || !p.configured),
+  JSON.stringify(staleNode.params.map((p) => [p.key, p.source, p.configured ?? ""])),
+);
+check(
+  "本次调用：圆下方的模型名优先本次记录，没采样才回落当前配置",
+  modelLabelOf(staleNode) === "deepseek-flash" && modelLabelOf(collabGraph.nodes[1]) === "gpt-5.5",
+  `${modelLabelOf(staleNode)} / ${modelLabelOf(collabGraph.nodes[1])}`,
+);
+check(
+  "本次调用：只认 stage 完全匹配的采样行",
+  runModelFor(
+    [
+      { metric_name: "total_tokens", value: 1, labels: { stage: "report", model: "另一阶段的模型" }, recorded_at: "" },
+      { metric_name: "total_tokens", value: 1, labels: { stage: "collect", model: "本阶段的模型" }, recorded_at: "" },
+    ],
+    "collect",
+  ) === "本阶段的模型",
+  "不按 role 兜底：同一工作流各阶段可能不同模型，兜底会把别的阶段安到这个节点上",
+);
+check(
+  "本次调用：非 Token 类采样不带 model，不该被当依据",
+  runModelFor(
+    [{ metric_name: "llm_latency_ms", value: 120, labels: { stage: "collect", model: "不该取这个" }, recorded_at: "" }],
+    "collect",
+  ) === "",
+);
+check(
+  "本次调用：动态链路的阶段标签是 dyn:{步骤 id}",
+  metricStageOf("s1", true) === "dyn:s1" && metricStageOf("collect", false) === "collect",
+);
 
 /* -------------------------------------------------------------------------- */
 /* 规划窗口：计划没落盘时不许拿固定三步冒充事实（ADR-034）                        */
@@ -481,7 +562,10 @@ check(
 );
 check(
   "侧栏不重复执行轨迹",
-  !serial.includes("生效参数") && !serial.includes("分配到的任务") && !serial.includes("阶段产出"),
+  !serial.includes("本次调用") &&
+    !serial.includes("角色当前配置") &&
+    !serial.includes("分配到的任务") &&
+    !serial.includes("阶段产出"),
   "侧栏只回答「用什么跑的」，轨迹归执行台",
 );
 check(
@@ -697,14 +781,43 @@ check("画布显示本次任务原文", canvas.includes("统计 128/2680 的占�
 check("画布悬停详情常驻：分配到的任务", canvas.includes("分配到的任务"));
 check("画布悬停详情常驻：阶段产出与截断", canvas.includes("阶段产出") && canvas.includes("已截断"));
 check("画布悬停详情常驻：本阶段工具调用", canvas.includes("本阶段工具调用"));
-check("画布悬停详情常驻：生效参数", canvas.includes("生效参数") && canvas.includes("显式覆盖"));
+check(
+  "画布悬停详情常驻：角色当前配置（本次无采样时不冒充「本次调用」）",
+  canvas.includes("角色当前配置") && canvas.includes("显式覆盖") && !canvas.includes("本次调用"),
+);
 check("画布悬停详情常驻：Token 消耗", canvas.includes("Token 消耗"));
 check(
   "画布悬停详情按「接到什么 → 交出什么 → 用什么跑」排",
   canvas.indexOf("分配到的任务") < canvas.indexOf("阶段产出") &&
-    canvas.indexOf("阶段产出") < canvas.indexOf("生效参数") &&
-    canvas.indexOf("生效参数") < canvas.indexOf("Token 消耗"),
+    canvas.indexOf("阶段产出") < canvas.indexOf("角色当前配置") &&
+    canvas.indexOf("角色当前配置") < canvas.indexOf("Token 消耗"),
   "产出被压到滚动区下面就等于没显示——读的人不会为了它往下滚",
+);
+
+// 有采样时：两块都在，且「本次调用」在前——先说这次用的，再说现在配的。
+const staleCanvas = renderToStaticMarkup(
+  <CollabCanvas
+    open
+    graph={staleModelGraph}
+    conversations={conversations}
+    selectedId="w-collab"
+    onSelect={() => undefined}
+    onClose={() => undefined}
+  />,
+);
+check(
+  "画布分开「本次调用」与「角色当前配置」两块",
+  staleCanvas.includes("本次调用") && staleCanvas.includes("角色当前配置"),
+);
+check(
+  "画布把本次跑的模型与当前配置并排标出",
+  staleCanvas.includes("cv-pop-was") && staleCanvas.includes("当前配置："),
+  "只有并排写出当前配置，读的人才不会把「这次用的」当成「现在配的」",
+);
+check(
+  "「本次调用」排在「角色当前配置」前面",
+  staleCanvas.indexOf("本次调用") < staleCanvas.indexOf("角色当前配置"),
+  staleCanvas.slice(staleCanvas.indexOf("本次调用"), staleCanvas.indexOf("本次调用") + 200),
 );
 check(
   "悬停面板贴节点侧面而不是正下方",
@@ -1590,6 +1703,26 @@ try {
     "工具调用与采样明细不再合体成工作台组件",
     !app.includes("WorkflowInspection") && !inspection.includes("WorkflowInspection"),
     "逐条明细只应留在任务记录页，合体组件应已删除",
+  );
+  // 采样是**全量**语义：画布「本次调用」的模型来自采样里的 `model` 标签，只取第一页
+  // （20 条）会让长任务后面几步读不到采样、静默退回「角色当前配置」。这类看不出错的
+  // 退化只能靠源码断言锁住——渲染出来两边都「有内容」，肉眼分不出。
+  const taskUsageSrc = readFileSync("src/workspace/TaskUsage.tsx", "utf8");
+  const clientSrc = readFileSync("src/api/client.ts", "utf8");
+  check(
+    "按 Workflow 取采样会翻页取完，而不是只吃第一页",
+    taskUsageSrc.includes("METRICS_PAGE_SIZE") &&
+      taskUsageSrc.includes("METRICS_MAX_PAGES") &&
+      taskUsageSrc.includes("collected.push(...chunk.items)") &&
+      taskUsageSrc.includes("collected.length >= total") &&
+      !taskUsageSrc.includes("api.getMetrics(1, workflowId)"),
+    "一页 20 条时后面几步会静默退回「角色当前配置」（2026-09-24 实测：39 行的动态工作流）",
+  );
+  check(
+    "取全量要显式放大页大小，默认仍是 20（记录页自己有分页控件）",
+    clientSrc.includes("getMetrics: (page = 1, workflowId?: string, pageSize = 20)") &&
+      clientSrc.includes("page_size=${pageSize}"),
+    "默认值一改，记录页的分页控件就与实际取数对不上了",
   );
   // 判据要是**接线**，不能是名字：`collaborationWaves` 现在只剩注释里有（那段注释还在
   // 解释它为什么被搬走），拿它当判据是一条恒真的断言——改坏了也照样绿。

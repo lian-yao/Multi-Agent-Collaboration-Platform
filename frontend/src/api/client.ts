@@ -31,6 +31,8 @@ import type {
   Provider,
   ProviderConfig,
   ProviderConfigUpdate,
+  SearchConfig,
+  SearchConfigUpdate,
   Workspace,
   WorkspaceCreate,
   WorkspaceImportFile,
@@ -155,9 +157,16 @@ export const api = {
   getProviders: async () => (await json<{ items: Provider[] }>("/api/v1/providers")).items,
   getTools: (page = 1, pageSize = 20) =>
     json<DataPage<Tool>>(`/api/v1/tools${query({ page, page_size: pageSize })}`),
-  getMetrics: (page = 1, workflowId?: string) =>
+  /**
+   * 指标采样（`doc/api.md` §5.5）。
+   *
+   * `pageSize` 默认 20 与后端一致（记录页自己有分页控件）；**按 Workflow 取全量**的调用方
+   * （`useWorkflowMetrics`）要显式放大——一个工作流的采样行数没有上限，只取第一页会让
+   * 画布与用量面板漏掉后半程（2026-09-24 实测：39 行的工作流，第 2 页起才有 dyn:s1 的 Token）。
+   */
+  getMetrics: (page = 1, workflowId?: string, pageSize = 20) =>
     json<DataPage<Metric>>(
-      `/api/v1/metrics?page=${page}&page_size=20${workflowId ? "&workflow_id=" + encodeURIComponent(workflowId) : ""}`,
+      `/api/v1/metrics?page=${page}&page_size=${pageSize}${workflowId ? "&workflow_id=" + encodeURIComponent(workflowId) : ""}`,
     ),
   getToolCalls: (id: string, page = 1) =>
     json<DataPage<ToolCall>>(`/api/v1/workflows/${encodeURIComponent(id)}/tool-calls?page=${page}&page_size=20`),
@@ -220,6 +229,17 @@ export const api = {
   getProviderConfig: () => json<ProviderConfig>("/api/v1/config/provider"),
   updateProviderConfig: (update: ProviderConfigUpdate) =>
     json<ProviderConfig>("/api/v1/config/provider", {
+      method: "PUT",
+      body: JSON.stringify(update),
+    }),
+
+  /* ---------------------------------------------------------------------- */
+  /* §5.24 搜索渠道（ADR-039）                                               */
+  /* ---------------------------------------------------------------------- */
+
+  getSearchConfig: () => json<SearchConfig>("/api/v1/config/search"),
+  updateSearchConfig: (update: SearchConfigUpdate) =>
+    json<SearchConfig>("/api/v1/config/search", {
       method: "PUT",
       body: JSON.stringify(update),
     }),

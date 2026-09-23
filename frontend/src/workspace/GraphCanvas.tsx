@@ -26,9 +26,11 @@ import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { CircleAlert, LoaderCircle, Maximize2, Pause, Wrench } from "lucide-react";
 import { Status } from "../components/Status";
 import { AgentGlyph } from "../components/AgentGlyph";
+import { modelLabelOf } from "./collaboration";
 import type {
   CollabGraph,
   CollabNode,
+  CollabParam,
   CollabPlanner,
   CollabToolCall,
 } from "./collaboration";
@@ -408,16 +410,60 @@ function NodeGlyph({ node, size }: { node: PlacedNode; size: number }) {
 }
 
 /**
+ * 参数行。`configured` 有值时把**当前配置**并排放在下面：一个值单独摆着，读的人会默认
+ * 它与当前一致；并排写出来，「改过配置」这件事就自己说明白了。
+ */
+function ParamRows({ rows }: { rows: CollabParam[] }) {
+  return (
+    <dl>
+      {rows.map((param) => (
+        <div key={param.key} className={param.overridden ? "override" : ""}>
+          <dt>
+            {param.label}
+            {param.overridden && <i>显式覆盖</i>}
+          </dt>
+          <dd>
+            {param.value}
+            {param.configured && <span className="cv-pop-was">当前配置：{param.configured}</span>}
+          </dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+/**
+ * 「角色当前配置」这一块的说明。
+ *
+ * 这块的值一律读角色**当前**配置——平台没有在执行时记录 Temperature / Top P / 输出上限 /
+ * 推理模式（只有 Token 与模型会落采样）。所以说明必须把「这是现在的，不是当时的」讲清楚：
+ * 否则读者会把它们当成这次执行的参数，而那正是本轮修掉的那个错。
+ */
+function configNote(node: CollabNode): string {
+  if (!node.agentKnown) return "该角色已不在 Agent 目录里，读不到当前配置。";
+  if (node.modelAtRun) {
+    return "其余参数没有在运行时记录：这里是角色「当前」配置，可能与本次执行不同。";
+  }
+  return "本次执行没有可用的采样：无法确认当时生效的是哪份配置，这里是角色「当前」配置。";
+}
+
+/**
  * 悬停详情：**接到什么、交出什么**在前，**用什么参数、花多少**在后。
  *
  * 排序按读图时的疑问顺序，不按数据现成的顺序：先问「它拿到了什么任务、产出了什么」，
  * 再问「中途调了什么工具」，最后才是「用什么参数跑的、花了多少 Token」。
  * 反过来排（参数 / Token 打头）会把最该看的产出压到滚动区下面——面板再大也会被读完就关。
  *
+ * **参数必须分两块**：「本次调用」只放执行时真的记下来的（模型来自采样），
+ * 「角色当前配置」放只能读目录的那几项。合成一块叫「生效参数」，就是在替一次已经跑完的
+ * 执行编造参数——改过角色绑定之后，旧对话会显示成**今天**的配置。
+ *
  * **只在全屏画布出现**。侧栏那一列要回答的是「这个 Agent 用什么跑的」，`模型 · Token`
  * 已经写在圆下方；侧栏再挂一份浮层，等于把执行轨迹搬回侧栏，正好是 ADR-018 拆开的同一件事。
  */
 function NodeDetail({ node }: { node: CollabNode }) {
+  const runParams = node.params.filter((param) => param.source === "run");
+  const configParams = node.params.filter((param) => param.source === "config");
   return (
     <div className="cv-pop cv-pop-node" role="tooltip">
       <header className="cv-pop-head">
@@ -446,19 +492,17 @@ function NodeDetail({ node }: { node: CollabNode }) {
           </ul>
         </div>
       )}
+      {runParams.length > 0 && (
+        <div className="cv-pop-block">
+          <h5>本次调用</h5>
+          <ParamRows rows={runParams} />
+          <p className="cv-pop-note">来自本次执行写下的采样记录。</p>
+        </div>
+      )}
       <div className="cv-pop-block">
-        <h5>生效参数</h5>
-        <dl>
-          {node.params.map((param) => (
-            <div key={param.key} className={param.overridden ? "override" : ""}>
-              <dt>
-                {param.label}
-                {param.overridden && <i>显式覆盖</i>}
-              </dt>
-              <dd>{param.value}</dd>
-            </div>
-          ))}
-        </dl>
+        <h5>角色当前配置</h5>
+        {configParams.length > 0 && <ParamRows rows={configParams} />}
+        <p className="cv-pop-note">{configNote(node)}</p>
       </div>
       <div className="cv-pop-block">
         <h5>Token 消耗</h5>
@@ -741,7 +785,7 @@ export function CollaborationCanvas({
           {/* 圆里只放得下一个图标，所以「用什么跑的、花了多少」写在圆下方一行 */}
           {node.node && (
             <span className="cv-meta">
-              {[node.node.model, node.token].filter(Boolean).join(" · ")}
+              {[modelLabelOf(node.node), node.token].filter(Boolean).join(" · ")}
             </span>
           )}
           {/* 侧栏不挂浮层：它只回答「用什么跑的」，圆下方那行就是答案（见 `dense` 的注释）。 */}

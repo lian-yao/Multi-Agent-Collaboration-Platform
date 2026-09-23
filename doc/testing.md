@@ -3214,6 +3214,146 @@ node node_modules/vite/bin/vite.js build         # 通过，无 500 kB 告警
 - **没给工具调用条目加「长出」动画**：它依赖 key 稳定性，一旦不稳就退化成每 1.5s
   全量重播（闪烁），观感比不加更差。而运行中那一行本来就有 `spin` 指示器
   （`ChainGlyph` 在 `running` 时即 `<LoaderCircle className="spin"/>`），不缺动感。
+### 4.28 搜索渠道从环境变量提升为运行期配置；一键部署默认渠道修根因（2026-09-24，成员 D）
+
+**1. 反馈与边界核对**
+
+反馈原话（附截图）：「这个豆包搜索经常报错，按理应该可选渠道吧，是要在哪里配置？」截图里的
+报错是 `未配置豆包搜索 API key（TOOL_SEARCH_API_KEY）`。用户选定的方向：**默认走本地 + 加一个
+渠道开关**。这套配置同时跨了四条线（表在主工作区、工具层在 C、API 在 D、部署默认值在 B），
+所以登记在 §4。
+
+**2. 根因：两个问题叠加，而真正要修的那个不在版本库里**
+
+- **部署默认值错，且错在版本库外面**：`deploy/.env` 是 `TOOL_SEARCH_PROVIDER=volcengine` 且
+  key 为空，于是每次部署出来都是「选了豆包、没给 key」。而 `.env` 被 `.gitignore` 挡掉 ——
+  改本机那份只救本机。**所以修 `.env` 不算修好**，默认值必须落到 `deploy/compose.yaml`。
+- **渠道不可运行期改**：ADR-037 只把渠道做成一个环境变量，env 仅容器创建时注入 ⇒ 换渠道必须
+  改 `.env` + 重建容器，界面上看不到也换不了。
+
+**3. 改了什么**
+
+| 文件 | 内容 |
+| --- | --- |
+| `deploy/compose.yaml` | 三处默认值改为 `duckduckgo` / 本地网关 / 空 key（`.env` 只用于覆盖） |
+| `app/core/checkpoint.py` | 新表 `tool_configs`（单行 `id='default'`）+ `get_tool_config` / `upsert_tool_config` |
+| `app/tools/search_config.py` | 新增：渠道目录、合并规则、换渠道的端点联动、两层缓存失效 |
+| `app/tools/config.py` | `env_tool_settings()`（纯环境基线）+ `get_tool_settings()` 叠覆盖 + `reset_tool_settings_cache()` |
+| `app/api/main.py` | `GET` / `PUT /api/v1/config/search`（§5.24） |
+| `frontend/src/config/SearchChannelPanel.tsx` | 新增面板，挂在配置页「内部工具」分区之上（§5.24、ADR-039） |
+| `tests/integration/test_search_config_api.py` | 新增，**21** 项 |
+
+**4. 验证**
+
+- `pytest tests/integration/test_search_config_api.py tests/unit/test_search_tool_volcengine.py` 等
+  相关文件 → **119 passed**（其中本节新增文件 21 项）；
+- `frontend/rendercheck/config-smoke.tsx` → **130/130**；
+- CDP 真浏览器 → **11/11**（按几何与交互判，不靠 DOM 计数）；
+- 容器内实跑（不经 LLM / 编排）：默认渠道**实搜 3 条结果**；切豆包不给 key ⇒ 端点自动换为豆包
+  官方地址、报「未配置豆包搜索 API key」且 `retryable=False`；清空覆盖 ⇒ 回到环境配置、
+  `overridden=false`。
+
+**5. 只有实机才会暴露的两个点**
+
+1. **清空覆盖之后行还在**。`PUT` 三列 `null` 之后 `GET` 仍回 `overridden=true`、`updated_by=probe`
+   —— 判据写成了 `bool(row)`。改成看三列（`_has_override`）后 `overridden=false`，
+   并补了一条回归用例；否则用户点「恢复环境配置」永远回不到「跟随环境配置」。
+2. **改共享校验器会踩掉别人冻结的契约**。为了让「把 `TOOL_SEARCH_PROVIDER` 改成 volcengine、
+   端点不动」不至于拿着豆包的 key 去打 DuckDuckGo 网关，第一版在 `ToolSettings` 的校验器里
+   把端点**静默改写**成豆包默认 —— 立刻踩掉成员 C 的
+   `test_search_tool_volcengine.py::test_explicit_endpoint_wins_over_provider_default`。
+   这条不该在实现里纠：校验器分不出「有意把这条渠道接到自建网关上」和「端点只是取了默认值」。
+   改成 `endpoint_provider_mismatch()` 诊断 + 构造工具时记警告：**显式值一律尊重，错配留线索**。
+   教训：动共享校验器之前，先跑一遍**别人的**测试文件，别只跑自己新写的那个。
+3. **CDP 里 `/json/list[0]` 不是网页**。这台机器上它是 `chrome-extension://…/background.html`
+   的 component extension 背景页（`type=background_page`）。在里面 eval `querySelectorAll`
+   永远拿到空数组 —— 上一轮「tab-not-found / `labels=[]`」的假失败全部源于此。
+   **必须按 `type == "page"` 挑 target**，而不是取列表第一个。
+
+**6. 前置：改了源码就要重建**
+
+`deploy/compose.yaml` 的容器 `COPY` 源码、**没有挂载**。本轮先后重建过 `backend` 与 `frontend`
+两个镜像，上面两次实机验证都是在重建之后做的。
+
+### 4.29 「调用信息参数」曾指向角色**当前**配置，而不是**调用时**的配置：协作画布与执行台卡片两处（2026-09-24，成员 D）
+
+**1. 反馈与问题成立**
+
+反馈原话：「协作画布的调用信息参数并不准确，其指向的当前的 agent 信息，而非调用时的 agent 信息」。
+复核成立：悬停面板把角色**当前**的模型与采样参数摆在「生效参数」一个标题下，读者只能理解成
+「这次执行用的参数」。
+
+`psql` 核过的库内事实：
+
+| | 采样里写下的 `model` | 角色**当前**配置 |
+| --- | --- | --- |
+| 会话「统计一段文本的词频」（`120a20e8`，静态链路） | `gpt-5.5` | `deepseek-flash` |
+| 会话「解释一下什么是幂等…」（`31bed2ea`，动态链路） | `deepseek-flash` | `deepseek-flash` |
+
+于是旧对话一打开，画布报的是**今天**的配置 —— 而它声称的是「那一次用的」。
+
+**2. 平台到底记了什么（决定了能修到什么程度）**
+
+- **模型**：Token 采样带 `model` 标签（`app/observability/metrics.py` 写 `{model, stage}`，§5.5
+  已约定），所以「这次用的什么模型」**可以**如实回答；
+- **Temperature / Top P / 输出上限 / 推理模式**：平台**没有**在执行时记录，只有角色目录里的当前
+  值 —— 这个不能编，只能说清它是「现在的」。
+
+**3. 改了什么**
+
+| 文件 | 内容 |
+| --- | --- |
+| `frontend/src/workspace/collaboration.ts` | `CollabParam.source`（`run` / `config`）；`CollabNode.modelAtRun` / `agentKnown`；新增 `metricStageOf` / `runModelFor` / `modelLabelOf`；`paramsOf(agent, modelAtRun)` |
+| `frontend/src/workspace/GraphCanvas.tsx` | 悬停面板拆成「本次调用」与「角色当前配置」两块；`ParamRows` 并排给出 `当前配置：…`；`configNote` 说明「这是现在的，不是当时的」；圆下方一行改用 `modelLabelOf` |
+| `frontend/src/App.tsx` | 执行台卡片（第二处同源问题）：`useWorkflowMetrics` 从 `Inspector` 提到 `Workspace`（`Inspector` 是它的子节点，提这一层就够），执行台每一步的模型行改用 `runModelFor` / `metricStageOf`，与画布同一口径 |
+| `frontend/src/workspace/TaskUsage.tsx` | `useWorkflowMetrics` 改为按 `total` 逐页取完采样（单页 100、最多 10 页） |
+| `frontend/src/api/client.ts` | `getMetrics` 增加 `pageSize`（默认仍是 20，记录页的分页控件不受影响） |
+| `frontend/rendercheck/workspace-smoke.tsx` | 断言换口径，新增「本次调用」用例与两条源码断言 |
+
+`metricStageOf(id, dynamic)` = 静态 `collect` / 动态 `dyn:s1`，与 `metrics.py` 的写口一致；
+`runModelFor` 只认 `stage` **完全匹配**的 Token 类采样，**不按 `role` 兜底** —— 同一工作流各阶段
+可能用不同模型，兜底等于把别的阶段的模型安到这个节点上。
+
+**4. 验证**
+
+- `frontend/rendercheck/workspace-smoke.tsx` → **283/283**；
+- `tsc --noEmit`（`src` 全量）→ 干净；
+- CDP 真浏览器 → **24/24**（`.workbuddy/_cdp/accept_canvas_params.py`），三个对照场景：
+  - **静态老对话**：`本次调用 → 模型 gpt-5.5`，并排 `当前配置：deepseek-flash`；其余四项归到
+    「角色当前配置」并带「可能与本次执行不同」；「生效参数」这个会替执行编造参数的老标题消失；
+  - **动态对话**：采样与当前同为 `deepseek-flash` 时，**不**挂同值的「当前配置：」噪声。
+- 截图（浮层用 CDP `CSS.forcePseudoState` 强制 `:hover` 显示——走的是同一条 CSS 规则，
+  不是注入 `display:block` 伪造）：
+  `.workbuddy/memory/2026-09-24-canvas-params-at-run.png`、`…-same-as-config.png`、
+  `…-dock-model-at-run.png`。
+
+**5. 只有实机才会暴露的一个点：画布原先只吃第一页采样**
+
+第一轮 CDP 里动态链路的 `dyn:s1` 节点**没有**「本次调用」，只有「角色当前配置」，看着像
+「这一步没记采样」。实际是 `useWorkflowMetrics` 只取 `page=1&page_size=20`，而该工作流有 **39**
+条采样，`dyn:s1` 的 Token 行落在第 2 页。§4.8 已记过同类坑（真实运行 34–39 次调用 > 默认单页
+20 条），按同一思路改成逐页取完。
+
+**注意**：这个截断不是本轮引入的，只是本轮才让它显形 —— 修复前画布根本不读采样，一律显示当前
+配置，缺采样与「本来就只显示配置」在界面上长得一模一样。
+
+**6. 验收时顺带发现的第二处：执行台卡片**
+
+执行台每张卡片的模型行原本直接读 `agent.model`（角色**当前**配置），与画布是同一个错——
+实测：工作流 `baaad64a` 三段的采样都写着 `gpt-5.5`，执行台卡片却报 `deepseek-flash`。
+修复把它与画布对齐到同一份取数：`useWorkflowMetrics` 提到 `Workspace`，`Inspector`（它的
+子节点）改为吃 props，两处共用一份采样，也顺带免掉了同一接口的重复请求。
+
+**7. 只有 CDP 才会暴露的两个假象（都当过一轮「假失败」）**
+
+1. **右栏没打开时整棵子树尺寸为 0**。`<CollabCanvas>` 挂在 `.inspector` 里、没有 portal；
+   `inspectorOpen=false` 时它的子树全是 0×0，但 `innerText` **照样读得到**——如果只断言
+   文本，验收看起来是绿的，截图却什么都没有。必须先点「显示协作详情」再断言尺寸。
+2. **强 pseudo 要打在全屏画布的节点上**。`.cv-node.kind-agent` 按文档顺序前几个在**侧栏
+   dense 画布**里，那边 `!dense` 不渲染浮层；`CSS.forcePseudoState` 打上去等于打在空气上。
+   选择器必须写 `.cv-canvas.wide .cv-node.kind-agent`。
+
+
 ## 5. 失败处理约定
 
 - 任一用例失败：先复现，再定位，修复后将失败模式固化为新的测试或本文档约束；

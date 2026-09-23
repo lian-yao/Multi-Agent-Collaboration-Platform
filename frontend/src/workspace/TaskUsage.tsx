@@ -137,6 +137,15 @@ export function TaskUsagePanel({
 }
 
 /**
+ * 采样取数：单页取后端上限（100），最多 10 页（1000 行）。
+ *
+ * 不取全量会让「本次调用用的哪个模型」与「Token 消耗」都漏掉后半程：画布上表现为后面几步
+ * 读不到采样、只能退回「角色当前配置」，而那看起来就像那些步骤没跑过。
+ */
+const METRICS_PAGE_SIZE = 100;
+const METRICS_MAX_PAGES = 10;
+
+/**
  * 拉取某个 Workflow 的采样，未到终态时轮询。
  *
  * 做成 hook 而不是一个自带容器的组件：侧栏现在有两处要吃这份数据——用量面板与
@@ -159,8 +168,17 @@ export function useWorkflowMetrics(workflow: Workflow | null): {
   const read = useCallback(async () => {
     if (!workflowId) return;
     try {
-      const page = await api.getMetrics(1, workflowId);
-      setMetrics(page.items);
+      // 只取第一页是错的：工具调用、阶段、Token 各写一批采样，一次长任务轻易过百行。
+      // 按 `total` 逐页取完（见 `METRICS_PAGE_SIZE` 的注释）。
+      const collected: Metric[] = [];
+      for (let page = 1; page <= METRICS_MAX_PAGES; page += 1) {
+        const chunk = await api.getMetrics(page, workflowId, METRICS_PAGE_SIZE);
+        collected.push(...chunk.items);
+        const total = typeof chunk.total === "number" ? chunk.total : collected.length;
+        // 不满一页 = 已经到底；满一页但已够 total = 也到底。
+        if (chunk.items.length < METRICS_PAGE_SIZE || collected.length >= total) break;
+      }
+      setMetrics(collected);
       setError("");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "读取用量失败");

@@ -74,8 +74,10 @@ import { groupUsage, TaskUsagePanel, useWorkflowMetrics } from "./workspace/Task
 import {
   buildCollaboration,
   isPlanning,
+  metricStageOf,
   planStepStatus,
   planSteps,
+  runModelFor,
   stageStatus,
   type StageMeta,
 } from "./workspace/collaboration";
@@ -1227,6 +1229,26 @@ function Workspace({
     : dockNodes(workflow, agents, completed).sort((left, right) =>
         left.id === activeStage ? -1 : right.id === activeStage ? 1 : 0,
       );
+  /**
+   * 当前对话的用量采样：**执行台卡片**与右侧栏（`Inspector` 的用量面板、协作画布）
+   * 共用这一份。
+   *
+   * 放在 `Workspace` 而不是 `Inspector`：执行台每一步也要回答「这次用的是哪个模型」，
+   * 而那个答案只有采样里有（角色目录读的是**当前**配置）。两处各拉一次会变成同一接口
+   * 双倍请求，还可能落在不同批次上——执行台与画布报的模型就对不上了。
+   * `Inspector` 是 `Workspace` 的子节点，所以提这一层就够，不用再往上到 `App`。
+   */
+  const live = useWorkflowMetrics(workflow);
+  /**
+   * 执行台每一步「**这次**用的是哪个模型」。
+   *
+   * 与协作画布同一口径：采样里有本次记录就报采样，没有才回落角色当前配置。只看
+   * `agent.model` 会让旧对话显示成**今天**的绑定——2026-09-24 实测：工作流 `baaad64a`
+   * 三段跑的都写的是 `gpt-5.5`，执行台卡片却报 `deepseek-flash`（角色当前配置）。
+   */
+  const dynamicPlan = planSteps(workflow).length > 0;
+  const runModelOf = (id: string) =>
+    runModelFor(live.metrics, metricStageOf(id, dynamicPlan));
   const detail =
     detailNode ?? (detailStage ? stageDetail(detailStage, workflow, agents, completed) : null);
   const uploading = attachments.some((item) => item.state === "uploading");
@@ -1711,6 +1733,7 @@ function Workspace({
         open={inspectorOpen}
         onClose={() => setInspectorOpen(false)}
         workflow={workflow}
+        usage={live}
         agents={agents}
         completed={completed}
         traces={traces}
@@ -1842,7 +1865,7 @@ function Workspace({
                 >
                   <span className="cli-node-head">
                     <span className="dock-icon">{node.state === "completed" ? <Check size={17} /> : node.state === "running" ? <LoaderCircle size={17} className="spin" /> : <Icon size={17} />}</span>
-                    <span className="cli-node-title"><strong>{agent?.name ?? `${node.agent} Agent`}</strong><small>{agent?.model ?? "模型由运行时提供"}</small></span>
+                    <span className="cli-node-title"><strong>{agent?.name ?? `${node.agent} Agent`}</strong><small>{runModelOf(node.id) || agent?.model || "模型由运行时提供"}</small></span>
                     <Status status={node.state} />
                   </span>
                   <span className="cli-step"><i className={node.state === "running" ? "pulse" : ""} />{stepText}</span>
@@ -2025,6 +2048,7 @@ function Inspector({
   open,
   onClose,
   workflow,
+  usage,
   agents,
   completed,
   traces,
@@ -2036,6 +2060,8 @@ function Inspector({
   open: boolean;
   onClose: () => void;
   workflow: Workflow | null;
+  /** 当前对话的采样：与执行台卡片共用（`Workspace` 持有并传下来，见那里的说明）。 */
+  usage: ReturnType<typeof useWorkflowMetrics>;
   /** Agent 目录：协作卡片上的模型、参数都取自它。 */
   agents: Agent[];
   completed: Set<string>;
@@ -2061,15 +2087,14 @@ function Inspector({
     return () => window.clearInterval(timer);
   }, [running]);
 
-  /** 当前对话的用量采样：协作卡片与下方用量面板共用，避免同一接口拉两次。 */
-  const live = useWorkflowMetrics(workflow);
+  // 采样由 `Workspace` 持有后传进来（执行台卡片读同一份），这里不再自己拉。
   const graph = buildCollaboration({
     stages: STAGE_META,
     agents,
     workflow,
     completed,
     traces,
-    metrics: live.metrics,
+    metrics: usage.metrics,
     requestedMode: mode,
   });
 
@@ -2082,7 +2107,7 @@ function Inspector({
   const isLive = !selected || selected.id === workflow?.id;
   // hook 不能条件调用，所以「选了别的对话」时才把 workflow 递给它（否则传 null 即空转）。
   const other = useWorkflowMetrics(isLive ? null : canvasWorkflow);
-  const canvasMetrics = isLive ? live.metrics : other.metrics;
+  const canvasMetrics = isLive ? usage.metrics : other.metrics;
   const canvasTraces = isLive ? traces : otherTraces;
   const canvasCompleted = new Set(
     canvasWorkflow?.checkpoint?.completed_steps ?? [],
@@ -2225,9 +2250,9 @@ function Inspector({
             </span>
           </div>
           <TaskUsagePanel
-            groups={groupUsage(live.metrics)}
-            loading={live.loading}
-            error={live.error}
+            groups={groupUsage(usage.metrics)}
+            loading={usage.loading}
+            error={usage.error}
             onOpenRecords={onOpenRecords}
           />
         </section>

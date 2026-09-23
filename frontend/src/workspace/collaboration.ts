@@ -249,6 +249,15 @@ export function toolChainText(
 /* 模型                                                                        */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * 这个值是从哪来的。
+ *
+ * 画布的悬停面板一度把**角色当前配置**当成「生效参数」显示，于是改过模型/温度之后，
+ * 打开旧对话看到的是**今天**的配置——而它声称的是「这次执行用的参数」。
+ * 两者必须分开说：`run` = 本次执行记录下来的，`config` = 角色当前配置。
+ */
+export type CollabParamSource = "run" | "config";
+
 export type CollabParam = {
   /** 字段名（`temperature` / `top_p` / …），与 `override_keys` 同口径。 */
   key: string;
@@ -256,6 +265,14 @@ export type CollabParam = {
   value: string;
   /** 该字段来自角色的**显式覆盖**（而不是默认路由 / 环境配置）。 */
   overridden: boolean;
+  /** 值的来源；见 `CollabParamSource`。 */
+  source: CollabParamSource;
+  /**
+   * 同名字段的**当前**配置值，只在「本次用了 X、当前配的是 Y」时给出。
+   *
+   * 单独一个 `value` 会让人以为两者一致；并排放出来，「改过配置」这件事就自己说明白了。
+   */
+  configured?: string;
 };
 
 export type CollabToolCall = {
@@ -283,7 +300,12 @@ export type CollabNode = {
   wave: number;
   /** 同波不止一个节点。 */
   parallel: boolean;
+  /** 角色**当前**绑定的模型。空串 = 角色已不在目录里（旧画布会遇到）。 */
   model: string;
+  /** 本次执行**实际**用过的模型（采样里的 `model` 标签）。空串 = 本次没有采样。 */
+  modelAtRun: string;
+  /** 角色是否还在 Agent 目录里；不在时「当前配置」读不到，界面必须说出来。 */
+  agentKnown: boolean;
   provider: string;
   params: CollabParam[];
   /** 该 Agent 的用量采样原值（**不求和**）。空数组 = 没有采样，不是 0。 */
@@ -382,11 +404,67 @@ function levelOf(
   return level;
 }
 
-function paramsOf(agent: Agent | undefined): CollabParam[] {
-  if (!agent) return [];
-  const overridden = new Set(agent.override_keys ?? []);
+/** 采样里带的 `stage` 标签：静态链路就是阶段名，动态链路是 `dyn:{步骤 id}`。 */
+export function metricStageOf(id: string, dynamic: boolean): string {
+  return dynamic ? `dyn:${id}` : id;
+}
+
+/** 只有 Token 类采样才带 `model` 标签（见 `app/observability/metrics.py`）。 */
+const MODEL_BEARING_METRICS = new Set(["input_tokens", "output_tokens", "total_tokens"]);
+
+/**
+ * 本次执行**实际**用过的模型：取该阶段那几条 Token 采样上的 `model` 标签。
+ *
+ * 为什么不看角色目录：目录读的是**当前**配置。用户改过绑定之后，旧对话的「当时用的什么」
+ * 就再也答不出来了——而采样是执行时写下的，它才是当时的事实。
+ *
+ * 只认 `stage` 完全匹配的行：同一工作流里各阶段可能用不同模型，按 `role` 兜底会把
+ * 另一阶段的模型安到这个节点上，那是另一种错。
+ */
+export function runModelFor(metrics: Metric[], stage: string): string {
+  for (const metric of metrics) {
+    if (!MODEL_BEARING_METRICS.has(metric.metric_name)) continue;
+    const labels = metric.labels ?? {};
+    if (labels.stage !== stage) continue;
+    const model = labels.model;
+    if (typeof model === "string" && model) return model;
+  }
+  return "";
+}
+
+/** 圆下方那行里的模型名：优先本次执行的记录，没有才回落到角色当前配置。 */
+export function modelLabelOf(node: CollabNode): string {
+  return node.modelAtRun || node.model || "由运行时提供";
+}
+
+/**
+ * 角色的生效参数。
+ *
+ * **模型**有本次执行的采样就用采样值——那才是「这次用的什么」。其余四项
+ * （Temperature / Top P / 输出上限 / 推理模式）平台**没有在执行时记录**，只能读角色当前
+ * 配置，因此逐条标成 `config`，由界面明确告诉读者「这是现在的配置，不是当时的」。
+ * 把两者混在一个「生效参数」标题下，就是在替一次已经跑完的执行编造参数。
+ */
+function paramsOf(agent: Agent | undefined, modelAtRun: string): CollabParam[] {
+  const configuredModel = agent?.model ?? "";
+  const overridden = new Set(agent?.override_keys ?? []);
+  const params: CollabParam[] = [];
+
+  if (modelAtRun || configuredModel) {
+    params.push({
+      key: "model",
+      label: "模型",
+      value: modelAtRun || configuredModel,
+      // 采样值不是「覆盖」，所以不给它挂覆盖标记——那个标记说的是角色当前配置的来源。
+      overridden: modelAtRun ? false : overridden.has("model"),
+      source: modelAtRun ? "run" : "config",
+      ...(modelAtRun && modelAtRun !== configuredModel ? { configured: configuredModel } : {}),
+    });
+  }
+
+  if (!agent) return params;
+
   const rows: { key: string; label: string; value: string }[] = [
-    { key: "model", label: "模型", value: agent.model || "未绑定" },
     { key: "temperature", label: "Temperature", value: String(agent.temperature) },
     {
       key: "top_p",
@@ -403,12 +481,16 @@ function paramsOf(agent: Agent | undefined): CollabParam[] {
     },
     { key: "reasoning_type", label: "推理模式", value: agent.reasoning_type || "none" },
   ];
-  return rows.map((row) => ({
-    key: row.key,
-    label: row.label,
-    value: row.value,
-    overridden: overridden.has(row.key),
-  }));
+  for (const row of rows) {
+    params.push({
+      key: row.key,
+      label: row.label,
+      value: row.value,
+      overridden: overridden.has(row.key),
+      source: "config",
+    });
+  }
+  return params;
 }
 
 function toolCallsOf(calls: StageToolCall[]): CollabToolCall[] {
@@ -530,6 +612,9 @@ export function buildCollaboration({
     const agent = agents.find((item) => item.id === entry.meta.agent);
     const trace = traceByStage.get(entry.id);
     const wave = level.get(entry.id) ?? 0;
+    // 「这次用的什么模型」只信**执行时写下的采样**：角色目录是当前配置，改过绑定之后
+    // 拿它回答旧对话就是在编造（见 `runModelFor`）。
+    const modelAtRun = runModelFor(metrics, metricStageOf(entry.id, plan.length > 0));
     return {
       id: entry.id,
       agentId: entry.meta.agent,
@@ -540,9 +625,11 @@ export function buildCollaboration({
       order: ids.indexOf(entry.id) + 1,
       wave,
       parallel: (waveCounts.get(wave) ?? 1) > 1,
-      model: agent?.model ?? "由运行时提供",
+      model: agent?.model ?? "",
+      modelAtRun,
+      agentKnown: Boolean(agent),
       provider: agent?.provider_name ?? agent?.provider ?? "",
-      params: paramsOf(agent),
+      params: paramsOf(agent, modelAtRun),
       usage: usageFor(metrics, entry.meta.agent),
       prompt: trace?.input ?? (entry.deps.length ? null : traces?.task ?? null),
       promptFrom: trace?.input_from ?? null,
