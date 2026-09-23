@@ -91,7 +91,9 @@
   "current_step": "collect",
   "checkpoint": {
     "completed_steps": [],
-    "current_step": "collect"
+    "current_step": "collect",
+    "rewritten_task": "把上一轮那份周报提纲细化：补上每人的进展与风险，用中文，控制在一页以内。",
+    "rewrite_source": "model"
   },
   "created_at": "2026-09-07T08:00:00Z",
   "updated_at": "2026-09-07T08:01:00Z",
@@ -100,6 +102,12 @@
 ```
 
 状态：`pending` → `running` ⇄ `paused` → `completed` / `failed` / `cancelled`。`checkpoint` 和 `current_step` 用于前端展示与恢复进度。
+
+`checkpoint.rewritten_task` / `rewrite_source` 是**问题改写**（ADR-037）的结果：执行开始时平台会
+把用户这一轮的话结合会话上下文补成完整任务，`rewrite_source` 取 `model`（模型改写成功）或
+`original`（退回原文——模型没配好、调用失败、输出没实质改动都会走这条）。**它只是增强**：
+退回原文时执行照常进行，因此界面在 `original` 时不该把它渲染成错误。
+动态模式的 `checkpoint` 带 `"mode": "dynamic"`，这两个字段同样存在。
 
 ### Agent
 

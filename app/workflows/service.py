@@ -22,6 +22,7 @@ from app.workflows.pipeline import (
     collect_activity,
     finalize_activity,
     report_activity,
+    rewrite_activity,
     run_stage_activity,
 )
 
@@ -69,6 +70,8 @@ class WorkflowService:
         self._runtime.register_activity(analyze_activity)
         self._runtime.register_activity(report_activity)
         self._runtime.register_activity(finalize_activity)
+        # 问题改写（ADR-037）：两条链路共用的前置步骤。
+        self._runtime.register_activity(rewrite_activity)
         self._runtime.register_activity(dynamic_plan_activity)
         self._runtime.register_activity(dynamic_step_activity)
         self._registered = True

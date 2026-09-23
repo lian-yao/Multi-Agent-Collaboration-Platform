@@ -222,6 +222,18 @@ def test_planner_prompt_lists_every_available_role():
     assert "JSON" in prompt
 
 
+def test_planner_prompt_states_what_roles_can_actually_do():
+    """规划 Agent 也要知道角色的**真实能力**（ADR-037 §4）：
+    写进 instruction 的活必须落在角色做得到的范围内（工作区文件、附件、MCP、网页搜索），
+    覆盖/删除这类动作要走人工审批——否则规划出来的步骤天然执行不了。"""
+
+    prompt = planner_prompt()
+
+    assert "工作区" in prompt
+    assert "人工审批" in prompt
+    assert "改写" in prompt, "要说明拿到的任务已经被问题改写补全过，可以直接当完整任务规划"
+
+
 # --------------------------------------------------------------------------------------
 # 规划节点的降级行为
 # --------------------------------------------------------------------------------------

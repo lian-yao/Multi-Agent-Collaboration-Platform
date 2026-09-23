@@ -40,6 +40,11 @@ class PipelineState(BaseModel):
     """
 
     task: str = Field(min_length=1)
+    # 问题改写（ADR-037）：一次执行的**前置步骤**，把用户这一轮的话用会话上下文补成完整任务。
+    # 可选字段：模型失败/输出没实质改动时退回原文，`rewrite_source` 记 "original"；
+    # 老状态反序列化时取默认值，因此这两个字段向后兼容。
+    rewritten_task: str | None = None
+    rewrite_source: str | None = None
     status: PipelineStatus = PipelineStatus.PENDING
     current_step: PipelineStage | None = None
     completed_steps: list[PipelineStage] = Field(default_factory=list)
@@ -180,6 +185,10 @@ def pipeline_checkpoint_summary(state: PipelineState) -> dict[str, Any]:
         "status": state.status.value,
         "current_step": state.current_step.value if state.current_step else None,
         "completed_steps": [step.value for step in state.completed_steps],
+        # 改写结果随 checkpoint 落库：前端已按 checkpoint 渲染，新增字段向后兼容；
+        # 使用者要能看见"平台把我的话改成了什么"，否则这一步就是不可审计的。
+        "rewritten_task": state.rewritten_task,
+        "rewrite_source": state.rewrite_source,
         "updated_at": state.updated_at.isoformat(),
     }
 

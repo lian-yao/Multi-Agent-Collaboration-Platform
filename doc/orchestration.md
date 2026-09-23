@@ -15,7 +15,7 @@ ADR-007（阶段活动与 Ollama）。设计事实源：`doc/15 AI Native多智�
 
 | | **静态（`static`）** | **动态（`dynamic`）** |
 | --- | --- | --- |
-| 拓扑 | `START → collector → analyst → reporter → END` | `START → planner →（按依赖就绪度循环 execute）→ finalize → END` |
+| 拓扑 | `START → rewrite → collector → analyst → reporter → END` | `START → rewrite → planner →（按依赖就绪度循环 execute）→ finalize → END` |
 | 谁决定参与角色 | 代码里的 `PIPELINE_ROLE_ASSIGNMENT` | 规划节点（LLM）在运行期产出 |
 | 状态类型 | `PipelineState`（`current_step` 单值指针） | `DynamicPipelineState`（无指针，靠 `results` 反推） |
 | 同一角色能否出现多次 | 不能 | 可以 |
@@ -26,6 +26,7 @@ ADR-007（阶段活动与 Ollama）。设计事实源：`doc/15 AI Native多智�
 
 两条链路**并列注册、并列存在**，共用同一套：
 
+- **问题改写前置步骤**（`app/orchestration/rewrite.py`，ADR-037）——两条链路都在第一步之前跑它；
 - 角色定义与 system prompt（`app/agents/roles.py`）；
 - 工具契约与 ReAct 工具回填循环（`app/orchestration/tools.py`、`invoke_role_messages`）；
 - 阶段观测（`app/observability/instrumentation.py::observed_stage`）；
@@ -37,13 +38,32 @@ flowchart TB
     API["POST /sessions/{id}/messages<br/>orchestration_mode?"] --> SVC["WorkflowService.schedule"]
     SVC -->|static| SP["agent_pipeline"]
     SVC -->|dynamic| DP["agent_dynamic"]
-    SP --> SA1["collect"] --> SA2["analyze"] --> SA3["report"] --> SF["finalize_activity"]
-    DP --> DPL["dynamic_plan_activity<br/>（计划进 Dapr 状态）"]
+    SP --> SR1["rewrite_activity<br/>（问题改写，ADR-037）"]
+    DP --> SR2["rewrite_activity<br/>（问题改写，ADR-037）"]
+    SR1 --> SA1["collect"] --> SA2["analyze"] --> SA3["report"] --> SF["finalize_activity"]
+    SR2 --> DPL["dynamic_plan_activity<br/>（计划进 Dapr 状态）"]
     DPL --> DS["dynamic_subtask_workflow × N<br/>{wf}:dyn:{step_id}"]
     DS --> DF["finalize_activity"]
     SF --> MSG["messages(role=assistant)"]
     DF --> MSG
 ```
+
+### 1.1 问题改写（前置步骤）
+
+用户的输入常常依赖上下文才有意义——「重试」「再详细一点」单独拿出来谁也看不懂，而下游拿到的是
+**任务文本**，不是整段对话。所以两条链路都在第一步之前跑一次改写：把这一轮的话结合
+会话历史、长期记忆与本轮附件**文件名**，补成一段自包含的任务（补全指代、写清目标与约束、
+点明期望交付物）。
+
+要点：
+
+- 它**不是协作阶段**：没有角色、不产出交付物，因此**不新增第 4 个 `PipelineStage`**
+  （那个三元组同时撑起 Dapr 子工作流 ID、阶段状态键、stage-trace 出参与前端阶段列表）；
+- **增强而非必需**：模型没配好、调用失败、输出为空、跑偏成长文、原样抄回来——一律退回原文，
+  `rewrite_source` 记 `original`，绝不阻塞执行（ADR-037 §1）；
+- 模型解析走**平台节点**那一份（`PLANNER_AGENT_ID`）：使用者在「工具与配置」里配好的默认路由
+  或给 planner 的绑定对改写同样生效——只看环境变量会得到"模型缺失"；
+- 结果随 `workflow_runs.checkpoint` 落库（`rewritten_task` / `rewrite_source`），可审计。
 
 ---
 

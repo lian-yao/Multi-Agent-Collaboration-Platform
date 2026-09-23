@@ -249,16 +249,31 @@ def test_step_activity_feeds_session_history_into_the_step(monkeypatch):
 # --------------------------------------------------------------------------------------
 
 
+def _rewrite_output() -> dict[str, Any]:
+    """改写活动的替身输出（ADR-037）：测试不调模型，直接给"已按上下文补全"的结果。"""
+
+    return {
+        "workflow_id": "wf-1",
+        "task": "演示任务（已按上下文补全）",
+        "source": "model",
+        "original_chars": 4,
+        "task_chars": 14,
+    }
+
+
 def test_dynamic_workflow_plans_then_runs_each_step():
     ctx = _ScriptedWorkflowContext("wf-1")
     gen = agent_dynamic_workflow(ctx, _task())
 
     gen.send(None)
-    assert ctx.calls[0][0:2] == ("activity", "dynamic_plan_activity")
+    # 第一个活动必须是改写（ADR-037）：规划拿到「重试」这类输入时，没有改写连要重试什么都判断不了。
+    assert ctx.calls[0][0:2] == ("activity", "rewrite_activity")
+    gen.send(_rewrite_output())
+    assert ctx.calls[1][0:2] == ("activity", "dynamic_plan_activity")
 
     gen.send(_plan_payload(THREE_STEPS))
     for index, step in enumerate(THREE_STEPS):
-        call = ctx.calls[index + 1]
+        call = ctx.calls[index + 2]
         assert call[0:2] == ("child", "dynamic_subtask_workflow")
         assert call[2]["step"]["id"] == step["id"]
         assert call[3] == f"wf-1:dyn:{step['id']}"
@@ -275,6 +290,9 @@ def test_dynamic_workflow_plans_then_runs_each_step():
     assert finalize[2]["report"] == "s3 产出"
     assert finalize[2]["checkpoint"]["mode"] == "dynamic"
     assert finalize[2]["checkpoint"]["completed_steps"] == ["s1", "s2", "s3"]
+    # 改写结果随 checkpoint 落库：界面/审计要能看见改成了什么
+    assert finalize[2]["checkpoint"]["rewritten_task"] == "演示任务（已按上下文补全）"
+    assert finalize[2]["checkpoint"]["rewrite_source"] == "model"
 
     with pytest.raises(StopIteration):
         gen.send(None)
@@ -284,10 +302,11 @@ def test_dynamic_workflow_passes_upstream_results_to_later_steps():
     ctx = _ScriptedWorkflowContext("wf-1")
     gen = agent_dynamic_workflow(ctx, _task())
     gen.send(None)
+    gen.send(_rewrite_output())
     gen.send(_plan_payload(THREE_STEPS))
 
     gen.send({"outcome": _outcome("s1", "collector", PlanStepStatus.COMPLETED, "要点")})
-    second_child_input = ctx.calls[2][2]
+    second_child_input = ctx.calls[3][2]
 
     assert second_child_input["results"]["s1"]["content"] == "要点"
 
@@ -296,6 +315,7 @@ def test_failed_step_skips_downstream_and_fails_the_workflow():
     ctx = _ScriptedWorkflowContext("wf-1")
     gen = agent_dynamic_workflow(ctx, _task())
     gen.send(None)
+    gen.send(_rewrite_output())
     gen.send(_plan_payload(THREE_STEPS))
 
     # s1 失败：s2、s3 连坐跳过，不应再产生任何子工作流调用。
@@ -319,6 +339,9 @@ def test_plan_activity_failure_marks_workflow_failed():
     ctx = _ScriptedWorkflowContext("wf-1")
     gen = agent_dynamic_workflow(ctx, _task())
     gen.send(None)
+    # 先过改写那一步（ADR-037）：否则抛进的是改写那个 yield，这条用例就不再是在验证
+    # "规划失败"，而是在验证"改写失败"了。
+    gen.send(_rewrite_output())
 
     # 抛进生成器会先走 except：调度失败终态活动，然后才把异常继续往上抛。
     gen.throw(RuntimeError("planner exploded"))

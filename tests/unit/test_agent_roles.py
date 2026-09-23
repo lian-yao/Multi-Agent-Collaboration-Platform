@@ -46,6 +46,31 @@ def test_prompts_are_distinct_across_roles():
     assert len(prompts) == 3
 
 
+def test_prompts_are_aligned_with_the_current_software():
+    """提示词必须写清平台**真实**给到角色能力与约束（ADR-037 §4）。
+
+    这条钉的是"与软件对齐"这个要求本身：原先三个 prompt 只描述「收集/分析/报告」的抽象分工，
+    完全没提会话工作区文件工具、附件、MCP 与审批，模型因此不知道自己手上有什么。
+    以后若有人精简提示词把这些删掉，这条会红——而不是等到线上答题变差才发现。
+    """
+
+    for role in RoleId:
+        prompt = get_role(role).system_prompt
+        assert "工作区" in prompt, f"{role.value} 的提示词没交代工作区边界"
+        assert "list_work_files" in prompt, f"{role.value} 的提示词没列出手上的文件工具"
+        assert "MCP" in prompt or "搜索" in prompt or "附件" in prompt, (
+            f"{role.value} 的提示词没交代平台提供的其它工具"
+        )
+
+    # 破坏性动作的口径：覆盖与删除是**人工审批**，不是失败（会写文件的角色必须知道）
+    assert "人工审批" in get_role(RoleId.COLLECTOR).system_prompt
+    assert "人工审批" in get_role(RoleId.REPORTER).system_prompt
+    # 上下游契约：每个角色都要知道自己给谁、从谁那儿拿
+    assert "下游" in get_role(RoleId.COLLECTOR).system_prompt
+    assert "上游" in get_role(RoleId.ANALYST).system_prompt
+    assert "使用者" in get_role(RoleId.REPORTER).system_prompt
+
+
 def test_defaults_align_with_agent_settings():
     definition = get_role(RoleId.COLLECTOR)
 

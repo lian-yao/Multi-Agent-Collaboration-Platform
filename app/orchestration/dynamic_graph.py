@@ -122,6 +122,9 @@ class DynamicPipelineState(BaseModel):
     """
 
     task: str = Field(min_length=1)
+    # 问题改写（ADR-037）：与静态链路同口径的两个可选字段，随 checkpoint 落库。
+    rewritten_task: str | None = None
+    rewrite_source: str | None = None
     status: PipelineStatus = PipelineStatus.PENDING
     plan: list[PlanStep] = Field(default_factory=list)
     plan_source: str = PLAN_SOURCE_FALLBACK
@@ -265,13 +268,17 @@ def planner_prompt(max_steps: int = DEFAULT_MAX_PLAN_STEPS) -> str:
     return (
         "你是多智能体协作平台的「任务规划 Agent」。你的唯一职责是判断这个任务需要"
         "哪些协作角色、以什么顺序参与，并输出一份协作计划。\n\n"
+        "你拿到的用户任务是平台按会话上下文**改写过的**（补全了指代、目标与期望交付物），"
+        "可以直接当作完整任务来规划。\n\n"
         f"可用角色：\n{roles}\n\n"
         "输出要求（务必严格遵守）：\n"
         "- 只输出一个 JSON 对象，不要 Markdown 代码块，不要任何解释性文字；\n"
         '- 结构：{"rationale": "一句话说明为什么这样安排", "steps": [...]}；\n'
         '- 每个步骤：{"id": "s1", "role": "collector", '
         '"instruction": "该步骤要做什么", "depends_on": []}；\n'
-        "- instruction 写清该步骤的交付物，会被直接作为该角色的任务说明；\n"
+        "- instruction 写清该步骤的交付物，会被**直接当作该角色的任务说明**；"
+        "角色手上只有会话工作区文件工具（读；可写档位下另有写与移动工具，覆盖/删除需人工审批）、"
+        "本轮附件、按需发现的 MCP 工具与网页搜索——不要在 instruction 里要求它们做做不到的事；\n"
         f"- 步骤数 1 到 {max_steps} 之间；id 唯一，建议 s1、s2…；\n"
         "- depends_on 只能引用排在它前面的步骤 id，第一个步骤必须是空数组；\n"
         "- 简单任务不要硬凑角色：只问一个事实就用一个 collector 步骤；\n"
@@ -726,6 +733,9 @@ def dynamic_checkpoint_summary(state: DynamicPipelineState) -> dict[str, Any]:
         "mode": "dynamic",
         "status": state.status.value,
         "plan_source": state.plan_source,
+        # 改写结果随 checkpoint 落库（ADR-037）：使用者要能看见"平台把我的话改成了什么"。
+        "rewritten_task": state.rewritten_task,
+        "rewrite_source": state.rewrite_source,
         "current_step": None,
         "completed_steps": [outcome.step_id for outcome in ordered_outcomes(state)],
         "plan": [

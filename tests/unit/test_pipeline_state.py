@@ -168,8 +168,19 @@ def test_checkpoint_summary_excludes_full_results():
 
     summary = pipeline_checkpoint_summary(state)
 
-    assert set(summary) == {"status", "current_step", "completed_steps", "updated_at"}
+    assert set(summary) == {
+        "status",
+        "current_step",
+        "completed_steps",
+        # 问题改写（ADR-037）：随 checkpoint 落库，界面/审计要能看见改成了什么。
+        "rewritten_task",
+        "rewrite_source",
+        "updated_at",
+    }
     assert summary["status"] == "running"
     assert summary["current_step"] == "analyze"
     assert summary["completed_steps"] == ["collect"]
+    # 没经过改写时是空值，不编造内容
+    assert summary["rewritten_task"] is None
+    assert summary["rewrite_source"] is None
     assert "results" not in summary

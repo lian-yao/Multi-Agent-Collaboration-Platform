@@ -85,10 +85,13 @@ def test_advance_pipeline_stage_advances_contract_state_and_summary():
     assert restored.status is PipelineStatus.RUNNING
     assert restored.current_step is PipelineStage.ANALYZE
     assert restored.completed_steps == [PipelineStage.COLLECT]
+    # 改写结果随 checkpoint 落库（ADR-037）：使用者要能看见平台把话改成了什么。
     assert set(outcome["checkpoint"]) == {
         "status",
         "current_step",
         "completed_steps",
+        "rewritten_task",
+        "rewrite_source",
         "updated_at",
     }
 
@@ -249,6 +252,18 @@ def _stage_outputs(task_text: str) -> list[dict[str, Any]]:
     return outputs
 
 
+def _rewrite_output(task_text: str) -> dict[str, Any]:
+    """改写活动的替身输出（ADR-037）：测试里不调模型，直接给"已改写"的结果。"""
+
+    return {
+        "workflow_id": "wf-1",
+        "task": f"{task_text}（已按上下文补全）",
+        "source": "model",
+        "original_chars": len(task_text),
+        "task_chars": len(task_text) + 10,
+    }
+
+
 def test_completed_workflow_schedules_subtasks_and_terminal_finalize():
     ctx = _ScriptedWorkflowContext(instance_id="wf-1")
     task = {
@@ -263,6 +278,10 @@ def test_completed_workflow_schedules_subtasks_and_terminal_finalize():
     gen = agent_pipeline_workflow(ctx, task)
 
     gen.send(None)
+    # 第一个活动必须是改写：它是这次执行的**前置步骤**，静态与动态两条链路行为一致。
+    assert ctx.calls[0][0:2] == ("activity", "rewrite_activity")
+    assert ctx.calls[0][2]["task"]["task"] == "演示任务"
+    gen.send(_rewrite_output("演示任务"))
     for output in _stage_outputs("演示任务"):
         gen.send(output)
 
@@ -345,6 +364,7 @@ def test_completed_workflow_passes_report_and_session_to_finalize():
     gen = agent_pipeline_workflow(ctx, task)
 
     gen.send(None)
+    gen.send(_rewrite_output("演示任务"))
     for output in _stage_outputs("演示任务"):
         gen.send(output)
 

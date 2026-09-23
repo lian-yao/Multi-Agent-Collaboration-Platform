@@ -50,6 +50,7 @@ from app.memory import MessageRole, MessageStatus, SessionMessage
 from app.memory.runtime import conversation_memory
 from app.orchestration.context import CONVERSATION_CONTEXT_LIMIT
 from app.orchestration.long_term import USER_MEMORY_ID, preference_block
+from app.orchestration.rewrite import rewrite_task
 from app.orchestration.pipeline_graph import role_for_stage, run_role_stage
 from app.orchestration.tools import (
     ToolRegistry,
@@ -439,11 +440,54 @@ def _call_subtask(
     )
 
 
+def rewrite_activity(
+    ctx: wf.WorkflowActivityContext,
+    activity_input: dict[str, Any],
+) -> dict[str, Any]:
+    """问题改写（ADR-037）：把用户这一轮的话用会话上下文补成完整任务。
+
+    两条链路（静态 / 动态）共用同一个活动——它是**前置步骤**，不是协作阶段：
+    没有角色、不产出交付物，只把输入说清楚。全部异常都在 `rewrite_task()` 里收敛成
+    "退回原文"，因此调用方只需读 `task` 与 `source`，不必自己 try/except。
+    """
+
+    task = activity_input["task"]
+    workflow_id = str(
+        activity_input.get("workflow_id") or task.get("workflow_id") or ctx.workflow_id
+    )
+    session_id = task.get("session_id")
+    agent_run_id = task.get("agent_run_id")
+    result = rewrite_task(
+        task.get("task") or "",
+        history=session_history(session_id, agent_run_id),
+        preferences=preference_block(USER_MEMORY_ID),
+        attachment_names=_attachment_names(task),
+        workflow_id=workflow_id,
+    )
+    return {"workflow_id": workflow_id, **result}
+
+
+def _attachment_names(task: dict[str, Any]) -> tuple[str, ...]:
+    """本轮附件的**文件名**（不取正文，见 ADR-037 §1）。取不到就当没有附件。"""
+
+    ids = [str(value) for value in task.get("attachment_ids") or []]
+    if not ids:
+        return ()
+    try:
+        return tuple(payload.name for payload in load_payloads(ids) if payload.name)
+    except Exception as exc:  # 附件读不到不该让改写失败
+        log_event(
+            logger,
+            "run.rewrite.attachments_unavailable",
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        return ()
+
+
 def agent_pipeline_workflow(
     ctx: wf.DaprWorkflowContext,
     task: dict[str, Any],
 ) -> dict[str, Any]:
-    state = start(new_pipeline_state(task=task["task"]))
     workflow_id = str(task.get("workflow_id") or ctx.instance_id)
 
     terminal_input: dict[str, Any] = {
@@ -453,6 +497,18 @@ def agent_pipeline_workflow(
         "message_id": task.get("message_id"),
     }
     try:
+        # 前置步骤：先改写，再进流水线（ADR-037）。放在最前面，静态与动态两条链路行为一致。
+        rewritten = yield ctx.call_activity(
+            rewrite_activity, input={"task": task, "workflow_id": workflow_id}
+        )
+        task = {**task, "task": rewritten["task"]}
+        state = start(new_pipeline_state(task=task["task"]))
+        state = state.model_copy(
+            update={
+                "rewritten_task": rewritten["task"],
+                "rewrite_source": rewritten["source"],
+            }
+        )
         ctx.set_custom_status(COLLECT_STEP)
         collected = yield _call_subtask(
             ctx,

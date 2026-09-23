@@ -50,9 +50,10 @@ from app.orchestration.dynamic_graph import (
 )
 from app.orchestration.llm import build_chat_model
 from app.orchestration.long_term import USER_MEMORY_ID, preference_block
+from app.orchestration.rewrite import PLATFORM_AGENT_ID
 from app.orchestration.pipeline import PipelineStatus
 from app.orchestration.tools import ToolCaller, default_tool_registry
-from app.workflows.pipeline import finalize_activity, session_history
+from app.workflows.pipeline import finalize_activity, rewrite_activity, session_history
 
 DYNAMIC_WORKFLOW_NAME = "agent_dynamic"
 DYNAMIC_SUBTASK_WORKFLOW_NAME = "agent_dynamic_subtask"
@@ -64,7 +65,8 @@ SUBTASK_RETRY_POLICY = wf.RetryPolicy(
     max_retry_interval=timedelta(seconds=10),
 )
 
-PLANNER_AGENT_ID = "planner"
+PLANNER_AGENT_ID = PLATFORM_AGENT_ID
+"""规划节点的模型解析 id：与问题改写（ADR-037）共用同一个平台节点 id。"""
 """规划节点的配置解析标识。
 
 `resolve_agent_settings` 按 id 读 `agent_configs`；当前没有 `planner` 行，
@@ -220,6 +222,12 @@ def agent_dynamic_workflow(
     }
 
     try:
+        # 前置步骤：先改写再规划（ADR-037）。规划是"谁参与、按什么顺序"，改写是"这句话到底
+        # 要什么"——没有改写，规划拿到「重试」这种输入连要重试什么都判断不了。
+        rewritten = yield ctx.call_activity(
+            rewrite_activity, input={"task": task, "workflow_id": workflow_id}
+        )
+        task = {**task, "task": rewritten["task"]}
         ctx.set_custom_status("plan")
         planned = yield ctx.call_activity(
             dynamic_plan_activity,
@@ -253,6 +261,9 @@ def agent_dynamic_workflow(
         settled = finalize_state(
             DynamicPipelineState(
                 task=task["task"],
+                # 改写结果随状态进 checkpoint（ADR-037）：不写进去，这一步在界面上就无从审计。
+                rewritten_task=rewritten["task"],
+                rewrite_source=rewritten["source"],
                 status=PipelineStatus.RUNNING,
                 plan=plan.steps,
                 plan_source=plan.source,
