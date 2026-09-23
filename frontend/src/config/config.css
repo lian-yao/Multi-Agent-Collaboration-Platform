@@ -2601,7 +2601,7 @@
 
 
 .cfg-memory-item b {
-  color:#26444f;
+  color:var(--t-ink-26444f);
   overflow-wrap:anywhere
 }
 
@@ -2609,7 +2609,7 @@
 
 .cfg-memory-item p {
   margin:0;
-  color:#43606d;
+  color:var(--t-ink-43606d);
   font-size:12px;
   line-height:1.65;
   overflow-wrap:anywhere
