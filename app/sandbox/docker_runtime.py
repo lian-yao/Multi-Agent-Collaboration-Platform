@@ -289,6 +289,12 @@ class DockerSandbox:
     def _workspace_bind_source(self, workspace: SandboxWorkspace) -> str:
         """bind 的来源必须是**宿主**路径（沙箱是兄弟容器，见 workspace_bind 的模块说明）。"""
 
+        # 已经知道来源就直接用：宿主直跑形态（ADR-035）下工作区路径本身就是宿主路径，
+        # 没有任何 mountinfo 可反查（Windows 宿主上连 `/proc/self/mountinfo` 都没有）。
+        # 它优先于 `SANDBOX_WORKSPACE_HOST_ROOT`：那个覆盖是给"反查不出来"用的兜底，
+        # 而这里是从**本次绑定的工作区**直接拿到的事实。
+        if workspace.host_path:
+            return workspace.host_path
         source = resolve_host_path(
             workspace.container_path,
             override=self._settings.workspace_host_root or None,

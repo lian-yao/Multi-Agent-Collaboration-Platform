@@ -120,8 +120,22 @@ def code_execution_tool(
         if source.mode == "workspace_write" and resolved.workspace_mount == "rw"
         else "ro"
     )
+    # 宿主直跑形态（ADR-035）：backend 就在宿主上，工作区路径**本身就是宿主路径**，
+    # 没有 bind mount 可反查；而 Windows 盘符也不能当 Linux 容器的挂载点。所以这种形态下
+    # 把来源（host_path）与沙箱内看到的位置（`/workspace`）分开传。
+    from app.workspace.config import get_workspace_settings
+
+    host_form = get_workspace_settings().source == "host"
+    if host_form:
+        sandbox_workspace = SandboxWorkspace(
+            container_path="/workspace",
+            mode=mode,
+            host_path=container_path,
+        )
+    else:
+        sandbox_workspace = SandboxWorkspace(container_path=container_path, mode=mode)
     return CodeExecutionTool(
         sandbox,
         sandbox_settings=resolved,
-        workspace=SandboxWorkspace(container_path=container_path, mode=mode),
+        workspace=sandbox_workspace,
     )

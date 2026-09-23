@@ -244,6 +244,55 @@ def test_step_activity_feeds_session_history_into_the_step(monkeypatch):
     assert [message.content for message in captured["history"]] == ["上一轮：写冒泡排序"]
 
 
+def test_step_activity_mounts_session_scoped_tools(monkeypatch):
+    """**动态链路也必须挂会话级工具**（工作区文件工具 ADR-033 + 会话文件工具 ADR-025）。
+
+    这条是 2026-09-23 实测事故的回归：静态链路的阶段活动一直调用
+    `session_scoped_registry`，动态链路漏了——使用者在「自动编排」（前端默认）下绑定好工作区
+    再问「这个文件夹下面有哪些文件」，Agent 的工具列表里**根本没有文件类工具**，连带
+    `code_execution` 也拿到不带工作区挂载的实例（沙箱里 `/workspace` 不存在、cwd 退到 /tmp）。
+    """
+
+    import app.workflows.dynamic as dynamic_module
+
+    seen: dict[str, Any] = {}
+
+    def fake_session_scoped(registry, session_id):
+        seen["session_id"] = session_id
+        return registry
+
+    monkeypatch.setattr(dynamic_module, "session_scoped_registry", fake_session_scoped)
+
+    class _BaseRegistry:
+        """最小注册表：`ToolCaller` 构造时会问目录，给一条空目录即可。"""
+
+        def list_tools(self):
+            return ()
+
+    monkeypatch.setattr(dynamic_module, "default_tool_registry", _BaseRegistry)
+    monkeypatch.setattr(dynamic_module, "build_chat_model", lambda settings: object())
+    monkeypatch.setattr(
+        dynamic_module,
+        "run_plan_step",
+        lambda step, task, results, llm, caller, workflow_id, attachments, history=(), preferences="": (
+            StepOutcome(
+                step_id=step.id,
+                role=step.role,
+                instruction=step.instruction,
+                status=PlanStepStatus.COMPLETED,
+                content="ok",
+            )
+        ),
+    )
+
+    dynamic_step_activity(
+        _ActivityContext(),
+        {"task": _task(use_fake_model=False), "step": THREE_STEPS[0], "results": {}},
+    )
+
+    assert seen["session_id"] == "session-1", "会话级工具必须按本会话挂，否则工作区工具不会出现"
+
+
 # --------------------------------------------------------------------------------------
 # 父工作流
 # --------------------------------------------------------------------------------------

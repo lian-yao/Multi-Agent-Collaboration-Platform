@@ -366,7 +366,7 @@ bind mount），`WORKSPACE_ROOT` 是**容器内**的挂载点（应用读的是�
 | `WORKSPACE_APPROVAL_TTL_SECONDS` | 阶段 3 | 审批有效期，默认 900 秒；超时未决策置 `expired`（不放行、不删记录） |
 | `WORKSPACE_SANDBOX_MOUNT` | 阶段 4 | 沙箱挂载工作区的方式：`rw`（默认）/ `ro`（**审批才拦得住**：沙箱只读，写走文件工具）/ `none`（沙箱看不到用户文件） |
 | `SANDBOX_UID` / `SANDBOX_GID` | 阶段 4 | 沙箱进程身份，代码默认 `nobody`；compose 默认 `0`——Docker Desktop 把 bind 显示为 uid 0，非 0 身份写不进工作区。Linux 宿主改成宿主 uid，或用 `WORKSPACE_SANDBOX_MOUNT=ro` |
-| `SANDBOX_WORKSPACE_HOST_ROOT` | 阶段 4 | 仅当自动反查宿主路径失败时用：显式指定宿主侧工作区根（沙箱是兄弟容器，bind 来源必须是宿主路径） |
+| `SANDBOX_WORKSPACE_HOST_ROOT` | 阶段 4 | 仅当自动反查宿主路径失败时用：显式指定宿主侧工作区根（沙箱是兄弟容器，bind 来源必须是宿主路径）。**宿主直跑形态不需要它**——那种形态下工作区路径本身就是宿主路径，代码执行直接拿它当 bind 来源、挂到沙箱的 `/workspace` |
 | `EGRESS_MODE` | 已实现 | `public_only`（默认，只放公网）或 `allowlist`（再要求域名命中白名单） |
 | `EGRESS_ALLOW_HOSTS` / `EGRESS_DENY_HOSTS` | 已实现 | 域名白/黑名单，**黑名单优先**；只支持精确主机名与 `*.` 前缀通配，按 label 边界匹配 |
 | `EGRESS_INTERNAL_HOSTS` | 已实现 | 平台内部依赖的**精确主机名**（Dapr、Redis、PostgreSQL、Jaeger、`search-gateway`），豁免私网判定 |

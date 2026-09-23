@@ -2366,6 +2366,41 @@ tests/integration/test_workspace_api.py` → **996 passed / 12 failed**（仍是
   两句词的输入被补成自包含的完整任务，且带上了上一轮的约束——这正是这一步要解决的问题。
   验证用的测试会话已删除。
 
+**第十五轮（同日）：修「这个文件夹下面有那些文件」答不出来——动态链路漏挂工作区工具 +
+宿主形态沙箱挂不到工作区**。使用者实测（20:54，前端默认的「自动编排」）在绑定好工作区后问文件，
+Agent 的回答里写着「**本会话工具列表中不存在文件类工具**」，可用工具只有
+`calculator` / `code_execution` / `sql_query` / `web_search`，还把沙箱 `/` 全列了一遍、
+结论是「未发现任何用户文件」。查证两处真因（都不是模型的问题）：
+
+1. **动态链路没挂会话级工具**：`session_scoped_registry()`（把 ADR-025 的会话文件工具与 ADR-033
+   的工作区文件工具拼进注册表）此前只有**静态链路**的阶段活动在调
+   （`app/workflows/pipeline.py::_run_stage_activity`），`dynamic_step_activity` 漏了。
+   而它连带影响的不只是文件工具：`code_execution` 的"看得见工作区"版本也是在这一层换进去的，
+   所以沙箱同时失去工作区挂载、cwd 退到 `/tmp`。这与第七轮「动态链路漏接会话记忆」同型——
+   两条链路并列存在，接线必须成对。
+2. **宿主直跑形态下沙箱挂不到工作区**：挂载来源原先只靠反查 `/proc/self/mountinfo`（那是
+   容器形态的翻译方式）；宿主直跑时工作区路径本身就是宿主路径，既没有 mountinfo 可查，
+   Windows 盘符也不能当 Linux 容器的挂载点。修法：`SandboxWorkspace` 增加 `host_path`，
+   宿主形态传 `host_path=<选定目录>` + `container_path="/workspace"`；容器形态行为不变。
+
+验证（真机，本地服务形态，静态与动态都跑到）：
+
+| 证据 | 结果 |
+| --- | --- |
+| 动态链路同一句提问「这个文件夹下面有那些文件」 | 工具调用记录：`list_work_files` ×5、`read_work_file` ×5、`list_session_files` ×2、`code_execution` ×1，**全部 succeeded**；报告里出现真实条目 `host-folder-marker.txt` / `sessions` / `66` |
+| 沙箱是否真看到工作区 | `code_execution` 输出里 `ls -la` 列出 `66`、`host-folder-marker.txt`、`sessions`，`df` 显示 `Filesystem D:\ … Mounted on /workspace` |
+| 容器形态不回归 | `test_container_form_workspace_still_reverse_looks_up_the_host_path`（反查/覆盖项仍是来源） |
+
+单测：`test_workflow_dynamic.py` 新增 `test_step_activity_mounts_session_scoped_tools`
+（钉住动态链路必须按本会话挂会话级工具）；`test_sandbox_docker_runtime.py` 新增两条
+（宿主形态用已知 `host_path` 且挂到 `/workspace`、容器形态仍反查）。全量
+`pytest tests/unit tests/integration/test_api.py tests/integration/test_workspace_api.py`
+→ **1016 passed / 12 failed**（仍是缺 `pypdfium2` 的 PDF 用例）。
+
+另记一条**既有**的沙箱策略误判（不是本轮引入，Agent 自己绕过去了）：一条含
+`findmnt` / `mount | grep` 的**只读**命令被策略拒为「越权命令被拒绝（写入设备文件）」，
+模型改用 `stat` / `df` 拿到同样信息。属成员 C 的策略匹配面，待其评估是否收窄。
+
 **前端容器与服务**：`npm run build` 通过（bundle 441.52 kB，未过告警阈值）；
 `workspace-smoke` **210/210** 未受影响。
 - **`doc/15` 只加了两条**：模块 3 的工作区与出网边界、第五节的三层边界表；该文件是事实源，

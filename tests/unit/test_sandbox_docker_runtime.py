@@ -700,3 +700,41 @@ def test_sandbox_network_stays_off_by_default(monkeypatch):
     assert kwargs["network_disabled"] is True
     assert "network" not in kwargs
     assert "environment" not in kwargs
+
+
+def test_host_form_workspace_is_mounted_from_the_known_host_path(monkeypatch):
+    """宿主直跑形态（ADR-035）下，工作区的 bind 来源是**已知的宿主路径**，不反查 mountinfo。
+
+    实测事故（2026-09-23）：那种形态下 backend 就在宿主上，工作区路径本身就是宿主路径，
+    既没有 bind mount 可反查（Windows 宿主上连 `/proc/self/mountinfo` 都没有），
+    Windows 盘符也不能当 Linux 容器里的挂载点。所以来源用 `host_path`、
+    沙箱内固定挂到 `/workspace`——`container_path` 在这个形态下指的是**沙箱里看到的位置**。
+    """
+
+    client = _install_fake_docker(monkeypatch)
+    sandbox = DockerSandbox(_settings())
+
+    sandbox.run(
+        CODE,
+        workspace=SandboxWorkspace(
+            container_path="/workspace",
+            mode="ro",
+            host_path=r"D:\测试",
+        ),
+    )
+
+    _, kwargs = client.run_calls[0]
+    assert kwargs["volumes"] == {r"D:\测试": {"bind": "/workspace", "mode": "ro"}}
+    assert kwargs["working_dir"] == "/workspace"
+
+
+def test_container_form_workspace_still_reverse_looks_up_the_host_path(monkeypatch):
+    """容器形态不受影响：来源仍按 `/proc/self/mountinfo` 反查（或由覆盖项给出）。"""
+
+    client = _install_fake_docker(monkeypatch)
+    sandbox = DockerSandbox(_settings(workspace_host_root="/host/ws"))
+
+    sandbox.run(CODE, workspace=SandboxWorkspace(container_path="/workspace/x", mode="rw"))
+
+    _, kwargs = client.run_calls[0]
+    assert kwargs["volumes"] == {"/host/ws": {"bind": "/workspace/x", "mode": "rw"}}

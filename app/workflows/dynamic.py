@@ -53,6 +53,7 @@ from app.orchestration.long_term import USER_MEMORY_ID, preference_block
 from app.orchestration.rewrite import PLATFORM_AGENT_ID
 from app.orchestration.pipeline import PipelineStatus
 from app.orchestration.tools import ToolCaller, default_tool_registry
+from app.orchestration.tools import session_scoped_registry
 from app.workflows.pipeline import finalize_activity, rewrite_activity, session_history
 
 DYNAMIC_WORKFLOW_NAME = "agent_dynamic"
@@ -154,6 +155,12 @@ def dynamic_step_activity(
         outcome = fake_step_outcome(step, task["task"])
     else:
         registry = default_tool_registry()
+        # **会话级工具必须在这里挂**（工作区文件工具 ADR-033、会话文件工具 ADR-025）：
+        # 静态链路的阶段活动一直是这么做的，动态链路此前漏了这一步——2026-09-23 实测的
+        # 现象就是「本会话工具列表里没有任何文件类工具」，连带着 `code_execution` 也拿到
+        # 不带工作区挂载的那个实例（沙箱里 `/workspace` 不存在、cwd 退到 `/tmp`）。
+        # 顺序与静态保持一致：会话工具先挂、审计后包，这样读文件同样落进 `tool_calls`。
+        registry = session_scoped_registry(registry, task.get("session_id"))
         run_id = task.get("agent_run_id")
         if registry is not None and run_id:
             registry = AuditedToolRegistry(

@@ -262,3 +262,26 @@ ADR-025 当初拒绝挂卷的理由是「给沙箱挂宿主目录会叠加风险
 
 只在**容器形态**保留的部分：§1 的固定根与根内子目录选位置、§2 的默认 `read_only`。
 形态开关与全部取舍见 [ADR-035](035-local-service-dynamic-workspace-root.md)。
+
+## 修订（2026-09-23，第三次）：动态链路漏挂工作区工具 + 宿主形态的沙箱挂载
+
+使用者实测：在「自动编排」（前端默认）下绑定好工作区、问「这个文件夹下面有那些文件」，
+Agent 回答「**本会话工具列表中不存在文件类工具**」，并列出的可用工具只有
+`calculator` / `code_execution` / `sql_query` / `web_search`。两处真问题：
+
+1. **动态链路没有挂会话级工具**。`session_scoped_registry()`（它负责把 ADR-025 的会话文件工具
+   与本文 §5/§7 的工作区文件工具拼进注册表）此前只在**静态链路**的阶段活动里调用：
+   `app/workflows/pipeline.py::_run_stage_activity` 调了，`app/workflows/dynamic.py::dynamic_step_activity`
+   没调。所以「自动编排」下文件工具**根本不存在**——而前端默认就是它。修法：动态链路按同一顺序
+   调用（会话工具先挂、审计后包），与静态链路逐字对齐。这与第七轮「动态链路漏接会话记忆」同型：
+   两条链路并列存在，接线必须成对。
+2. **宿主直跑形态下沙箱挂不到工作区**。`code_execution` 的挂载来源原本只靠反查
+   `/proc/self/mountinfo`——那是**容器形态**的翻译方式；宿主直跑时 backend 就在宿主上，
+   工作区路径**本身就是宿主路径**（且没有 mountinfo 可查，Windows 宿主上连这个文件都不存在），
+   而 Windows 盘符也不能当 Linux 容器的挂载点。修法：`SandboxWorkspace` 增加 `host_path`
+   （已知的 bind 来源），宿主形态下代码执行传 `host_path=<选定目录>`、`container_path="/workspace"`
+   （沙箱内看到的位置）；容器形态行为不变，`SANDBOX_WORKSPACE_HOST_ROOT` 仍是反查失败时的兜底。
+
+验证见 `doc/testing.md` 第十五轮（真机：同一句提问下 `list_work_files` / `read_work_file` /
+`list_session_files` / `code_execution` 全部 succeeded，且沙箱内 `df` 显示
+`D:\ … /workspace`）。

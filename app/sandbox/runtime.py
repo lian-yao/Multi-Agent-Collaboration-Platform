@@ -33,10 +33,17 @@ class SandboxWorkspace:
 
     `container_path` 是 backend 侧的路径（如 `/workspace`）；真正的 bind 来源由
     `app/sandbox/workspace_bind.py` 翻译成宿主路径。`mode` 取 `rw` / `ro`。
+
+    `host_path` 是**已经知道**的 bind 来源（宿主绝对路径）。宿主直跑形态（ADR-035）下必须给：
+    那时 backend 就在宿主上，工作区路径本身就是宿主路径，既没有 bind mount 可反查、
+    `container_path` 也可能是 Windows 盘符——把盘符当 Linux 容器的挂载点会挂出一个空目录。
+    因此那种形态下 `container_path` 固定用 `/workspace`（沙箱内看到的位置），
+    `host_path` 放真正的来源。
     """
 
     container_path: str
     mode: str = "rw"
+    host_path: str | None = None
 
 
 @dataclass(frozen=True)
