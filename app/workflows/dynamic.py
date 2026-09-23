@@ -39,6 +39,7 @@ from datetime import timedelta
 from typing import Any, Iterator
 
 import dapr.ext.workflow as wf
+from dapr.ext.workflow import when_all
 
 from app.attachments import load_payloads
 from app.config import AgentSettings, get_settings
@@ -46,6 +47,7 @@ from app.core.agent_config import resolve_agent_settings
 from app.core.checkpoint import update_workflow_run
 from app.core.tool_audit import AuditedToolRegistry
 from app.orchestration.dynamic_graph import (
+    BUDGET_SKIP_REASON,
     INTENT_NODE_ID,
     PLAN_NODE_ID,
     PLAN_SOURCE_FALLBACK,
@@ -57,6 +59,7 @@ from app.orchestration.dynamic_graph import (
     PlanStepStatus,
     StepOutcome,
     apply_skips,
+    budget_exhausted,
     dynamic_checkpoint_summary,
     dynamic_state_label,
     dynamic_subtask_instance_id,
@@ -70,8 +73,10 @@ from app.orchestration.dynamic_graph import (
     resolve_max_parallel_workers,
     resolve_max_plan_rounds,
     resolve_max_plan_steps,
+    resolve_token_budget,
     run_plan_step,
     single_agent_plan,
+    tokens_used,
 )
 from app.orchestration.intake import IntentResult, intake_task
 from app.orchestration.llm import build_chat_model
@@ -114,6 +119,23 @@ PLANNER_AGENT_ID = PLATFORM_AGENT_ID
 
 SUBTASK_FIRST_RETRY_INTERVAL = timedelta(seconds=1)
 SUBTASK_MAX_RETRY_INTERVAL = timedelta(seconds=10)
+SUBTASK_BACKOFF_COEFFICIENT = 2
+
+
+def retry_backoff(attempt: int) -> timedelta:
+    """第 `attempt` 次尝试（1 起，指刚失败的那一次）之后的等待时长。
+
+    与原先挂在 `RetryPolicy` 上的参数同口径（首次 1s、系数 2、上限 10s）。**重试改成
+    子工作流里的显式循环**之后，退避要自己发：`ctx.create_timer` 是持久化的，
+    重放时不会重复等待。
+    """
+
+    seconds = SUBTASK_FIRST_RETRY_INTERVAL.total_seconds() * (
+        SUBTASK_BACKOFF_COEFFICIENT ** max(0, attempt - 1)
+    )
+    return timedelta(
+        seconds=min(seconds, SUBTASK_MAX_RETRY_INTERVAL.total_seconds())
+    )
 
 
 class StepAttemptFailed(RuntimeError):
@@ -124,15 +146,13 @@ class StepAttemptFailed(RuntimeError):
     """
 
 
-def subtask_retry_policy(max_attempts: int) -> wf.RetryPolicy:
-    """按该步允许的尝试次数造重试策略（含首次）。"""
+def resolve_subtask_attempts(step: PlanStep, activity_input: dict[str, Any]) -> int:
+    """该步的最大尝试次数（含首次）：优先子工作流输入，其次计划，最后服务端配置。"""
 
-    return wf.RetryPolicy(
-        first_retry_interval=SUBTASK_FIRST_RETRY_INTERVAL,
-        max_number_of_attempts=max(1, max_attempts),
-        backoff_coefficient=2,
-        max_retry_interval=SUBTASK_MAX_RETRY_INTERVAL,
-    )
+    raw = activity_input.get("max_attempts")
+    if raw:
+        return max(1, int(raw))
+    return effective_attempts(step, get_settings())
 
 
 def _planner_settings() -> AgentSettings:
@@ -171,6 +191,9 @@ def _node_payload(
     previous: dict[str, Any] | None = None,
     tool_calls: Any = (),
     error: str | None = None,
+    attempt: int | None = None,
+    attempts: int | None = None,
+    tokens: int | None = None,
 ) -> dict[str, Any]:
     """状态存储里的单节点载荷。
 
@@ -191,6 +214,11 @@ def _node_payload(
         "previous": previous,
         "tool_calls": calls,
         "error": error,
+        # 执行明细（ADR-038 §8）：第几次尝试、实际尝试了几次、花了多少 Token。
+        # 取不到就不写这两个键（写 None 会被读侧当成"有值但为空"）。
+        **({"attempt": attempt} if attempt is not None else {}),
+        **({"attempts": attempts} if attempts is not None else {}),
+        **({"tokens": tokens} if tokens is not None else {}),
     }
 
 
@@ -342,6 +370,7 @@ def dynamic_step_activity(
         activity_input.get("workflow_id") or task.get("workflow_id") or ctx.workflow_id
     )
     round_number = int(activity_input.get("round") or 1)
+    attempt = max(1, int(activity_input.get("attempt") or 1))
     step = PlanStep.model_validate(activity_input["step"])
     results = {
         step_id: StepOutcome.model_validate(payload)
@@ -385,11 +414,17 @@ def dynamic_step_activity(
             previous=_upstream_payload(step, results),
             tool_calls=outcome.tool_calls,
             error=outcome.error,
+            attempt=attempt,
+            attempts=outcome.attempts,
+            tokens=outcome.tokens,
         ),
     )
     if outcome.status is PlanStepStatus.FAILED:
         raise StepAttemptFailed(outcome.error or f"步骤 {step.id} 执行失败")
-    return {"workflow_id": workflow_id, "outcome": outcome.model_dump(mode="json")}
+    # 成功：把「第几次尝试成功的」记下来——`attempts` 是审计字段，
+    # 「配了 2 次重试」与「真的重试了 1 次才成功」不是一回事。
+    settled = outcome.model_copy(update={"attempts": attempt})
+    return {"workflow_id": workflow_id, "outcome": settled.model_dump(mode="json")}
 
 
 def _state_probe(
@@ -437,6 +472,7 @@ def dynamic_synthesize_activity(
     status = "failed"
     error: str | None = None
     tool_calls: Any = ()
+    tokens = 0
 
     if task.get("use_fake_model"):
         outcome_content = "synthesized: " + " | ".join(
@@ -462,6 +498,7 @@ def dynamic_synthesize_activity(
         tool_calls = outcome.tool_calls
         status = outcome.status
         error = outcome.error
+        tokens = outcome.tokens
 
     previous = {
         "step": ",".join(contents),
@@ -479,6 +516,7 @@ def dynamic_synthesize_activity(
             previous=previous if contents else None,
             tool_calls=tool_calls,
             error=error,
+            tokens=tokens,
         ),
     )
     return {
@@ -488,6 +526,8 @@ def dynamic_synthesize_activity(
         "content": outcome_content,
         "tool_calls": list(tool_calls or ()),
         "error": error,
+        # 合成用量进「本次执行累计预算」（ADR-038 §9）。
+        "tokens": tokens,
     }
 
 
@@ -584,13 +624,16 @@ def _dependency_results(
     }
 
 
-def _failed_outcome(step: PlanStep, exc: BaseException) -> StepOutcome:
+def _failed_outcome(
+    step: PlanStep, exc: BaseException, *, attempts: int = 1
+) -> StepOutcome:
     return StepOutcome(
         step_id=step.id,
         role=step.role,
         instruction=step.instruction,
         status=PlanStepStatus.FAILED,
         error=f"{type(exc).__name__}: {exc}",
+        attempts=attempts,
     )
 
 
@@ -598,29 +641,52 @@ def dynamic_subtask_workflow(
     ctx: wf.DaprWorkflowContext,
     activity_input: dict[str, Any],
 ) -> dict[str, Any]:
-    """单个可恢复子任务：一个持久化边界内执行一个计划步骤（含按步重试）。"""
+    """单个可恢复子任务：一个持久化边界内执行一个计划步骤（含按步重试）。
+
+    **重试是这里的一层显式循环**，不是 `call_activity(retry_policy=...)`：
+    Dapr 的重试策略不把「第几次尝试」告诉工作流代码，而需求要的是**实际**尝试次数
+    可审计（checkpoint 的 `attempts`）。循环里的每次尝试都是一个持久化的活动调用，
+    退避走 `create_timer`，因此重放语义与重试策略一致，只是把 attempt 计数握在自己手里。
+    """
 
     step = PlanStep.model_validate(activity_input["step"])
     round_number = int(activity_input.get("round") or 1)
-    attempts = int(
-        activity_input.get("max_attempts") or effective_attempts(step, get_settings())
-    )
+    max_attempts = resolve_subtask_attempts(step, activity_input)
     ctx.set_custom_status(dynamic_state_label(step.id, round_number))
-    try:
-        outcome = yield ctx.call_activity(
-            dynamic_step_activity,
-            input={**activity_input, "round": round_number},
-            retry_policy=subtask_retry_policy(attempts),
-        )
-    except Exception as exc:
-        # 重试耗尽：收敛成业务失败返回，而不是把异常抛给父工作流——
-        # `when_all` 会因任一分支抛错而提前失败，那会连带丢掉同波其它分支的结果。
-        ctx.set_custom_status(f"{dynamic_state_label(step.id, round_number)}:failed")
+    last_error: BaseException | None = None
+    for attempt in range(1, max_attempts + 1):
+        if attempt > 1:
+            yield ctx.create_timer(retry_backoff(attempt - 1))
+        try:
+            completed = yield ctx.call_activity(
+                dynamic_step_activity,
+                input={
+                    **activity_input,
+                    "round": round_number,
+                    "attempt": attempt,
+                    "max_attempts": max_attempts,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - 任何失败都进入下一次尝试
+            last_error = exc
+            continue
+        # `attempts` 由**这里**盖章（而不是指望活动结果里自带）：子工作流才是
+        # 那个知道"这是第几次"的执行边界。
         return {
-            "workflow_id": activity_input.get("workflow_id"),
-            "outcome": _failed_outcome(step, exc).model_dump(mode="json"),
+            **completed,
+            "outcome": {**(completed.get("outcome") or {}), "attempts": attempt},
         }
-    return outcome
+
+    # 重试耗尽：收敛成业务失败返回，而不是把异常抛给父工作流——
+    # `when_all` 会因任一分支抛错而提前失败，那会连带丢掉同波其它分支的结果。
+    ctx.set_custom_status(f"{dynamic_state_label(step.id, round_number)}:failed")
+    assert last_error is not None
+    return {
+        "workflow_id": activity_input.get("workflow_id"),
+        "outcome": _failed_outcome(step, last_error, attempts=max_attempts).model_dump(
+            mode="json"
+        ),
+    }
 
 
 def _run_waves(
@@ -649,6 +715,22 @@ def _run_waves(
 
     while True:
         probe = probe_with(current)
+        if budget_exhausted(probe):
+            # 成本闸门：预算用尽就不再开新批，把剩余步骤标成 skipped（原因写明是预算），
+            # 然后交给合成器——**已经拿到的产出照样交付**，只是如实说明还差哪些。
+            stopped = _budget_skip_outcomes(probe)
+            if stopped:
+                current.update(stopped)
+            else:
+                return current
+            yield ctx.call_activity(
+                dynamic_checkpoint_activity,
+                input={
+                    "workflow_id": workflow_id,
+                    "checkpoint": dynamic_checkpoint_summary(probe_with(current)),
+                },
+            )
+            return current
         skips = apply_skips(probe)
         if skips:
             current.update(skips)
@@ -665,6 +747,7 @@ def _run_waves(
             },
         )
 
+
         tasks = [
             ctx.call_child_workflow(
                 dynamic_subtask_workflow,
@@ -680,7 +763,11 @@ def _run_waves(
             )
             for step in batch
         ]
-        completed = yield ctx.when_all(tasks)
+        # `when_all` 是 **dapr.ext.workflow 的模块级函数**，不是上下文方法：
+        # 真实运行时给工作流的上下文是 `_RuntimeOrchestrationContext`，它没有这个属性
+        # （2026-09-24 在真实 sidecar 上实测到的 `AttributeError`——替身假装成方法时，
+        # 只有真的跑在 Dapr 上才会暴露）。
+        completed = yield when_all(tasks)
         for step, item in zip(batch, completed):
             current[step.id] = StepOutcome.model_validate(item["outcome"])
 
@@ -691,6 +778,14 @@ def _run_waves(
                 "checkpoint": dynamic_checkpoint_summary(probe_with(current)),
             },
         )
+
+
+def _budget_skip_outcomes(state: DynamicPipelineState) -> dict[str, StepOutcome]:
+    """预算用尽时给还没跑的步骤补 `skipped` 结果（原因：预算，而非上游失败）。"""
+
+    from app.orchestration.dynamic_graph import apply_budget_stop
+
+    return apply_budget_stop(state)
 
 
 def agent_dynamic_workflow(
@@ -731,6 +826,10 @@ def agent_dynamic_workflow(
             intent=intent,
             intent_source=intake.get("intent_source"),
             route=route,
+            # 成本闸门与预算口径（ADR-038 §9）：intake 的用量从这里开始累计，
+            # 后面每一步、合成与校验的用量都加到同一条账上。
+            token_budget=resolve_token_budget(settings),
+            platform_tokens=int(intake.get("tokens") or 0),
             status=PipelineStatus.RUNNING,
         )
         if intent is not None:
@@ -766,7 +865,11 @@ def agent_dynamic_workflow(
                 base_state=seed,
                 round_number=1,
             )
-            settled = finalize_state(seed.model_copy(update={"results": results}), workflow_id)
+            sealed = seed.model_copy(update={"results": results})
+            settled = finalize_state(
+                sealed.model_copy(update={"budget_exceeded": budget_exhausted(sealed)}),
+                workflow_id,
+            )
         else:
             max_rounds = resolve_max_plan_rounds(settings)
             validation: ValidationResult | None = None
@@ -775,6 +878,8 @@ def agent_dynamic_workflow(
             plan = DynamicPlan(steps=[], source=PLAN_SOURCE_FALLBACK)
             results = {}
             final_output: str | None = None
+            carried_tokens = 0
+            round_state = seed
 
             while True:
                 ctx.set_custom_status(f"plan:r{round_number}")
@@ -796,6 +901,10 @@ def agent_dynamic_workflow(
                         "plan_source": plan.source,
                         "plan_rationale": plan.rationale,
                         "results": {},
+                        # 上一轮花掉的用量要带过来，否则重编排会把预算重置成满额。
+                        "tokens_used_prior": carried_tokens,
+                        "platform_tokens": seed.platform_tokens + plan.tokens,
+                        "synthesis_tokens": 0,
                     }
                 )
                 results = yield from _run_waves(
@@ -842,25 +951,45 @@ def agent_dynamic_workflow(
                     },
                 )
                 validation = ValidationResult.model_validate(checked["validation"])
-                if validation.satisfied or round_number > max_rounds:
+                round_state = current.model_copy(
+                    update={
+                        "results": results,
+                        "synthesis_tokens": int(synthesized.get("tokens") or 0),
+                        "validation": validation,
+                        "platform_tokens": current.platform_tokens
+                        + int(validation.tokens or 0),
+                    }
+                )
+                if (
+                    validation.satisfied
+                    or round_number > max_rounds
+                    # 预算用尽就不再开第二轮：重编排按定义要再花一份钱。
+                    or budget_exhausted(round_state)
+                ):
                     break
                 defects = [*validation.defects, *validation.missing]
+                carried_tokens = tokens_used(round_state)
                 round_number += 1
                 ctx.set_custom_status(f"replan:r{round_number}")
 
+            if not settings.validation_enabled:
+                # 没跑校验时 `round_state` 还没被赋值：用合成结果补一份。
+                round_state = current.model_copy(
+                    update={
+                        "results": results,
+                        "synthesis_tokens": int(synthesized.get("tokens") or 0),
+                    }
+                )
             settled = finalize_state(
-                seed.model_copy(
+                round_state.model_copy(
                     update={
                         "route": ROUTE_MULTI,
                         "round": round_number,
-                        "plan": plan.steps,
-                        "plan_source": plan.source,
-                        "plan_rationale": plan.rationale,
-                        "results": results,
                         "final_output": final_output,
                         "validation": validation,
                         "validation_rounds": max(0, round_number - 1),
                         "defects": defects,
+                        "budget_exceeded": budget_exhausted(round_state),
                     }
                 ),
                 workflow_id,
