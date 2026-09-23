@@ -776,3 +776,32 @@ search-gateway 脚本显式接入代理，沙箱联网时只接内部网络并�
 接口与前端口径见 `doc/api.md` §5.19–§5.21、§7.1。
 详情见 `doc/testing.md` §4.16。
 
+
+### 自动编排升级：意图 → 波次并行 → 合成 → 校验（2026-09-24，成员 D 主提）
+
+需求是把「自动编排」从「规划一次、按依赖串行执行」升级为
+**意图识别 → 编排器（拆分 + 分配）→ 多工作节点并行执行 → 合成器汇总输出**，并补齐四件事：
+简单任务直答、子任务重试与部分失败告知、断点恢复、依赖分阶段（波次）。
+
+设计先落 [ADR-038](decisions/038-dynamic-wave-orchestration.md)（含与 ADR-019/020 的关系），
+再按四层实现：
+
+| 层 | 内容 | 关键取舍 |
+| --- | --- | --- |
+| 编排层 | `intake`（改写 + 意图**一次调用**）、路由护栏、计划新字段（`expected_output` / `retry` / `timeout_seconds`）、`waves()` / `pending_batch()`、合成器、校验器、`flow[]` 与 `partial` | 简单任务 = 1 步、只花 2 次调用；判不准一律按多 Agent（安全默认） |
+| LangGraph 镜像 | `Send` 波内并行 + `results` 按键合并 reducer + 图外重编排轮次 | 拓扑与波次判定与 Dapr 路径**共用同一份纯函数**，不各写一套 |
+| Dapr 持久化 | 父工作流按波 `when_all`，实例 ID `{wf}:dyn:r{round}:{step}`；重试挂在活动调用上、失败收敛在子工作流里 | 不引入 LangGraph Checkpointer：Dapr 已是持久化事实源（ADR-020） |
+| API/前端 | `/stages` 动态链路可用（按 `flow` 节点读状态），画布 flow 优先 + 平台节点区分 + 部分失败黄标 | 旧执行（无 `flow`）保持 `not_integrated`，不碎 |
+
+**本轮交付**：`app/orchestration/{intake,synthesis}.py`、重建的 `dynamic_graph.py` 与
+`app/workflows/dynamic.py`、`app/api/stage_trace.py` 动态分支、前端 `collaboration.ts` /
+`GraphCanvas.tsx` / `types/api.ts`，`AgentSettings` 增 5 个开关（并发 3 / 尝试 3 /
+超时 300s / 校验开 / 重编排 1 轮）。
+
+**验证边界**：`uv run pytest` → **1241 passed / 7 skipped**（新增/改写 90 余例：波次并发实测、
+部分失败、校验重编排一轮、旧计划容忍、动态 `/stages`，并修掉一条 ADR-037 之后就陈旧的
+e2e 断言）；`tests/e2e/test_pipeline_e2e.py` 新增**进程内跑完整新链路**的用例
+（API → Dapr 生成器 → 活动/子工作流 → checkpoint → `/stages`）；`frontend` 的
+`npm run build` 通过，`workspace-smoke` **241/241**（+12 条 ADR-038 断言：flow 优先、
+平台节点、单 Agent 形态、旧执行回落、部分失败黄标）。
+**未做**：真实部署（compose + 真实 Dapr/模型）下的动态链路端到端，与累计 token 预算。

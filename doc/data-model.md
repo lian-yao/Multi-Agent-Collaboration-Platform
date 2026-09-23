@@ -112,14 +112,34 @@ erDiagram
 | session_id | UUID | FK → sessions.id，CASCADE | 所属会话 |
 | instance_id | VARCHAR(100) | NULL | Dapr Workflow 实例 ID |
 | status | VARCHAR(20) | `pending` | `pending` / `running` / `paused` / `completed` / `failed` / `cancelled` |
-| checkpoint | JSONB | NULL | 最近一次进度摘要（展示/审计用，不作为恢复依据） |
-| current_step | VARCHAR(100) | NULL | 当前执行阶段，如 `collect` / `analyze` / `report` |
+| checkpoint | JSONB | NULL | 最近一次进度摘要（展示/审计用，不作为恢复依据）。字段口径见下 |
+| current_step | VARCHAR(100) | NULL | 当前执行阶段，如 `collect` / `analyze` / `report`；动态链路的波次进度看 `checkpoint.current_wave` |
 | error | TEXT | NULL | 失败原因 |
 | created_at | TIMESTAMPTZ | `now()` | 创建时间 |
 | updated_at | TIMESTAMPTZ | `now()` | 更新时间 |
 | completed_at | TIMESTAMPTZ | NULL | 完成/终止时间 |
 
 索引：`idx_workflow_runs_session (session_id, created_at DESC)`、`idx_workflow_runs_instance (instance_id)`。
+
+**`checkpoint` 摘要的字段口径**（写入方：静态链路 `pipeline_checkpoint_summary`、
+动态链路 `dynamic_checkpoint_summary`；接口见 `doc/api.md` §3.1）：
+
+| 字段 | 链路 | 说明 |
+| --- | --- | --- |
+| `status` / `updated_at` | 两条 | 摘要自己的状态与时间戳 |
+| `completed_steps` / `current_step` | 静态 | 已完成的阶段与当前阶段 |
+| `rewritten_task` / `rewrite_source` | 两条 | 问题改写结果（ADR-037）：`model` / `original` |
+| `mode` | 动态 | 固定 `dynamic` |
+| `route` / `intent` / `intent_source` | 动态 | 单 Agent 直答 or 波次协作；结构化意图与其来源（ADR-038） |
+| `plan` / `plan_source` / `plan_rationale` | 动态 | 子任务清单（**只装 worker**）与计划来源（`llm` / `fallback`） |
+| `flow` | 动态 | 整条流程的节点清单（意图 / 编排 / worker / 合成 / 校验），画布优先读它 |
+| `round` / `validation_rounds` | 动态 | 当前轮次与已发生的重编排次数（硬上限 1） |
+| `current_wave` | 动态 | 还差哪一波没跑完（运行时可见） |
+| `partial` / `failed_steps` / `skipped_steps` | 动态 | 部分完成的显式标记：终态可能仍是 `completed` |
+| `validation` | 动态 | 校验结论；`source=fallback` 表示校验器不可用（按通过处理） |
+
+**`checkpoint` 只写摘要**：完整状态在 Dapr State Store 里（键见 §4），且**不作为恢复依据**——
+恢复由 Dapr 自己的编排历史保证。
 
 ### tool_calls（工具调用审计）
 
@@ -452,6 +472,22 @@ Prompt 时需同步 roles.py 与 `BUILTIN_AGENT_SEED`，避免目录与 Prompt �
 | `provider:config` | String（JSON） | 无 | 模型 Provider 配置缓存镜像（含密钥，见 ADR-014） | 可丢失；PostgreSQL 为唯一事实源，写成功后写缓存，未命中回源并回填 |
 | `workflow:{id}:state` | Hash | 与 Workflow 生命周期一致 | Dapr State Store 状态 | 由 Dapr state store 组件管理，应用不直接改写 |
 | `pubsub:agent-events` | Stream | 消息保留策略 | Agent 间事件 | Dapr Pub/Sub 管理 |
+
+### 4.0 Dapr State Store 的编排状态键（应用侧写入）
+
+静态链路与动态链路都用 Dapr State Store 保存**逐阶段 / 逐节点**的执行载荷，
+键前缀是 `state_store_key_prefix`（`app/core/dapr.py`），由 `app/workflows/state.py` 读写：
+
+| 键形状 | 写入方 | 载荷 |
+| --- | --- | --- |
+| `…:workflow:{workflow_id}:{stage}` | 静态链路的阶段活动 | 该阶段完成后的完整 `PipelineState` |
+| `…:workflow:{workflow_id}:dyn:r{round}:{node_id}` | 动态链路的节点活动（ADR-038） | 该节点的 `{step, status, content, previous, tool_calls, error}` |
+
+两条口径：
+
+1. **动态链路的键带轮次**：重编排的第二轮会有同名的 `s1`，不带轮次会把上一轮的轨迹覆盖掉；
+2. **`/stages` 只读这两类键**（`app/api/stage_trace.py`），不新增写入方、不改 Workflow 数据。
+   状态被清理时接口如实返回「已清理」，不伪装成「还没来得及跑」。
 
 ### 4.1 记忆结构明细（角色 C 定义，2026-09-08）
 
