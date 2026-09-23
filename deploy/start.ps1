@@ -1,6 +1,71 @@
+﻿<#
+.SYNOPSIS
+    启动平台。**不带参数 = 本地服务形态**（ADR-035 的默认形态）。
+
+.DESCRIPTION
+    两种形态共用 3500 / 8000 / 5173 三个端口，不可能同时跑，所以入口只有一个、
+    用开关选形态：
+
+      .\start.ps1              # 本地服务形态：宿主后端（绑 127.0.0.1）+ Vite dev + 依赖容器
+      .\start.ps1 -Container   # 容器形态：backend / dapr-sidecar / frontend 全在 compose 里
+
+    为什么默认是本地服务形态：工作区的授权单位是"用户当场选定的一个文件夹"，只有后端跑在宿主上，
+    它看到的路径才是宿主路径（浏览器给不了宿主路径，bind mount 又在容器创建时固定）。这条默认
+    写在 README 与 `doc/deployment.md` 里，这里把它落到**同一个入口**上——否则"默认形态"只是
+    文档里的一句话，实际还得记住另一个脚本名。
+
+    不带参数时这里只做一件事：把参数交给 `scripts/start_local.ps1`（它负责停掉容器里那三个
+    占端口的服务、起依赖、起 sidecar 与后端、起前端）。容器形态的既有逻辑原样保留在下面。
+
+.PARAMETER Container
+    走容器形态（部署 / 演示用）。与本地服务形态互斥：切过去之前请先
+    `scripts/start_local.ps1 -Stop`，或直接跑不带参数的 `.\start.ps1` 让它反过来切。
+
+.PARAMETER Stop
+    停止本地服务形态起的三个进程（宿主后端 / Vite / 本地 sidecar）。容器形态用
+    `docker compose stop`（或 `deploy\stop.ps1`）。
+#>
+[CmdletBinding()]
+param(
+    [switch]$Container,
+    [switch]$Stop
+)
+
 $ErrorActionPreference = "Stop"
 
 $composeFile = Join-Path $PSScriptRoot "compose.yaml"
+
+$localScript = Join-Path (Split-Path $PSScriptRoot -Parent) "scripts\start_local.ps1"
+
+if ((-not $Container) -and (-not (Test-Path $localScript))) {
+    Write-Error "找不到 $localScript —— 默认形态（本地服务）需要它。要跑容器形态请加 -Container。"
+}
+
+if ($Stop) {
+    # 停止只对本地服务形态有意义：那三个进程是本仓库起的宿主进程；容器那套由 compose 管。
+    if ($Container) {
+        Write-Host "容器形态请用：docker compose stop（或 deploy\stop.ps1）" -ForegroundColor Yellow
+        exit 0
+    }
+    & $localScript -Stop
+    exit $LASTEXITCODE
+}
+
+if (-not $Container) {
+    Write-Host "默认形态：本地服务（ADR-035）。要跑容器形态请加 -Container。" -ForegroundColor Yellow
+    & $localScript
+    exit $LASTEXITCODE
+}
+
+Write-Host "形态：容器（deploy/compose.yaml）。本地服务形态请运行不带参数的 .\start.ps1。" -ForegroundColor Yellow
+
+# 切到容器形态前**先把本地服务形态收掉**：两套共用 3500 / 8000 / 5173，不收就会撞端口
+# （"bind: Only one usage of each socket address" 那个报错就是这么来的）。反过来切由
+# start_local.ps1 自己负责停容器里的那三个服务——两个方向都不要求使用者手工腾端口。
+if (Test-Path $localScript) {
+    $null = & $localScript -Stop 2>&1
+    Write-Host "已确保本地服务形态的进程停干净（若原本在跑）。"
+}
 
 function Assert-CommandAvailable {
     param([Parameter(Mandatory = $true)][string]$Name)

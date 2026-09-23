@@ -16,13 +16,25 @@ DAPR_DEFAULT_IMAGE_REGISTRY=ghcr dapr init --runtime-version 1.18.2
 ## 默认形态：本地服务（一键直跑，ADR-035）
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/start_local.ps1     # 启动
+cd deploy
+.\start.ps1                       # 启动（默认就是本地服务形态）
+```
+
+```powershell
 powershell -ExecutionPolicy Bypass -File scripts/start_local.ps1 -Stop   # 停止
 ```
 
-这条脚本把四件事一次做完：起 Redis / PostgreSQL 容器 → 腾出 8000/3500/5173（停掉容器里的
+`deploy/start.ps1` 不带参数时**转调** `scripts/start_local.ps1`——入口收敛成一条，免得
+「默认形态」写在文档里、实际还得记另一个脚本名。这条脚本把四件事一次做完：起 Redis /
+PostgreSQL / Jaeger 容器 → 腾出 8000/3500/5173（停掉容器里的
 `backend` / `dapr-sidecar` / `frontend`，只 stop 不删数据）→ 起本地 Dapr sidecar 与后端
 （`app.workflows.worker`，绑 **127.0.0.1:8000**）→ 起前端 Vite dev（5173，`/api` 反代到 8000）。
+
+**只起有用的依赖**：Jaeger 要起，因为宿主后端的默认 trace 端点是
+`http://localhost:4318/v1/traces`（`app/observability/config.py`），容器发布的 4318 正好够用。
+Prometheus（抓的是容器里的 `backend:8000`，碰不到宿主进程）、`search-gateway` 与
+`egress-proxy`（只在 `internal` 网，宿主进程按设计不可达）在本地形态下**起了也没有数据**，
+所以这个形态不起它们——本项目反复在修的就是这种"看着在跑、其实没用"的假服务。
 
 **为什么默认是这个形态**：工作区的授权单位是**用户当场选定的一个文件夹**，只有后端跑在
 宿主上，它看到的路径才是宿主路径——浏览器给不了宿主路径，bind mount 又在容器创建时固定
@@ -39,8 +51,12 @@ powershell -ExecutionPolicy Bypass -File scripts/start_local.ps1 -Stop   # 停�
 
 ```powershell
 cd deploy
-.\start.ps1
+.\start.ps1 -Container
 ```
+
+`-Container` 是显式开关：容器形态（backend / dapr-sidecar / frontend 全在 compose 里、
+只经 `internal` 网出网）与本地服务形态**共用 3500/8000/5173 三个端口**，不可能同时跑。
+不带开关＝本地服务形态；要切回来先停容器那套（`docker compose stop`）或直接 `.\start.ps1`。
 
 该脚本会构建后端与前端镜像，并启动以下服务：
 

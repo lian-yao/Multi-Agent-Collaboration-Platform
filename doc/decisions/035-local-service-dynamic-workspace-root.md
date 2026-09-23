@@ -92,6 +92,16 @@ schema 变更：`ux_workspaces_path` 这条唯一约束已经在有数据的库�
 （绑 `127.0.0.1:8000`），前端 `npm run dev`（`/api` 反代到 `:8000`）。README 与
 `doc/deployment.md` 的默认入口改成本形态，容器形态作为「部署 / 演示」的备选保留。
 
+**入口收敛（同日修订）**：只把默认形态写进文档、实际还得记一个新脚本名，等于没有默认——
+所以 `deploy/start.ps1` **不带参数时转调** `scripts/start_local.ps1`（本地服务形态），
+容器形态退成显式开关 `deploy/start.ps1 -Container`。两套形态共用 3500/8000/5173，
+不可能同时跑；切换由脚本自己停掉另一套，不要求使用者手工腾端口。
+
+依赖只起**对宿主后端真有用**的那些：Redis / PostgreSQL 必需，Jaeger 有用（宿主后端的默认
+trace 端点是 `localhost:4318`，见 `app/observability/config.py`）；Prometheus 抓的是容器里的
+`backend:8000`、`search-gateway` 与 `egress-proxy` 只在 `internal` 网——宿主进程按设计碰不到
+它们，起了也没有数据，所以本形态不起，并在 `doc/deployment.md` 写明原因。
+
 ## 备选方案
 
 - **桌面壳（Tauri / Electron）**：能拿原生对话框与真实路径。否决：为一件 HTTP 已经能做到的

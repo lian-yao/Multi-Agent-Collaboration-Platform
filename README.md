@@ -90,15 +90,19 @@ uv run pytest
 ## 默认启动方式（本地服务形态，ADR-035）
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/start_local.ps1
+cd deploy
+.\start.ps1
 ```
 
 后端直跑在**本机**（绑 `127.0.0.1:8000`），前端是 Vite dev（`http://localhost:5173`），
-Redis / PostgreSQL 走容器。这样工作区才能让你**当场选一个本机文件夹**——Agent 在那个
-文件夹里读写，文件夹之外一律拒绝。停止：同一条命令加 `-Stop`。
+Redis / PostgreSQL / Jaeger 走容器。这样工作区才能让你**当场选一个本机文件夹**——Agent 在那个
+文件夹里读写，文件夹之外一律拒绝。
 
-容器形态仍然保留（适合部署与演示）：`cd deploy; .\start.ps1`，见
-[doc/deployment.md](doc/deployment.md)。
+停止用 `scripts/start_local.ps1 -Stop`（它由 `deploy/start.ps1` 转调，同一套状态）。
+
+容器形态仍然保留（适合部署与演示）：`cd deploy; .\start.ps1 -Container`，见
+[doc/deployment.md](doc/deployment.md)。两种形态**共用 3500/8000/5173**，不能同时跑——
+脚本会自己把另一套停掉，不用手工腾端口。
 
 > 全量 `uv run pytest` 目前需要可达的 PostgreSQL（`localhost:5433`）与 Redis（`localhost:6380`），
 > 且**集成层有 5 条已知失败**（测试隔离缺口，非功能缺陷）；单元与 E2E 层已自足。

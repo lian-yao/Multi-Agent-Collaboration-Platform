@@ -68,11 +68,13 @@ function Stop-StartedProcess {
     Write-Host "  已停止 $Name (PID $Id 及其子进程)"
 }
 
-if ($Stop) {
+function Stop-LocalProcesses {
+    """停掉本脚本记录的那三个进程（含子进程树），并清掉状态文件。"""
+
     $state = Get-State
     if ($null -eq $state) {
         Write-Host "没有找到 $stateFile —— 没有本脚本记录过的进程。"
-        exit 0
+        return $false
     }
     Write-Host "停止本地服务形态的三个进程："
     foreach ($entry in @(
@@ -83,8 +85,13 @@ if ($Stop) {
         if ($entry.Id) { Stop-StartedProcess -Name $entry.Name -Id ([int]$entry.Id) }
     }
     Remove-Item -Path $stateFile -Force -ErrorAction SilentlyContinue
+    return $true
+}
+
+if ($Stop) {
+    [void](Stop-LocalProcesses)
     Write-Host ""
-    Write-Host "基础设施容器（redis / postgres）仍在运行；要一并停掉：cd deploy; docker compose stop redis postgres" -ForegroundColor Yellow
+    Write-Host "依赖容器（redis / postgres / jaeger）仍在运行；要一并停掉：cd deploy; docker compose stop redis postgres jaeger" -ForegroundColor Yellow
     exit 0
 }
 
@@ -99,16 +106,28 @@ if (-not (Test-Path $composeFile)) {
 
 $existing = Get-State
 if ($null -ne $existing) {
-    $alive = @($existing.frontend, $existing.backend, $existing.daprd) |
-        Where-Object { $_ -and (Get-Process -Id ([int]$_) -ErrorAction SilentlyContinue) }
+    $started = @($existing.frontend, $existing.backend, $existing.daprd)
+    $alive = @($started |
+        Where-Object { $_ -and (Get-Process -Id ([int]$_) -ErrorAction SilentlyContinue) })
+    if ($alive.Count -eq $started.Count) {
+        # 入口是"启动平台"，重复敲一次不该变成一个错误——已经在跑就如实说一句、成功返回。
+        Write-Host "本地服务形态已在运行（PID $($alive -join ', ')），未重复启动。" -ForegroundColor Green
+        Write-Host "  Web UI: http://localhost:5173   停止: 同一条命令加 -Stop"
+        exit 0
+    }
     if ($alive.Count -gt 0) {
-        Write-Host "已有本地进程在跑（PID $($alive -join ', ')）。先执行 -Stop 再启动。" -ForegroundColor Yellow
-        exit 1
+        # 半死状态（比如上一次被强杀）：先收干净再起，否则会撞端口。
+        Write-Host "检测到上次留下的半个本地形态（存活 PID $($alive -join ', ')），先收干净再启动。" -ForegroundColor Yellow
+        [void](Stop-LocalProcesses)
     }
 }
 
-Write-Host "[1/4] 起基础设施（Redis / PostgreSQL）" -ForegroundColor Green
-docker compose -f $composeFile up -d redis postgres
+# 只起**对宿主后端真有用**的依赖：Redis / PostgreSQL 必需，Jaeger 有用（宿主后端的默认
+# trace 端点是 http://localhost:4318/v1/traces，容器发布的 4318 正好够用）。
+# Prometheus 抓的是容器里的 backend:8000、search-gateway 与 egress-proxy 只在 internal 网，
+# 宿主进程按设计碰不到它们——起了也没有数据，那就属于"看着在跑、其实没用"的假服务。
+Write-Host "[1/4] 起基础设施（Redis / PostgreSQL / Jaeger）" -ForegroundColor Green
+docker compose -f $composeFile up -d redis postgres jaeger
 
 Write-Host "[2/4] 腾出 8000 / 3500 / 5173：停掉容器里的 backend / dapr-sidecar / frontend" -ForegroundColor Green
 $previous = $ErrorActionPreference

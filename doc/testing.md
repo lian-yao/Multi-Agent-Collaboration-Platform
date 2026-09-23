@@ -2247,6 +2247,45 @@ tests/integration/test_workspace_api.py` → **996 passed / 12 failed**（仍是
   201、该会话绑定数 **1**、同路径再登记**幂等**（同一条 id）；`workspace_source` 实际使用的路径
   与界面看到的**完全一致**（修复前这里是最早那条 `D:\测试`）。测试会话已删除。
 
+**第十二轮（同日）：启动入口收敛——`deploy/start.ps1` 默认就是本地服务形态**。使用者要求
+「改一下启动脚本，启动时，会连带启动本地服务」。两条脚本其实是两种**互斥**形态（共用
+3500/8000/5173），所以"两个都起"这条路不存在；能做的、也是想要的，是**一个入口**：
+
+- `deploy/start.ps1` 不带参数 → **转调** `scripts/start_local.ps1`（本地服务形态）；
+- `deploy/start.ps1 -Container` → 容器形态（原逻辑原样保留）；
+- `deploy/start.ps1 -Stop` → 停本地那三个进程（容器那套由 compose 管）。
+
+两处以前会真的咬人的地方顺带修掉：
+
+1. **切形态撞端口**：`-Container` 之前不会收掉本地那套，直接撞 3500
+   （`bind: Only one usage of each socket address` 那个报错就是这么来的）。现在切之前先
+   `start_local.ps1 -Stop`——两个方向都由脚本自己收，不要求使用者手工腾端口。
+2. **重复敲启动脚本会报错**：已经在跑时原本 `exit 1`，现在如实说一句"已在运行（PID …）"
+   并成功返回；只有"半死"（上次被强杀）才先收干净再起。
+
+依赖只起**对宿主后端真有用**的：Redis / PostgreSQL 必需，**新增 Jaeger**（宿主后端默认 trace
+端点是 `localhost:4318/v1/traces`）；Prometheus 抓的是容器里的 `backend:8000`、`search-gateway`
+与 `egress-proxy` 只在 `internal` 网——宿主进程按设计碰不到，起了也没有数据，所以本形态不起，
+理由写进 `doc/deployment.md`（沿用本项目"不给假服务"的一贯口径）。
+
+踩到并修掉一个真坑：给 `deploy/start.ps1` 加了**中文字符串**之后脚本直接语法报错——它原先的
+中文只在**注释**里，所以没有 BOM 也一直正常；PowerShell 5.1 对无 BOM 脚本按 ANSI 读，字符串
+错位会吃掉引号。补上 UTF-8 BOM 即恢复（`pick_work_dir.ps1` 头部记过同一个坑，这次是"加了中文
+字符串的新场景"触发）。顺带把 `[int]$_` 少写 `$` 的笔误一起修了。
+
+验证（**四种用法全部真机跑过**，不是只看语法）：
+
+| 用法 | 结果 |
+| --- | --- |
+| `cd deploy; .\start.ps1` | 宿主后端 `127.0.0.1:8000` 200、前端 5173 200、**Jaeger 16686 200** |
+| 再敲一次 | 「本地服务形态已在运行（PID …），未重复启动」，退出码 0 |
+| `.\start.ps1 -Stop` | 三个进程（含子进程树）停掉，依赖容器保留 |
+| `.\start.ps1 -Container` | 先收掉本地那套 → 容器栈起来，Frontend / Backend / Dapr Sidecar 三处健康检查全过，8000 空闲 |
+| 再切回 `.\start.ps1` | 回到本地形态：8000 / 5173 / 16686 全 200，容器里的 backend / frontend / dapr-sidecar 已停 |
+
+两个脚本都过了 PowerShell 解析器（0 语法错误）且都带 UTF-8 BOM。本轮只动脚本与文档，
+未触碰应用代码。
+
 **前端容器与服务**：`npm run build` 通过（bundle 441.52 kB，未过告警阈值）；
 `workspace-smoke` **210/210** 未受影响。
 - **`doc/15` 只加了两条**：模块 3 的工作区与出网边界、第五节的三层边界表；该文件是事实源，
