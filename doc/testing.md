@@ -2520,7 +2520,13 @@ MACP_E2E_LIVE=1 pytest tests/e2e/test_live_e2e.py -q -k dynamic -s
 自己造了一个同名**方法**，于是两类测试全绿、真机必崩（ADR-038 §8.3）。教训已固化：替身只替
 数据与环境，不替 API 形状。
 
-运行命令与结果：`uv run pytest` → **1241 passed / 7 skipped**（跳过的 7 条是需要真实部署的
+角色提示词的口径（位置 = 「本次执行里的一个步骤」+ 并行互不可见 + 产出由合成器收口）由
+`test_agent_roles.py::test_role_prompts_match_the_automatic_orchestration_mode` 钉住；
+改提示词时留意回归网里的**判别方式**：`ScriptedE2EModel` 按**系统提示词**判别节点类型
+（早期版本按整段提示词匹配关键词，角色提示词里补上「合成器」三个字之后，静态用例集体走错
+分支——判别词必须选平台节点独有的句子，且只看 system 消息）。
+
+运行命令与结果：`uv run pytest` → **1247 passed / 8 skipped**（跳过的是需要真实部署的
 live 用例）；`cd frontend && npm run build` 通过；`workspace-smoke` → **244/244**。
 **仍未覆盖**：「同一波多个子任务真的同时在 `tool_calls` 表里并发」的库侧证据
 （并发时序现在由单测的并发计数与 Dapr 侧的一次 `when_all` 分批断言共同覆盖）。
