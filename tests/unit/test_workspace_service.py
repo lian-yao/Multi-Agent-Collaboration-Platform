@@ -62,10 +62,17 @@ class FakeWorkspaceStore:
         row = self.rows.get(str(workspace_id))
         return dict(row) if row else None
 
-    def find_workspace_by_path(self, path: str) -> dict | None:
+    def find_workspace_by_path(self, path: str, *, session_id=None) -> dict | None:
+        """与 `checkpoint` 同口径：给了 `session_id` 就限定该会话（去重范围是会话内）。"""
+
         for row in self.rows.values():
-            if row["path"] == path:
-                return dict(row)
+            if row["path"] != path:
+                continue
+            if session_id is not None and str(row.get("session_id")) != str(session_id):
+                continue
+            if session_id is None and row.get("session_id") is not None:
+                continue
+            return dict(row)
         return None
 
     def create_workspace(
@@ -219,11 +226,27 @@ def test_explicit_path_is_bound_and_created(store, settings, tmp_path: Path):
     assert (tmp_path / "project" / "docs").is_dir()
 
 
-def test_duplicate_path_is_rejected(store, settings):
+def test_the_same_folder_can_be_registered_by_different_sessions(store, settings):
+    """一个目录被多个项目共用是常态：不同会话各自登记，互不排斥（2026-09-23 修正）。"""
+
+    first = service.create_workspace(session_id="s-1", path="shared", settings=settings)
+    second = service.create_workspace(session_id="s-2", path="shared", settings=settings)
+
+    assert first["id"] != second["id"]
+    assert (first["path"], second["path"]) == ("shared", "shared")
+    # 各会话持有自己的档位：一个提档不影响另一个。
+    lifted = service.update_workspace(first["id"], mode="workspace_write", settings=settings)
+    assert lifted["mode"] == "workspace_write"
+    assert service.get_workspace(second["id"], settings=settings)["mode"] == "read_only"
+
+
+def test_duplicate_path_within_one_session_is_rejected(store, settings):
+    """去重收窄到会话内：同一会话重复登记同一路径仍然拒绝（那是误操作，不是共用）。"""
+
     service.create_workspace(session_id="s-1", path="shared", settings=settings)
 
     with pytest.raises(WorkspaceExistsError):
-        service.create_workspace(session_id="s-2", path="shared", settings=settings)
+        service.create_workspace(session_id="s-1", path="shared", settings=settings)
 
 
 def test_workspace_write_can_be_created_or_lifted(store, settings, tmp_path: Path):

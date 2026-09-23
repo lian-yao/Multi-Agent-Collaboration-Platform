@@ -49,10 +49,17 @@ class _Store:
         row = self.rows.get(str(workspace_id))
         return dict(row) if row else None
 
-    def find_workspace_by_path(self, path: str) -> dict | None:
+    def find_workspace_by_path(self, path: str, *, session_id=None) -> dict | None:
+        """同口径：给了 `session_id` 就限定该会话（去重范围是会话内）。"""
+
         for row in self.rows.values():
-            if row["path"] == path:
-                return dict(row)
+            if row["path"] != path:
+                continue
+            if session_id is not None and str(row.get("session_id")) != str(session_id):
+                continue
+            if session_id is None and row.get("session_id") is not None:
+                continue
+            return dict(row)
         return None
 
     def create_workspace(self, *, workspace_id, path, mode, **fields) -> dict:

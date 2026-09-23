@@ -458,7 +458,11 @@ class WorkspaceRecord(Base):
 
     __table_args__ = (
         Index("idx_workspaces_session", "session_id"),
-        UniqueConstraint("path", name="ux_workspaces_path"),
+        # 去重范围是**会话内**，不是全局（2026-09-23 修正）：一个目录被多个项目共用是常态，
+        # 全局唯一会让第二个项目直接 409。要挡的是"同一个项目把同一个目录登记两遍"。
+        # 用「唯一索引」而不是 `UniqueConstraint`：迁移要靠 `CREATE UNIQUE INDEX IF NOT EXISTS`
+        # 幂等重建，两者用同一个名字才对得上（见 `_REGISTRY_INDEX_MIGRATIONS`）。
+        Index("ux_workspaces_session_path", "session_id", "path", unique=True),
     )
 
 
@@ -1202,8 +1206,21 @@ def get_workspace(workspace_id: str | uuid.UUID) -> dict[str, Any] | None:
         return _workspace_to_dict(row) if row else None
 
 
-def find_workspace_by_path(path: str) -> dict[str, Any] | None:
+def find_workspace_by_path(
+    path: str, *, session_id: str | uuid.UUID | None = None
+) -> dict[str, Any] | None:
+    """按路径查登记；给 `session_id` 时**限定该会话**。
+
+    去重范围是会话内（2026-09-23 修正）：同一个文件夹可以被不同会话各自登记——一个目录被多个
+    项目共用是常态，全局查重会让第二个项目直接 409。`session_id` 省略时退回全局查（迁移脚本
+    与老调用方的兼容口），业务路径都应该带上它。
+    """
+
     statement = select(WorkspaceRecord).where(WorkspaceRecord.path == path)
+    if session_id is not None:
+        statement = statement.where(WorkspaceRecord.session_id == _as_uuid(session_id))
+    else:
+        statement = statement.where(WorkspaceRecord.session_id.is_(None))
     with get_session_factory()() as session:
         row = session.scalars(statement).first()
         return _workspace_to_dict(row) if row else None
@@ -2111,7 +2128,19 @@ def _registry_migration_statements(dialect_name: str) -> list[str]:
         f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {ddl_type}"
         for table, columns in _REGISTRY_COLUMN_MIGRATIONS.items()
         for column, ddl_type in columns
-    ]
+    ] + list(_REGISTRY_INDEX_MIGRATIONS)
+
+
+_REGISTRY_INDEX_MIGRATIONS: tuple[str, ...] = (
+    # 2026-09-23：工作区去重范围从「全局唯一」收窄到「会话内唯一」。
+    # 老库上 `ux_workspaces_path` 是 `create_all` 建出来的**约束**（不是裸索引），
+    # 所以先 drop constraint（它会顺带删掉背后的索引）；新索引用 `CREATE UNIQUE INDEX
+    # IF NOT EXISTS`，名字与 ORM 里的 `Index(..., unique=True)` 一致，重复执行无副作用。
+    "ALTER TABLE workspaces DROP CONSTRAINT IF EXISTS ux_workspaces_path",
+    "CREATE UNIQUE INDEX IF NOT EXISTS ux_workspaces_session_path "
+    "ON workspaces (session_id, path)",
+)
+"""索引 / 约束类迁移：**幂等**且按名重建，Python 侧是唯一的执行顺序来源。"""
 
 
 def _apply_registry_migrations(engine: Any) -> list[str]:

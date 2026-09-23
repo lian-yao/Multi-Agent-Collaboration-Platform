@@ -74,12 +74,34 @@ def test_migration_covers_the_workspace_actor_column():
 
 
 def test_migration_statements_are_idempotent():
-    """必须带 `IF NOT EXISTS`：启动时每次都跑，重复执行不能报错。"""
+    """每条都必须**幂等**：启动时每次都跑，重复执行不能报错。
+
+    迁移现在有两类，各有各的幂等写法——补列用 `ADD COLUMN IF NOT EXISTS`，
+    重建索引用 `CREATE ... IF NOT EXISTS`（外加 `DROP CONSTRAINT IF EXISTS` 先清旧的）。
+    所以这里按类别断言，而不是要求所有语句都长成补列的样子。
+    """
 
     statements = checkpoint._registry_migration_statements("postgresql")
 
     assert statements
-    assert all("ADD COLUMN IF NOT EXISTS" in statement for statement in statements)
+    for statement in statements:
+        assert (
+            "ADD COLUMN IF NOT EXISTS" in statement
+            or "CREATE UNIQUE INDEX IF NOT EXISTS" in statement
+            or "DROP CONSTRAINT IF EXISTS" in statement
+        ), f"这条迁移不幂等：{statement}"
+
+
+def test_migration_switches_workspace_uniqueness_to_per_session():
+    """2026-09-23：工作区去重从「全局唯一」收窄到「会话内唯一」——已有库要能升上来。"""
+
+    statements = checkpoint._registry_migration_statements("postgresql")
+
+    assert "ALTER TABLE workspaces DROP CONSTRAINT IF EXISTS ux_workspaces_path" in statements
+    assert (
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_workspaces_session_path "
+        "ON workspaces (session_id, path)" in statements
+    )
 
 
 def test_migration_is_postgresql_only():
@@ -93,7 +115,7 @@ def test_apply_migration_executes_statements_in_order():
     applied = checkpoint._apply_registry_migrations(RecordingEngine("postgresql", log))
 
     assert applied == log
-    assert len(log) == 6
+    assert len(log) == len(checkpoint._registry_migration_statements("postgresql"))
 
 
 def test_apply_migration_is_a_noop_off_postgresql():

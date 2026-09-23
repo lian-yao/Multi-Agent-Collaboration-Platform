@@ -401,8 +401,13 @@ Prompt 时需同步 roles.py 与 `BUILTIN_AGENT_SEED`，避免目录与 Prompt �
 | updated_by | VARCHAR(100) | NULL | **谁提的档**（阶段 2 起写入；提权是审计事件） |
 | created_at / updated_at | TIMESTAMPTZ | NOT NULL | |
 
-索引：`idx_workspaces_session (session_id)`、`ux_workspaces_path (path)`——宿主形态下这条
-唯一约束的含义是「同一个文件夹同时只由一个工作区绑定」，这是有意的。
+索引：`idx_workspaces_session (session_id)`、`ux_workspaces_session_path (session_id, path)`
+（唯一）——含义是「**同一个会话内**同一路径只能登记一次」。
+
+**不同会话可以各自登记同一个文件夹**（2026-09-23 修正）：一个目录被多个项目/会话共用是常态，
+全局唯一会让第二个项目直接 409。去重的范围因此收窄到会话内——真正要挡的是"同一个项目把同一个
+目录登记两遍"这种误操作，而不是"两个项目用同一个目录"。每个会话各自持有自己的档位与配额，
+互不影响；`.trash`（软删除目录）落在同一个物理目录里，这是共用的代价，不是缺陷。
 
 不变量：所有**根内子路径**必须是相对路径且不含 `..`；宿主形态的授权目录必须是**绝对路径**、
 存在、是目录、且不是平台自身源码目录；`mode` 只允许两个取值；档位调整只改本表，

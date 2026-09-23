@@ -189,8 +189,10 @@ def create_workspace(
         except OSError as exc:
             raise WorkspacePathError(f"无法创建工作区目录：{stored or '/'}（{exc}）") from exc
 
-    if checkpoint.find_workspace_by_path(stored) is not None:
-        raise WorkspaceExistsError(f"该路径已登记：{stored or '/'}")
+    # 去重限定在**本会话**内（2026-09-23 修正）：同一个文件夹可以被不同会话各自登记——
+    # 一个目录被多个项目共用是常态，全局查重会让第二个项目直接 409。
+    if checkpoint.find_workspace_by_path(stored, session_id=session_id) is not None:
+        raise WorkspaceExistsError(f"本会话已登记该路径：{stored or '/'}")
 
     row = checkpoint.create_workspace(
         workspace_id=uuid.uuid4(),

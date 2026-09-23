@@ -2164,6 +2164,44 @@ tests/integration/test_workspace_api.py` → **996 passed / 12 failed**（仍是
   一处探针经验记下：面板**标题先渲染、数据后到**，第一版断言踩在"读取中…"那一刻、把面板
   误判成空列表——验证脚本要等**数据**到位再断言，别等外壳。
 
+**第十轮（同日）：工作区去重收窄到会话内**。使用者反馈「一个文件夹可以被不同的项目重复登记，
+不会互斥」，按需求理解是：**同一个目录应当允许被不同项目（会话）各自登记**。先做实验确认现状：
+两个会话分别登记 `D:\测试`，**两边都返回 409**——当时是全局唯一（`ux_workspaces_path`），
+第二个项目会被直接挡住。
+
+改动：
+
+- **模型**：`UniqueConstraint("path", name="ux_workspaces_path")` 换成
+  `Index("ux_workspaces_session_path", "session_id", "path", unique=True)`——用唯一索引而不是
+  `UniqueConstraint`，是为了让迁移能用 `CREATE UNIQUE INDEX IF NOT EXISTS` 幂等重建（同名）；
+- **迁移**（`_REGISTRY_INDEX_MIGRATIONS`，与补列清单并列、同一条执行路径）：
+  `ALTER TABLE workspaces DROP CONSTRAINT IF EXISTS ux_workspaces_path` +
+  `CREATE UNIQUE INDEX IF NOT EXISTS ux_workspaces_session_path ON workspaces (session_id, path)`。
+  老库上 `ux_workspaces_path` 是 `create_all` 建出来的**约束**（不是裸索引），所以先 drop
+  constraint（会顺带删掉背后的索引），再建新索引；
+- **服务层**：`checkpoint.find_workspace_by_path(path, session_id=…)` 增加会话维度，
+  `create_workspace` 的查重改成本会话内；错误文案改成「本会话已登记该路径」。
+
+为什么**不是**把查重整个去掉：真正要挡的是「同一个项目把同一个目录登记两遍」这种误操作；
+「两个项目用同一个目录」是常态，不该被挡。所以去重范围收窄到会话内，跨会话放开。
+每个会话各自持有自己的档位与配额，互不影响；`.trash`（软删除目录）落在同一个物理目录里——
+这是共用的代价，写进 `doc/data-model.md` §3.3 了。
+
+验证：
+
+- 单元：`test_the_same_folder_can_be_registered_by_different_sessions`（两个会话各自登记同一路径
+  都成功，且一个提档不影响另一个）、`test_duplicate_path_within_one_session_is_rejected`；
+- 迁移护栏：`test_migration_statements_are_idempotent` 改为**按类别**断言幂等（补列 /
+  建索引 / drop 旧约束三种写法各自成立），新增
+  `test_migration_switches_workspace_uniqueness_to_per_session`——这两条抓到的正是"新语句不符合
+  原有假设"这个真问题，不是单纯改数字；
+- 全量 `pytest`（含 e2e）→ **1143 passed / 12 failed / 7 skipped**（12 条仍是缺 `pypdfium2`
+  的 PDF 用例）；
+- **真库迁移**：重启后端后查 `pg_constraint` / `pg_indexes`，`ux_workspaces_path` 已消失、
+  `ux_workspaces_session_path (session_id, path)` 唯一索引在位；
+- **真机语义**：A 登记 `D:\测试` → **201**，B 登记同一个文件夹 → **201**（改前是 409），
+  A 再登记同一路径 → **409**。验证用的测试会话已删除（只留使用者原有的登记）。
+
 **前端容器与服务**：`npm run build` 通过（bundle 441.52 kB，未过告警阈值）；
 `workspace-smoke` **210/210** 未受影响。
 - **`doc/15` 只加了两条**：模块 3 的工作区与出网边界、第五节的三层边界表；该文件是事实源，
