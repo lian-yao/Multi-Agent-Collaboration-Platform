@@ -60,6 +60,20 @@ def test_explicit_endpoint_wins_over_provider_default():
     assert settings.search_endpoint == "http://search-gateway:8800/search"
 
 
+def test_blank_endpoint_falls_back_to_the_provider_default():
+    """compose 里 `TOOL_SEARCH_ENDPOINT: ${TOOL_SEARCH_ENDPOINT:-}` 传空是常态：
+    空串必须按「没给」处理，否则 provider 的默认端点会被一个空值覆盖掉。"""
+
+    assert _settings(search_endpoint="").search_endpoint == DOUBAO_SEARCH_ENDPOINT
+    assert _settings(search_endpoint="   ").search_endpoint == DOUBAO_SEARCH_ENDPOINT
+    assert (
+        ToolSettings(
+            _env_file=None, search_provider="duckduckgo", search_endpoint=""
+        ).search_endpoint
+        == "https://api.duckduckgo.com/"
+    )
+
+
 def test_duckduckgo_remains_the_default_provider():
     settings = ToolSettings(_env_file=None)
 

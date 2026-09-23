@@ -2461,6 +2461,14 @@ TCP 443 直接超时（原生 `curl` 20s 超时、工具 8s × 4 次重试才失
 `pytest tests/unit tests/integration/test_api.py tests/integration/test_workspace_api.py`
 → **1060 passed / 0 failed**。
 
+**同日追加：compose 形态一起切过去**。`deploy/compose.yaml` 的 backend 默认
+`TOOL_SEARCH_PROVIDER=volcengine`、`TOOL_SEARCH_API_KEY` 从 compose 同级 `.env`（`deploy/.env`）
+传入、`TOOL_SEARCH_ENDPOINT` 传空（＝按 provider 取默认）——于是带出一个必须处理的细节：
+**空串必须按「没给」处理**，否则 provider 默认端点会被空值覆盖掉（`app/tools/config.py`
+的 validator 同时看 `model_fields_set` 与 `strip()`；这条被 `test_blank_endpoint_falls_back_to_the_provider_default` 钉住，改错会立刻红）。
+ADR-032 的 `search-gateway` 保留为可选回退。代理侧补了 `do_POST`，并在 `test_egress_proxy.py`
+加了「POST 带着请求体与 `Authorization` 被原样转发」与「POST 打私网同样在代理侧被拦」两例。
+
 ## 5. 失败处理约定
 - 任一用例失败：先复现，再定位，修复后将失败模式固化为新的测试或本文档约束；
 - 对 Dapr/编排等共享行为，先写测试或同步补测试，不允许“看起来正确”代替；

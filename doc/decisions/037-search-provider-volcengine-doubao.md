@@ -32,17 +32,21 @@ Bing RSS → DuckDuckGo 契约），compose 形态默认指向它。
    两条出口的解析各自独立，`WebSearchTool` 的对外结果形状（`{title,url,snippet}`）不变。
 2. **凭证只从环境 / `.env` 读**：`TOOL_SEARCH_API_KEY`。空 key 且 provider=volcengine 时**直接报
    配置错**（非 retryable），不发出无鉴权请求；key 不进仓库、不进日志（出网日志只记 host/port/purpose）。
-3. **端点按 provider 给默认值**：provider=volcengine 且未显式给 `TOOL_SEARCH_ENDPOINT` 时，
-   自动用豆包端点；显式给了就尊重显式值（便于换自建/代理）。
+3. **端点按 provider 给默认值**：provider=volcengine 且没给过（或给的是空串）
+   `TOOL_SEARCH_ENDPOINT` 时自动用豆包端点；显式给了非空值就尊重它（便于换自建/代理）。
+   「空串按没给处理」是必须的：compose 里 `TOOL_SEARCH_ENDPOINT: ${TOOL_SEARCH_ENDPOINT:-}`
+   传到容器里就是空串，若当成显式值，provider 默认端点会被一个空值覆盖掉。
 4. **仍走出网策略**：豆包是 POST，`app/security/egress.py` 原本只有 GET，这里补 POST——
    判定/钉扎/端口/域名/私网/重定向上限/响应体上限全部沿用同一套（差别只在方法与请求头）。
    重定向按标准语义处理：`307/308` 保留方法与请求体，`301/302/303` 降级为 GET 并丢掉请求体。
 5. **失败语义分清**：网络层故障（超时、不可达、5xx、429）保持 `retryable=True`；凭证无效
    （401/403）、请求体业务错误（`ResponseMetadata.Error`）、provider/key 配置缺失一律
    `retryable=False`——重试只会重复失败，且能省掉 4 次无谓重试。
-6. **与 ADR-032 并存**：compose 形态的常驻网关继续可用（provider 仍可留 `duckduckgo` 并把端点指向
-   网关）；本地形态用 `volcengine` 就不需要额外进程与 `EGRESS_INTERNAL_HOSTS`/端口白名单，
-   正好补上「本地形态没有搜索网关」这个缺口。
+6. **两种形态都默认走豆包**：compose 的 backend 默认 `TOOL_SEARCH_PROVIDER=volcengine`
+   （key 从 compose 同级 `.env` 的 `TOOL_SEARCH_API_KEY` 传，不写进 compose.yaml），本地形态同。
+   豆包是公网 443 直连，**不占** `EGRESS_INTERNAL_HOSTS`/端口白名单；本地形态用它正好补上
+   「本地没有搜索网关」这个缺口。ADR-032 的常驻 `search-gateway` **保留**为可选回退：
+   设 `TOOL_SEARCH_PROVIDER=duckduckgo` + `TOOL_SEARCH_ENDPOINT=http://search-gateway:8800/search` 即可切回。
 
 ## 备选方案
 
@@ -70,6 +74,7 @@ Bing RSS → DuckDuckGo 契约），compose 形态默认指向它。
 - `app/tools/search.py`：按 provider 分派，新增豆包响应解析与错误映射；
 - `app/security/egress.py`：新增 `http_post`（GET 路径行为不变）；
 - `scripts/egress_proxy.py`：补 `do_POST` 明文转发（compose 形态经代理时同样可用）；
-- `.env_example` 与 `doc/deployment.md`：补两个环境变量与端点说明；
+- `deploy/compose.yaml`：backend 默认改为 `volcengine` 并接收 key；`.env_example` 与
+  `doc/deployment.md`：补两个环境变量与端点说明；
 - 测试：`tests/unit/test_search_tool_volcengine.py`（解析 / 错误映射 / 缺 key）、
   `tests/unit/test_egress_post.py`（POST 透传、重定向降级、禁止覆盖关键请求头）。

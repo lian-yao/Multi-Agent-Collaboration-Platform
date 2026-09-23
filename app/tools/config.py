@@ -79,13 +79,19 @@ class ToolSettings(BaseSettings):
 
     @model_validator(mode="after")
     def _default_endpoint_follows_provider(self) -> "ToolSettings":
-        """端点默认值跟随 provider；显式给过 `TOOL_SEARCH_ENDPOINT` 就尊重显式值。"""
+        """端点默认值跟随 provider；显式给了非空值就尊重显式值。
 
-        if (
-            self.search_provider == "volcengine"
-            and "search_endpoint" not in self.model_fields_set
-        ):
-            self.search_endpoint = DOUBAO_SEARCH_ENDPOINT
+        **空串按"没给"处理**：compose 里 `TOOL_SEARCH_ENDPOINT: ${TOOL_SEARCH_ENDPOINT:-}`
+        传空是常态（见 ADR-037），若把空串当成显式值，provider 默认端点就会被它覆盖掉。
+        """
+
+        provided = "search_endpoint" in self.model_fields_set
+        if not provided or not self.search_endpoint.strip():
+            self.search_endpoint = (
+                DOUBAO_SEARCH_ENDPOINT
+                if self.search_provider == "volcengine"
+                else DUCKDUCKGO_SEARCH_ENDPOINT
+            )
         return self
 
 

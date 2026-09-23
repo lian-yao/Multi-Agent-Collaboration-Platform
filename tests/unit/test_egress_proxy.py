@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import http.client
+import json
 import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -23,6 +24,24 @@ from scripts.egress_proxy import build_server
 class _TargetHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         body = b'{"via": "target"}'
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self) -> None:  # noqa: N802
+        """回显方法与请求体：用来钉住代理**真的把 POST 转过去**（ADR-037 §4）。"""
+
+        raw = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        body = json.dumps(
+            {
+                "via": "target",
+                "method": "POST",
+                "body": raw.decode("utf-8"),
+                "auth": self.headers.get("Authorization", ""),
+            }
+        ).encode("utf-8")
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -104,6 +123,21 @@ def _plain_get(port: int, target: str) -> tuple[int, bytes]:
         connection.close()
 
 
+def _plain_post(
+    port: int, target: str, payload: dict, headers: dict[str, str] | None = None
+) -> tuple[int, bytes]:
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    body = json.dumps(payload).encode("utf-8")
+    request_headers = {"Content-Type": "application/json"}
+    request_headers.update(headers or {})
+    try:
+        connection.request("POST", target, body=body, headers=request_headers)
+        response = connection.getresponse()
+        return response.status, response.read()
+    finally:
+        connection.close()
+
+
 def _connect(port: int, target: str) -> tuple[str, socket.socket]:
     """手工发一条 CONNECT，返回状态行与已建立的隧道 socket。"""
 
@@ -165,6 +199,37 @@ def test_absolute_uri_request_is_relayed_for_an_allowed_host():
 def test_absolute_uri_request_to_a_private_host_is_denied():
     with _proxy() as (port, policy):
         status, body = _plain_get(port, "http://10.0.0.5/secret")
+
+    assert status == 403
+    assert "private_ip" in body.decode("utf-8")
+    assert policy.blocked.get("private_ip") == 1
+
+
+def test_absolute_uri_post_is_relayed_with_body_and_auth_header():
+    """豆包搜索是 POST + `Authorization`（ADR-037 §4）：代理必须原样转过去。"""
+
+    with _target() as target_port, _proxy(
+        allowed_ports=f"443,{target_port}", internal_hosts="127.0.0.1"
+    ) as (port, _policy):
+        status, body = _plain_post(
+            port,
+            f"http://127.0.0.1:{target_port}/search_api/web_search",
+            {"Query": "LangGraph"},
+            headers={"Authorization": "Bearer k-test"},
+        )
+
+    echo = json.loads(body)
+    assert status == 200
+    assert echo["method"] == "POST"
+    assert json.loads(echo["body"]) == {"Query": "LangGraph"}
+    assert echo["auth"] == "Bearer k-test"
+
+
+def test_absolute_uri_post_to_a_private_host_is_denied():
+    """代理是硬边界：POST 同样要在代理侧被拦下（不是只拦 GET）。"""
+
+    with _proxy() as (port, policy):
+        status, body = _plain_post(port, "http://10.0.0.5/secret", {"Query": "x"})
 
     assert status == 403
     assert "private_ip" in body.decode("utf-8")
