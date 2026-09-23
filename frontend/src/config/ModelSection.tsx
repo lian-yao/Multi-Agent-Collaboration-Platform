@@ -647,6 +647,8 @@ function BatchImportModal({
   const [search, setSearch] = useState("");
   const [manualText, setManualText] = useState("");
   const [result, setResult] = useState<ModelBatchImportResult | null>(null);
+  const [pruning, setPruning] = useState(false);
+  const [missingSelected, setMissingSelected] = useState<string[]>([]);
   const [notice, setNotice] = useState<NoticeState>(null);
   const [defaults, setDefaults] = useState<ImportDefaults>({
     temperature: "",
@@ -662,6 +664,15 @@ function BatchImportModal({
     () => new Set([...(remote?.existing ?? []), ...provider.models.map((item) => item.model)]),
     [remote, provider.models],
   );
+
+  // 远端已不再提供的已登记条目：只显示当前仍启用的（停用/删除后经父级刷新自动消失）。
+  const missingVisible = useMemo(() => {
+    const list = remote?.missing ?? [];
+    return list.filter((item) => {
+      const current = provider.models.find((model) => model.id === item.id);
+      return current !== undefined && current.enabled;
+    });
+  }, [remote, provider.models]);
 
   const visible = useMemo(() => {
     const keyword = search.trim().toLowerCase();
@@ -692,12 +703,49 @@ function BatchImportModal({
       setSelected(found.items.filter((item) => !registered.has(item.id)).map((item) => item.id));
       setNotice({
         tone: "info",
-        text: `远端返回 ${found.total} 个模型，其中 ${found.existing.length} 个已登记。默认只勾选未登记的。`,
+        text: `远端返回 ${found.total} 个模型，其中 ${found.existing.length} 个已登记，另有 ${(found.missing ?? []).length} 条已登记条目远端已不再提供。默认只勾选未登记的。`,
       });
     } catch (cause) {
       setNotice({ tone: "bad", text: describeError(cause, "远端发现失败，可改用下方手动输入。") });
     } finally {
       setPhase("idle");
+    }
+  };
+
+  const toggleMissing = (id: string) => {
+    setMissingSelected((current) =>
+      current.includes(id) ? current.filter((item) => item !== id) : [...current, id],
+    );
+  };
+
+  /**
+   * 对照远端清理：把「远端已不再提供」的已登记条目批量停用或删除。
+   * 逐条调用单条接口而不新增批量端点——量级是登记条目数（几十条），
+   * 且完全复用既有契约；个别失败不阻断其余条目，最后统一报告。
+   */
+  const pruneMissing = async (mode: "disable" | "delete") => {
+    const ids = [...missingSelected];
+    if (!ids.length) return;
+    setPruning(true);
+    setNotice(null);
+    let done = 0;
+    let failed = 0;
+    try {
+      for (const id of ids) {
+        try {
+          if (mode === "disable") await api.patchModelRegistry(id, { enabled: false });
+          else await api.deleteModelRegistry(id);
+          done += 1;
+        } catch {
+          failed += 1;
+        }
+      }
+      setMissingSelected([]);
+      await onImported(
+        `对照远端清理完成：${mode === "disable" ? "停用" : "删除"} ${done} 条${failed ? `，失败 ${failed} 条` : ""}。`,
+      );
+    } finally {
+      setPruning(false);
     }
   };
 
@@ -772,7 +820,7 @@ function BatchImportModal({
             type="button"
             className="cfg-primary"
             onClick={() => void submit()}
-            disabled={phase !== "idle" || pendingCount === 0}
+            disabled={pruning || phase !== "idle" || pendingCount === 0}
           >
             {phase === "importing" ? "引入中…" : `引入所选（${pendingCount}）`}
           </button>
@@ -819,6 +867,60 @@ function BatchImportModal({
                 {visible.length} / {remote.total} 个 · 已选 {pendingCount}
               </span>
             </div>
+            {missingVisible.length > 0 && (
+              <div role="group" aria-label="远端已不可用的已登记条目">
+                <div className="cfg-import-toolbar">
+                  <span className="cfg-count">
+                    远端已不可用 {missingVisible.length} 条（仍出现在各处模型下拉里）
+                  </span>
+                  <button
+                    type="button"
+                    className="cfg-quiet"
+                    onClick={() => setMissingSelected(missingVisible.map((item) => item.id))}
+                  >
+                    全选
+                  </button>
+                  <button type="button" className="cfg-quiet" onClick={() => setMissingSelected([])}>
+                    清空
+                  </button>
+                  <button
+                    type="button"
+                    className="cfg-quiet danger"
+                    disabled={pruning || phase !== "idle" || !missingSelected.length}
+                    onClick={() => void pruneMissing("disable")}
+                  >
+                    {pruning ? "处理中…" : "停用所选"}
+                  </button>
+                  <button
+                    type="button"
+                    className="cfg-quiet danger"
+                    disabled={pruning || phase !== "idle" || !missingSelected.length}
+                    onClick={() => void pruneMissing("delete")}
+                  >
+                    删除所选
+                  </button>
+                </div>
+                <div className="cfg-discover-list">
+                  {missingVisible.map((item) => (
+                    <label className="cfg-discover-item" key={item.id}>
+                      <input
+                        type="checkbox"
+                        checked={missingSelected.includes(item.id)}
+                        disabled={pruning}
+                        onChange={() => toggleMissing(item.id)}
+                      />
+                      <span className="cfg-discover-name">
+                        <b>{item.name || item.model}</b>
+                        <code>{item.model}</code>
+                      </span>
+                    </label>
+                  ))}
+                </div>
+                <p className="cfg-hint">
+                  这些已登记条目在远端清单里已不存在；停用或删除后，各处模型下拉即不再显示它们。
+                </p>
+              </div>
+            )}
             <div className="cfg-discover-list">
               {visible.map((item) => {
                 const registered = existing.has(item.id);

@@ -527,12 +527,22 @@ export interface ModelDiscoveryItem {
   owned_by: string | null;
 }
 
+/** 已登记但远端清单不再返回的条目（doc/api.md §5.10 的 `missing`）。 */
+export interface ModelDiscoveryMissing {
+  id: string;
+  model: string;
+  name: string | null;
+  enabled: boolean;
+}
+
 export interface ModelDiscovery {
   provider_id: string;
   source: string;
   items: ModelDiscoveryItem[];
   /** 该 Provider 下**已经登记**的模型名，供导入前去重。 */
   existing: string[];
+  /** 该 Provider 下**已经登记、但远端清单不再返回**的条目；据它做对照清理。 */
+  missing: ModelDiscoveryMissing[];
   total: number;
 }
 

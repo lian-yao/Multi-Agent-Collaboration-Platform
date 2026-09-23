@@ -330,7 +330,15 @@ export function DefaultRoutePanel() {
               >
                 {saving ? "保存中…" : "保存配置"}
               </button>
-              <button type="button" className="cfg-quiet" onClick={() => void load()} disabled={saving}>
+              <button
+                type="button"
+                className="cfg-quiet"
+                onClick={() => {
+                  void load();
+                  void loadModels();
+                }}
+                disabled={saving}
+              >
                 重新读取
               </button>
               <button type="button" className="cfg-quiet" onClick={() => void clearOverrides()} disabled={saving}>
