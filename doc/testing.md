@@ -1982,11 +1982,47 @@ Agent 拿不到任何文件工具，正是文档反复在修的「存下来却�
 草稿态不渲染「已登记」列表、草稿态措辞不说成「还没有登记工作区」），
 原属 `config-smoke` 的工作区用例随之搬到 `workspace-smoke`。
 
-**未完成（如实记录）**：部署形态下的前端容器没能重建——Docker 引擎本轮再次对所有 API 路由
-返回 500（`version` / `images` / `containers` 均挂起），栈里 serve 的仍是旧构建，
-因此「新抽屉在浏览器里的观感」这一层仍是人工待办：引擎恢复后
-`cd deploy; docker compose up -d --build frontend`，再照 `doc/deployment.md`
-「演示与验收」清单点一遍。
+**当时的遗留已补跑**：本轮前端容器重建时 Docker 引擎再次对所有 API 路由返回 500
+（`version` / `images` / `containers` 均挂起），栈里一度仍是旧构建；引擎恢复后
+`docker compose up -d --build backend frontend` 已重建，容器里 serve 的 bundle 与本地构建一致
+（`index-T6pfPrDq.js`）。「新抽屉在浏览器里的观感」仍按 `doc/deployment.md`
+「演示与验收」清单人工点一遍——这部分前端没有测试框架，是既有限制。
+
+**第五轮（同日）：补上「选择文件夹位置」**。使用者指出改过的抽屉里**选不了文件夹位置**，
+只能盲打相对路径。查下来这不是漏做，是**文档承诺了、接口层支撑不了**：ADR-033 §1 写的是
+「用户能『选』的是这个根**下面的子目录**，前端通过服务端的**目录浏览接口**来选」，
+影响清单里也列了 `frontend/` 负责「工作区选择器」，但接口只有
+`GET /workspaces/{id}/tree`——它要求**先有一条登记**，而选位置必须发生在登记**之前**，
+用它选位置是循环依赖。
+
+补法（文档先行）：`doc/api.md` §5.19 新增**只读**接口
+`GET /api/v1/workspace-root/tree?path=&depth=`，基准换成**工作区根**，因此不需要任何登记；
+出参与 `{id}/tree` 同形但**没有** `workspace_id`（根不是一条登记）。§7.1 增加
+「选择文件夹位置 = 根内目录选择器」一条，并写明它**不解决**什么——浏览器拿不到宿主路径、
+bind mount 又在容器创建时固定，换根仍是部署动作（`scripts/pick_work_dir.ps1`）。
+服务层 `root_tree()` 复用同一套路径守卫与目录收集（越界符号链接只标记不跟随、跳过回收站、
+目录优先）；前端在登记表单旁给「浏览根目录」：面包屑 + 目录列表 + 上一级 + 「选定此文件夹」
+回填相对路径，**只列目录**（这一层产物是路径，铺文件只会让人误点），越界链接列出来但点不动。
+接口形状上刻意避开 `GET /workspaces/root/tree`——那条与 `{id}/tree` 形状相同，谁能命中只
+取决于**路由注册顺序**，以后调一下顺序就会静默换成另一个语义。
+
+验证：`tests/unit/test_workspace_service.py` 新增 7 例（根不依赖任何工作区且不写库、
+走子目录 `depth=2`、`../` `/etc` `C:/windows` `..\..\x` 四个越界变体全部拒绝、
+越界符号链接只标记不跟随、功能关闭时 503 语义），`tests/integration/test_workspace_api.py`
+新增 4 例（根接口出参无 `workspace_id` 且不碰工作区表、越界 422 `WORKSPACE_PATH_REJECTED`、
+根不可用 503 `WORKSPACE_ROOT_UNAVAILABLE`、两条近形路由互不吃掉）。全量
+`pytest tests/unit tests/integration/test_workspace_api.py tests/integration/test_api.py`
+→ **957 passed / 12 failed**（12 条仍是本地缺 `pypdfium2` 的 PDF 用例，与本轮无关）。
+前端 `npm run build` 通过；`workspace-smoke` **226/226**（新增 3 条：挂载即读根、
+选位置走的是根接口而非 `{id}/tree`、文案把「挂进来的根」与本机磁盘分开且越界项不可进）、
+`config-smoke` **80/80**。真实栈（重建 backend + frontend）：
+`GET /api/v1/workspace-root/tree` 经前端反代返回宿主根的真实内容且响应无 `workspace_id`，
+`?path=../etc` 回 **422**，容器 serve 的 bundle 与本地构建一致。
+
+边界（如实记录）：这一轮让「选位置」有了入口，但**只覆盖根内的子目录**；根本身（宿主上那个
+目录）仍然只能由部署者用宿主侧脚本或改 `WORKSPACE_HOST_ROOT` 决定——这是 ADR-033 §1 的既定
+口径，不是本轮未完成项。另外使用者当前的根 `D:\测试` 里没有子目录，界面上会直接提示
+「这一层没有子目录，可以直接选定当前位置」。
 
 **前端容器与服务**：`npm run build` 通过（bundle 441.52 kB，未过告警阈值）；
 `workspace-smoke` **210/210** 未受影响。
