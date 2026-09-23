@@ -114,12 +114,15 @@ def _build_opener() -> urllib.request.OpenerDirector:
     """按环境变量决定走不走代理。
 
     `urllib` 默认就会读 `HTTP_PROXY`/`HTTPS_PROXY`，但显式构造代理 handler 更清楚：
-    我们只希望它**经代理**，而不是两套语义各说各话。未配代理时等价于原行为。
+    我们只希望它**经代理**，而不是两套语义各说各话。未配代理时要**显式给一个空的
+    `ProxyHandler`**——裸 `build_opener()` 会自带一个按 `getproxies()` 探测的 handler，
+    在 Windows 上即便环境变量全空也会回退读**注册表里的系统代理**，把「明确不走代理」
+    的部署悄悄劫持到系统代理上（2026-09-24 合并验证时实测踩到）。
     """
 
     proxies = {key: value for key in PROXY_ENV_VARS if (value := os.environ.get(key))}
     if not proxies:
-        return urllib.request.build_opener()
+        return urllib.request.build_opener(urllib.request.ProxyHandler({}))
     scheme_map = {name.lower(): value for name, value in proxies.items()}
     normalized = {"http": scheme_map.get("http_proxy"), "https": scheme_map.get("https_proxy") or scheme_map.get("http_proxy")}
     logger.info("upstream_via_proxy proxies=%s", sorted(proxies))
