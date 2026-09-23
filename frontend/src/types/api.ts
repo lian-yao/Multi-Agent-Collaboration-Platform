@@ -84,6 +84,10 @@ export interface PlanStepSummary {
   retry?: number | null;
   /** 该步模型调用的超时秒数；`null`/undefined = 用服务端默认。 */
   timeout_seconds?: number | null;
+  /** **实际**尝试次数（含首次）；`null` = 该步还没跑。与 `retry`（配置值）分开看。 */
+  attempts?: number | null;
+  /** 该步（含重试）消耗的 Token；用量取不到时为 0。 */
+  tokens?: number | null;
 }
 
 /** 动态编排的流程序列节点（ADR-038）：整条流程里除了子任务还有平台节点。 */
@@ -152,6 +156,12 @@ export interface Workflow {
     validation?: ValidationSummary | null;
     /** 整条流程（意图 / 编排 / 子任务 / 合成 / 校验）；画布优先读它。 */
     flow?: FlowNodeSummary[];
+    /** 本次执行已消耗的 Token（下限口径：模型没回用量时按 0 计）。 */
+    tokens_used?: number;
+    /** 累计 Token 预算上限；0 = 不限制。 */
+    token_budget?: number;
+    /** 是否因为达到预算而提前停止派发剩余子任务。 */
+    budget_exceeded?: boolean;
   } | null;
   created_at: string;
   updated_at: string;

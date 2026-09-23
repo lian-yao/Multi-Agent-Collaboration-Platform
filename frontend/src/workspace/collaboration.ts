@@ -301,6 +301,11 @@ export type CollabGraph = {
   partial: boolean;
   failedSteps: string[];
   skippedSteps: string[];
+  /** 本次执行已消耗的 Token（下限口径）与预算上限（0 = 不限制）。 */
+  tokensUsed: number;
+  tokenBudget: number;
+  /** 是否因为达到预算而提前收工（剩余子任务被标成 skipped）。 */
+  budgetExceeded: boolean;
   /** 校验器的结论；没跑校验时为 null。 */
   validation: ValidationSummary | null;
 };
@@ -406,6 +411,9 @@ export function buildCollaboration({
     partial: false,
     failedSteps: [],
     skippedSteps: [],
+    tokensUsed: 0,
+    tokenBudget: 0,
+    budgetExceeded: false,
     validation: null,
   };
   if (!workflow) return empty;
@@ -538,6 +546,9 @@ export function buildCollaboration({
     partial: Boolean(checkpoint?.partial),
     failedSteps: checkpoint?.failed_steps ?? [],
     skippedSteps: checkpoint?.skipped_steps ?? [],
+    tokensUsed: checkpoint?.tokens_used ?? 0,
+    tokenBudget: checkpoint?.token_budget ?? 0,
+    budgetExceeded: Boolean(checkpoint?.budget_exceeded),
     validation: checkpoint?.validation ?? null,
   };
 }

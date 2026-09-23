@@ -431,6 +431,53 @@ check(
     dynamicSerial.includes("lucide-shield-check"),
 );
 
+/** 预算用尽（ADR-038 §9）：横幅要写「已用 / 上限」，不能只说"超预算"。 */
+const budgetGraph = buildCollaboration({
+  stages: collabStages,
+  agents: collabAgents,
+  workflow: {
+    ...dynamicWorkflow,
+    id: "w-budget",
+    checkpoint: {
+      ...dynamicCheckpoint,
+      budget_exceeded: true,
+      tokens_used: 531980,
+      token_budget: 500000,
+      partial: true,
+    },
+  },
+  completed: new Set(["s1"]),
+  traces: null,
+  metrics: [],
+});
+
+check(
+  "ADR-038：预算字段随图带出来",
+  budgetGraph.budgetExceeded &&
+    budgetGraph.tokensUsed === 531980 &&
+    budgetGraph.tokenBudget === 500000,
+  `${budgetGraph.tokensUsed}/${budgetGraph.tokenBudget}`,
+);
+
+let budgetSerial = "";
+try {
+  budgetSerial = renderToStaticMarkup(<CollaborationGraph graph={budgetGraph} />);
+  check("ADR-038：预算用尽的画布可渲染", budgetSerial.length > 400);
+} catch (cause) {
+  check(
+    "ADR-038：预算用尽的画布可渲染",
+    false,
+    cause instanceof Error ? cause.message : String(cause),
+  );
+}
+
+check(
+  "ADR-038：横幅写出「已用 / 上限」而不是只喊超预算",
+  budgetSerial.includes("Token 预算用尽") &&
+    budgetSerial.includes("531,980") &&
+    budgetSerial.includes("500,000"),
+);
+
 /** 单 Agent 直答：只有「意图 + 一个子任务」，没有编排 / 合成 / 校验三个平台节点。 */
 const singleGraph = buildCollaboration({
   stages: collabStages,

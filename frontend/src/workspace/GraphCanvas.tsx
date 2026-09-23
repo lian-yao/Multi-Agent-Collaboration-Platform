@@ -396,6 +396,25 @@ function PlatformGlyph({ kind, size }: { kind: string; size: number }) {
 }
 
 /**
+ * 「部分完成 / 预算用尽」横幅的正文。
+ *
+ * 三件事各自独立，谁都可能单独出现（只有失败、只有跳过、只有预算），因此用列表拼而不是
+ * 一串嵌套三元——嵌套三元在"只有跳过"那一支会吐出一句空话，而这条横幅存在的意义正是
+ * **把缺口说清楚**。用量写「已用 / 上限」两个数：只说"超预算"没法判断还剩多少空间。
+ */
+function partialDetail(graph: CollabGraph): string {
+  const parts: string[] = [];
+  if (graph.budgetExceeded) {
+    parts.push(
+      `已用 ${graph.tokensUsed.toLocaleString()} / 上限 ${graph.tokenBudget.toLocaleString()}`,
+    );
+  }
+  if (graph.failedSteps.length) parts.push(`失败：${graph.failedSteps.join("、")}`);
+  if (graph.skippedSteps.length) parts.push(`跳过：${graph.skippedSteps.join("、")}`);
+  return parts.length ? parts.join("；") : "有子任务被跳过";
+}
+
+/**
  * 悬停详情：**接到什么、交出什么**在前，**用什么参数、花多少**在后。
  *
  * 排序按读图时的疑问顺序，不按数据现成的顺序：先问「它拿到了什么任务、产出了什么」，
@@ -589,16 +608,11 @@ export function CollaborationCanvas({
         「部分完成」必须在画布上说出来（ADR-038 §4）：终态可能仍是 completed，
         但结果是部分的。只在正文里写一句、画布上不体现，会让「已完成的绿点」误导人。
       */}
-      {graph.partial && (
+      {(graph.partial || graph.budgetExceeded) && (
         <div className="cv-partial" role="status">
           <CircleAlert size={dense ? 11 : 13} />
-          <b>部分子任务未完成</b>
-          <span>
-            {graph.failedSteps.length
-              ? `失败：${graph.failedSteps.join("、")}`
-              : "有子任务被跳过"}
-            {graph.skippedSteps.length ? `；跳过：${graph.skippedSteps.join("、")}` : ""}
-          </span>
+          <b>{graph.budgetExceeded ? "Token 预算用尽" : "部分子任务未完成"}</b>
+          <span>{partialDetail(graph)}</span>
         </div>
       )}
       <svg className="cv-svg cv-svg-base" viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" aria-hidden="true">
