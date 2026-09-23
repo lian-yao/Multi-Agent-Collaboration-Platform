@@ -121,6 +121,7 @@ class WorkspaceApi:
         "update_workspace",
         "get_workspace",
         "workspace_tree",
+        "import_files",
         "delete_workspace",
     )
 
@@ -149,6 +150,16 @@ class WorkspaceApi:
             return WORKSPACE_VIEW
         if name == "workspace_tree":
             return TREE_VIEW
+        if name == "import_files":
+            return {
+                "workspace_id": "w-1",
+                "imported": 1,
+                "skipped": 0,
+                "failed": 0,
+                "imported_bytes": 5,
+                "items": [{"path": "a.md", "status": "imported", "size_bytes": 5}],
+                "usage": {"available": True, "total_bytes": 5, "entries": 1, "truncated": False},
+            }
         if name == "delete_workspace":
             return None
         raise AssertionError(f"未预设 {name}")
@@ -447,6 +458,68 @@ def test_delete_missing_workspace_is_404(api):
 
     assert response.status_code == 404
     assert response.json()["code"] == "WORKSPACE_NOT_FOUND"
+
+
+def test_import_files_returns_per_item_results(api):
+    """「选择文件夹」的服务端一侧：逐项结果 + 汇总，整批配额在动盘前判掉。"""
+
+    import base64
+
+    stub, client = api
+    stub.stub(
+        "import_files",
+        {
+            "workspace_id": "w-1",
+            "imported": 1,
+            "skipped": 1,
+            "failed": 0,
+            "imported_bytes": 5,
+            "items": [
+                {"path": "docs/a.md", "status": "imported", "size_bytes": 5, "created_dirs": ["docs"]},
+                {"path": "b.md", "status": "skipped", "reason": "已存在（覆盖需要 overwrite=true）"},
+            ],
+            "usage": {"available": True, "total_bytes": 5, "entries": 2, "truncated": False},
+        },
+    )
+    body = {
+        "files": [
+            {"path": "docs/a.md", "content_base64": base64.b64encode(b"# hi").decode("ascii")},
+            {"path": "b.md", "content_base64": base64.b64encode(b"hi").decode("ascii")},
+        ]
+    }
+
+    response = client.post("/api/v1/workspaces/w-1/files", json=body)
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert (payload["imported"], payload["skipped"], payload["failed"]) == (1, 1, 0)
+    assert [item["status"] for item in payload["items"]] == ["imported", "skipped"]
+    assert stub["import_files"].last_call[0][0] == "w-1"
+    assert stub["import_files"].last_call[1]["overwrite"] is False
+
+
+def test_import_files_requires_at_least_one_file(api):
+    """空列表由 Pydantic 收口：不会进到服务层再判一次。"""
+
+    stub, client = api
+
+    response = client.post("/api/v1/workspaces/w-1/files", json={"files": []})
+
+    assert response.status_code == 422
+    assert not stub["import_files"].calls
+
+
+def test_import_files_quota_is_409(api):
+    stub, client = api
+    stub.stub("import_files", WorkspaceQuotaExceeded("超过目录总字节配额：当前 0 + 本次 11 > 上限 10 字节"))
+
+    response = client.post(
+        "/api/v1/workspaces/w-1/files",
+        json={"files": [{"path": "a", "content_base64": "YWJj"}]},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["code"] == "WORKSPACE_QUOTA_EXCEEDED"
 
 
 # --------------------------------------------------------------------------- #

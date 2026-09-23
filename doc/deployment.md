@@ -51,6 +51,20 @@ cd deploy
 > 需要直连时用 `docker compose exec backend ...`，或把 backend 临时接回 `default` 网
 > （那就同时放开了直连出网，等于放弃这层强制）。
 
+### 换工作区根（原生文件夹对话框）
+
+工作区根是**宿主目录**，换根要写 `deploy/.env` 再重建 backend（bind mount 在容器创建时固定）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/pick_work_dir.ps1
+# 或者在选完之后自己执行：cd deploy; docker compose up -d backend
+# 加 -Recreate 可以让脚本顺带重建
+```
+
+脚本会在宿主上弹系统文件夹对话框，并**拒绝**选中仓库目录（阶段 2 起沙箱对工作区可写，
+而仓库里是平台自己的源码）。界面上的「选择文件夹并导入」是另一条路：它导入**副本**，
+适合"把一批文件交给 Agent 处理"，不适合"让 Agent 直接改我本机那个目录"。
+
 > **模型前置条件（ADR-014）**：默认提供方是 OpenAI 兼容 API（`AGENT_LLM_PROVIDER=openai`），
 > 所以**部署本身不需要 Ollama**，但要先配好模型名与凭据，否则部署会成功、提交任务后
 > Workflow 阶段 fail-fast 失败（缺 model 或凭据时模型构造直接抛错，不会静默回退到别的
@@ -300,6 +314,7 @@ bind mount），`WORKSPACE_ROOT` 是**容器内**的挂载点（应用读的是�
 | 变量 | 状态 | 说明 |
 | --- | --- | --- |
 | `WORKSPACE_HOST_ROOT` | 阶段 1 | 宿主工作根（compose 默认 `../workspaces`），挂进容器的 `/workspace`。**不得指向项目仓库、`deploy/` 或平台数据目录**——沙箱对它可写（ADR-033） |
+| `WORKSPACE_IMPORT_MAX_FILES` / `WORKSPACE_IMPORT_MAX_FILE_BYTES` | 阶段 4 | 单次导入的文件数（200）与单文件字节上限（20 MB）；前端「选择文件夹并导入」分片上传，服务端兜底 |
 | `WORKSPACE_ROOT` | 阶段 1 | 容器内的工作区根，默认 `/workspace`；宿主机直跑后端时改成宿主绝对路径 |
 | `WORKSPACE_ENABLED` | 阶段 1 | 默认 `true`；设 `false` 时工作区接口返回 503 `WORKSPACE_DISABLED`，不静默降级 |
 | `WORKSPACE_MAX_FILE_BYTES` | 阶段 1 | 单文件读取上限，默认 5 MB |

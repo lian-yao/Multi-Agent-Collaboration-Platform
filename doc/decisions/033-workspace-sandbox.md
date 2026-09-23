@@ -136,6 +136,27 @@
    因此 `deploy/compose.yaml` 默认 `SANDBOX_UID/GID=0`，并在这里写明：想更严就改成宿主
    uid，或改用 `ro`。容器本身的其它边界（禁网、只读根、无能力、无 socket）与身份无关。
 
+## 修订（2026-09-23）：用户实测反馈「为什么不能像附件一样选文件夹」
+
+第 1 条原本否决的是**原生目录对话框**。使用者的反问是直白的：附件上传点一下就能弹出磁盘
+文件，为什么工作区不行？答案在于两者要的东西不同——
+
+- **附件要的是内容**：`<input type="file">` 把字节传上来，浏览器从不需要交出路经；
+- **工作区要的是"Agent 在那个目录里干活"**：那需要**服务端**能访问该目录。
+
+于是把"选文件夹"拆成两条各自成立的路径，并在前端与本文里都写清：
+
+1. **应用内「选择文件夹并导入」= 导入副本**：`<input type="file" webkitdirectory>` 拿到
+   相对路径 + 内容，交给 `POST /workspaces/{id}/files`（§5.19）落进工作区目录。
+   UX 与附件一致（点一下弹系统选择框），代价是**快照语义**：改动不会自动同步回本机那份。
+2. **宿主侧 `scripts/pick_work_dir.ps1` = 真直连**：在宿主上弹原生对话框，写
+   `deploy/.env` 的 `WORKSPACE_HOST_ROOT` 并重建 backend，让宿主目录以 bind mount 进入容器。
+   这才是"Agent 直接改我本机那个文件夹"，但触发点在宿主，不在浏览器——容器里的 backend
+   打不开宿主的对话框，这是形态决定的，不是实现偷懒。
+
+同时明确**不做** `window.showDirectoryPicker()`：目录句柄只存在于浏览器，服务端 Agent 用不上；
+做出来会是一个"能选、不能用"的假入口。
+
 工具集（会话级，按 ADR-025 的 `session_scoped_registry` 就地拼进本次执行，不进
 `GET /api/v1/tools` 静态目录）：`list_work_files` / `read_work_file` /
 `write_work_file` / `make_work_dir` / `move_work_entry` / `delete_work_entry`。

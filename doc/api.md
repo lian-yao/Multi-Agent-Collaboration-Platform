@@ -1358,6 +1358,36 @@ latin-1 编码报错）。
 
 `DELETE /api/v1/workspaces/{workspace_id}` 返回 204：只解除登记，**不删宿主文件**。
 
+`POST /api/v1/workspaces/{workspace_id}/files`（**导入文件**，前端「选择文件夹」的服务端一侧）：
+
+```json
+{
+  "files": [{ "path": "docs/a.md", "content_base64": "IyBoaQ==" }],
+  "overwrite": false
+}
+```
+
+```json
+{
+  "workspace_id": "9f1c…",
+  "imported": 1,
+  "skipped": 0,
+  "failed": 0,
+  "imported_bytes": 5,
+  "items": [{ "path": "docs/a.md", "status": "imported", "size_bytes": 5, "created_dirs": ["docs"] }],
+  "usage": { "available": true, "total_bytes": 5, "entries": 1, "truncated": false }
+}
+```
+
+- **语义是导入副本**：浏览器只能给**相对路径 + 内容**（`<input type="file" webkitdirectory>`），
+  拿不到宿主绝对路径。想让 Agent 直接操作你本机那个目录，用宿主侧脚本把目录挂进来（§7.1）。
+- `path` 是工作区相对路径，越界（`..`、绝对路径、符号链接逃逸）按 §5.19 的路径守卫拒绝；
+  逐项返回 `imported` / `skipped`（已存在且 `overwrite=false`）/ `failed`（越界、写失败）。
+- 文本按 UTF-8 写、二进制按字节写；导入是**存盘**，不做解析。
+- **写入是用户动作，不受 `read_only` 档位限制**（档位约束的是 Agent，与登记时创建目录同理）。
+- 限额：单次 ≤ `WORKSPACE_IMPORT_MAX_FILES`（默认 200），单文件 ≤ `WORKSPACE_IMPORT_MAX_FILE_BYTES`
+  （默认 20 MB）；整批的目录配额在**动盘之前**一次判掉，超限整批 409（不写半个）。
+
 路径校验（ADR-033 §4）：只接受相对路径；`..`、绝对路径/盘符/UNC、Windows 保留名与
 非法字符、NTFS 数据流，以及解析后落在工作区之外的符号链接一律拒绝。
 
@@ -1545,9 +1575,18 @@ POST /api/v1/agents/{agent_id}/run
 
 ### 7.1 工作区与审批的前端约定（§5.19 / §5.20 / §5.21）
 
-- **不要做「选择本地文件夹」的原生对话框**：浏览器给不了后端宿主路径。用户能选的是
-  **服务端可见的根内子目录**（`WORKSPACE_HOST_ROOT` 之下），列表来自 `GET /workspaces`
-  与 `GET /workspaces/{id}/tree`。文案照此写，避免让人以为能选任意路径（ADR-033 §1）。
+- **「选择文件夹」按钮允许做，但它是「导入副本」**：用 `<input type="file" webkitdirectory>`
+  让浏览器弹系统文件夹选择框，把**相对路径 + 内容**传给 `POST /workspaces/{id}/files`
+  （§5.19）——和附件上传同一思路，区别是内容落到工作区目录里。文案必须写清这是**复制**，
+  改动不会同步回本机那份。
+  **不要用 `window.showDirectoryPicker()`**（Web File System Access API）：它能弹原生选择器，
+  但拿到的目录句柄只在浏览器里有效，服务端 Agent 用不上——做了就是一个"能选、不能用"的
+  假入口。**也不要**承诺"选完就自动同步本机目录"。
+- **想让 Agent 直接操作你本机那个目录**（真·直连、改动落盘）：走宿主侧
+  `scripts/pick_work_dir.ps1` —— 它在**宿主**上弹原生文件夹对话框、写
+  `deploy/.env` 的 `WORKSPACE_HOST_ROOT`，再重建 backend 让 bind mount 生效。
+  为什么不能由浏览器点击触发：backend 跑在容器里，容器进程打不开宿主的对话框（ADR-033 §1）。
+  服务端可见根内的子目录列表仍可浏览：`GET /workspaces` 与 `GET /workspaces/{id}/tree`。
 - **档位只有两档，且提档是人的动作**：`read_only` ⇄ `workspace_write`（`PATCH`，§5.19）。
   **界面上不出现 `full_access`**——它没有实现，放上去就是假开关（ADR-033 §2）。
   档位切换要写明后果：「提档后本次会话的 Agent 多出三个写工具（新建 / 建目录 / 移动）」。

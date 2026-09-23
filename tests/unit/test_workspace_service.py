@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import base64
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -722,3 +723,122 @@ def test_workspace_source_is_fail_soft_when_the_root_disappears(store, tmp_path:
     broken = WorkspaceSettings(_env_file=None, root=str(tmp_path / "gone"))
 
     assert service.workspace_source("s-1", settings=broken) is None
+
+
+# --------------------------------------------------------------------------- #
+# 导入文件（浏览器「选择文件夹」的服务端一侧）
+# --------------------------------------------------------------------------- #
+
+
+def _b64(text: str) -> str:
+    import base64
+
+    return base64.b64encode(text.encode("utf-8")).decode("ascii")
+
+
+def test_import_writes_nested_files_and_reports_each(store, settings, tmp_path: Path):
+    view = service.create_workspace(session_id="s-1", path="project", settings=settings)
+
+    result = service.import_files(
+        view["id"],
+        [
+            {"path": "docs/readme.md", "content_base64": _b64("# hi")},
+            {"path": "notes.txt", "content_base64": _b64("note")},
+        ],
+        settings=settings,
+    )
+
+    assert (result["imported"], result["skipped"], result["failed"]) == (2, 0, 0)
+    assert (tmp_path / "project" / "docs" / "readme.md").read_text(encoding="utf-8") == "# hi"
+    assert result["usage"]["available"] is True
+
+
+def test_import_accepts_binary_and_rejects_escaping_paths(store, settings, tmp_path: Path):
+    view = service.create_workspace(session_id="s-1", path="project", settings=settings)
+    blob = base64.b64encode(b"\xff\xfe\x00\x01").decode("ascii")
+
+    with pytest.raises(WorkspacePathError):
+        service.import_files(
+            view["id"],
+            [{"path": "../escape.bin", "content_base64": blob}],
+            settings=settings,
+        )
+    assert not (tmp_path / "escape.bin").exists()
+
+    service.import_files(
+        view["id"], [{"path": "blob.bin", "content_base64": blob}], settings=settings
+    )
+    assert (tmp_path / "project" / "blob.bin").read_bytes() == b"\xff\xfe\x00\x01"
+
+
+def test_import_skips_existing_until_overwrite_is_set(store, settings, tmp_path: Path):
+    view = service.create_workspace(session_id="s-1", path="project", settings=settings)
+    files = [{"path": "a.txt", "content_base64": _b64("first")}]
+    service.import_files(view["id"], files, settings=settings)
+
+    again = service.import_files(view["id"], files, settings=settings)
+    assert again["skipped"] == 1
+    assert (tmp_path / "project" / "a.txt").read_text(encoding="utf-8") == "first"
+
+    replaced = service.import_files(
+        view["id"],
+        [{"path": "a.txt", "content_base64": _b64("second")}],
+        overwrite=True,
+        settings=settings,
+    )
+    assert replaced["imported"] == 1
+    assert (tmp_path / "project" / "a.txt").read_text(encoding="utf-8") == "second"
+
+
+def test_import_checks_quota_before_writing_anything(store, tmp_path: Path):
+    """批量导入是"先算清楚、再动盘"：不能写到一半才发现超配额。"""
+
+    tight = WorkspaceSettings(
+        _env_file=None, root=str(tmp_path), max_file_bytes=256, max_total_bytes=8
+    )
+    view = service.create_workspace(session_id="s-1", path="project", settings=tight)
+
+    with pytest.raises(WorkspaceQuotaExceeded):
+        service.import_files(
+            view["id"],
+            [
+                {"path": "a.txt", "content_base64": _b64("12345")},
+                {"path": "b.txt", "content_base64": _b64("67890")},
+            ],
+            settings=tight,
+        )
+    assert list((tmp_path / "project").iterdir()) == [], "配额不通过时一个字节都不该落盘"
+
+
+def test_import_rejects_too_many_files_and_oversized_ones(store, settings, tmp_path: Path):
+    view = service.create_workspace(session_id="s-1", path="project", settings=settings)
+    tiny = WorkspaceSettings(
+        _env_file=None, root=str(tmp_path), import_max_files=1, import_max_file_bytes=4
+    )
+
+    with pytest.raises(WorkspaceError, match="最多导入"):
+        service.import_files(
+            view["id"],
+            [
+                {"path": "a.txt", "content_base64": _b64("x")},
+                {"path": "b.txt", "content_base64": _b64("y")},
+            ],
+            settings=tiny,
+        )
+    with pytest.raises(WorkspaceError, match="单文件导入上限"):
+        service.import_files(
+            view["id"], [{"path": "big.txt", "content_base64": _b64("12345")}], settings=tiny
+        )
+
+
+def test_import_rejects_bad_base64_and_missing_path(store, settings, tmp_path: Path):
+    view = service.create_workspace(session_id="s-1", path="project", settings=settings)
+
+    with pytest.raises(WorkspaceError, match="base64"):
+        service.import_files(
+            view["id"], [{"path": "a.txt", "content_base64": "not base64!"}], settings=settings
+        )
+    with pytest.raises(WorkspaceError, match="缺少 path"):
+        service.import_files(
+            view["id"], [{"path": "  ", "content_base64": _b64("x")}], settings=settings
+        )

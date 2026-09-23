@@ -10,8 +10,11 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import os
 import uuid
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
@@ -218,6 +221,158 @@ def delete_workspace(workspace_id: str, *, actor: str | None = None) -> None:
     if not checkpoint.delete_workspace(workspace_id):
         raise WorkspaceNotFoundError(workspace_id)
     log_event(logger, "workspace.deleted", workspace_id=workspace_id, actor=actor)
+
+
+def import_files(
+    workspace_id: str,
+    files: Sequence[dict[str, Any]],
+    *,
+    overwrite: bool = False,
+    actor: str | None = None,
+    settings: WorkspaceSettings | None = None,
+) -> dict[str, Any]:
+    """把一批文件**导入**工作区（浏览器「选择文件夹」按钮的服务端一侧）。
+
+    与附件的区别值得写清楚：附件是"把内容送进模型上下文"，这里是"把内容存进工作区目录"。
+    浏览器**不会**把本地路径交给后端（`<input type="file" webkitdirectory>` 只给相对路径 +
+    内容），所以这条路的语义是**导入一份副本**，而不是"让 Agent 直接操作你本机那个文件夹"。
+    真正的宿主目录直连见 `scripts/pick_work_dir.ps1` 与 `doc/api.md` §7.1。
+
+    写入是**用户动作**，不受 `read_only` 档位限制（与登记时创建目录同理）：档位约束的是
+    Agent，不是使用者。路径仍然逐个过守卫，越界一律拒绝。
+    """
+
+    resolved_settings = _resolved_settings(settings)
+    _ensure_enabled(resolved_settings)
+    row = checkpoint.get_workspace(workspace_id)
+    if row is None:
+        raise WorkspaceNotFoundError(workspace_id)
+    if not files:
+        raise WorkspaceError("没有要导入的文件")
+    if len(files) > resolved_settings.import_max_files:
+        raise WorkspaceError(
+            f"单次最多导入 {resolved_settings.import_max_files} 个文件（本次 {len(files)}）；"
+            "浏览器会分片上传，请重试"
+        )
+
+    base = resolve_in_workspace(resolved_settings.root, row["path"], expect="dir")
+
+    # 第一遍：**先算清楚会写什么**（路径合法、不撞目录、已存在且不覆盖的跳过），
+    # 这样配额能在动盘之前一次判掉——导入是批量操作，写到一半才发现超配额最难收拾。
+    planned: list[tuple[str, bytes, Path]] = []
+    items: list[dict[str, Any]] = []
+    for entry in files:
+        relative = _import_path(entry)
+        raw = _import_bytes(entry, resolved_settings)
+        target = resolve_in_workspace(base, relative)
+        if target.is_dir():
+            items.append({"path": relative, "status": "failed", "reason": "同名目录已存在"})
+            continue
+        if target.exists() and not overwrite:
+            items.append(
+                {"path": relative, "status": "skipped", "reason": "已存在（覆盖需要 overwrite=true）"}
+            )
+            continue
+        planned.append((relative, raw, target))
+
+    extra_bytes = sum(len(raw) for _rel, raw, target in planned if not target.exists())
+    extra_entries = sum(
+        1 + len(_missing_parents(base, target.parent)) for _rel, _raw, target in planned
+    )
+    if planned:
+        _ensure_quota(
+            base,
+            extra_bytes=extra_bytes,
+            extra_entries=extra_entries,
+            path=f"导入 {len(planned)} 个文件",
+            settings=resolved_settings,
+        )
+
+    # 第二遍：真正写盘。文本按 UTF-8 写、二进制按字节写；都走独占创建（覆盖时才用替换）。
+    imported_bytes = 0
+    for relative, raw, target in planned:
+        created_dirs = _missing_parents(base, target.parent)
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            replacing = target.exists()
+            if _looks_like_text(raw):
+                with open(
+                    target, "w" if replacing else "x", encoding="utf-8", newline=""
+                ) as handle:
+                    handle.write(raw.decode("utf-8"))
+            else:
+                with open(target, "wb" if replacing else "xb") as handle:
+                    handle.write(raw)
+        except OSError as exc:
+            items.append({"path": relative, "status": "failed", "reason": f"写入失败：{exc}"})
+            continue
+        imported_bytes += len(raw)
+        log_event(
+            logger,
+            "workspace.import",
+            workspace_id=workspace_id,
+            path=relative,
+            bytes=len(raw),
+            actor=actor,
+        )
+        items.append(
+            {
+                "path": relative,
+                "status": "imported",
+                "size_bytes": len(raw),
+                "created_dirs": [relative_to_root(base, item) for item in created_dirs],
+            }
+        )
+
+    imported = sum(1 for item in items if item["status"] == "imported")
+    skipped = sum(1 for item in items if item["status"] == "skipped")
+    failed = sum(1 for item in items if item["status"] == "failed")
+    view = _view(checkpoint.get_workspace(workspace_id) or row, settings=resolved_settings)
+    return {
+        "workspace_id": workspace_id,
+        "imported": imported,
+        "skipped": skipped,
+        "failed": failed,
+        "imported_bytes": imported_bytes,
+        "items": items,
+        "usage": view.get("usage"),
+    }
+
+
+def _import_path(entry: dict[str, Any]) -> str:
+    value = str(entry.get("path") or "").replace("\\", "/").strip().lstrip("/")
+    if not value:
+        raise WorkspaceError("导入项缺少 path")
+    return value
+
+
+def _looks_like_text(raw: bytes) -> bool:
+    """能不能当文本写？判据只有一条：**能按 UTF-8 解码**。
+
+    导入是存盘而不是解析，所以不做更多嗅探；二进制内容（图片、压缩包）按字节写即可。
+    """
+
+    try:
+        raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
+def _import_bytes(entry: dict[str, Any], settings: WorkspaceSettings) -> bytes:
+    encoded = entry.get("content_base64")
+    if not isinstance(encoded, str) or not encoded:
+        raise WorkspaceError(f"导入项缺少 content_base64：{entry.get('path')}")
+    try:
+        raw = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise WorkspaceError(f"content_base64 不是合法 base64：{entry.get('path')}") from exc
+    if len(raw) > settings.import_max_file_bytes:
+        raise WorkspaceError(
+            f"文件超过单文件导入上限（{len(raw)} > {settings.import_max_file_bytes} 字节）："
+            f"{entry.get('path')}"
+        )
+    return raw
 
 
 def _view(
@@ -717,19 +872,38 @@ class LocalWorkspaceSource:
         仍然按它拦（宁可保守），因此错误信息里的数字可能偏小。
         """
 
-        usage = scan_usage(self.root(), settings=self._settings)
-        limits = default_quota(self._settings)
-        if usage["total_bytes"] + extra_bytes > limits["max_total_bytes"]:
-            raise WorkspaceQuotaExceeded(
-                f"超过目录总字节配额：当前 {usage['total_bytes']} + 本次 {extra_bytes} "
-                f"> 上限 {limits['max_total_bytes']} 字节（{path}）"
-            )
-        if usage["entries"] + extra_entries > limits["max_entries"]:
-            raise WorkspaceQuotaExceeded(
-                f"超过目录条目配额：当前 {usage['entries']} + 本次 {extra_entries} "
-                f"> 上限 {limits['max_entries']}（{path}）"
-            )
-        return usage
+        return _ensure_quota(
+            self.root(),
+            extra_bytes=extra_bytes,
+            extra_entries=extra_entries,
+            path=path,
+            settings=self._settings,
+        )
+
+
+def _ensure_quota(
+    base: Path,
+    *,
+    extra_bytes: int,
+    extra_entries: int,
+    path: str,
+    settings: WorkspaceSettings,
+) -> dict[str, Any]:
+    """配额检查的唯一实现：写文件与批量导入都走这里（两份口径最容易漂）。"""
+
+    usage = scan_usage(base, settings=settings)
+    limits = default_quota(settings)
+    if usage["total_bytes"] + extra_bytes > limits["max_total_bytes"]:
+        raise WorkspaceQuotaExceeded(
+            f"超过目录总字节配额：当前 {usage['total_bytes']} + 本次 {extra_bytes} "
+            f"> 上限 {limits['max_total_bytes']} 字节（{path}）"
+        )
+    if usage["entries"] + extra_entries > limits["max_entries"]:
+        raise WorkspaceQuotaExceeded(
+            f"超过目录条目配额：当前 {usage['entries']} + 本次 {extra_entries} "
+            f"> 上限 {limits['max_entries']}（{path}）"
+        )
+    return usage
 
 
 def _missing_parents(base: Path, directory: Path) -> list[Path]:

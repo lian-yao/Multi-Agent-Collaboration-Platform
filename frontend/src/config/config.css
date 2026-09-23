@@ -2308,3 +2308,16 @@
   border-radius:var(--cfg-radius-sm);
   background:var(--cfg-surface-soft)
 }
+
+/* 「选择文件夹」的代理 input：**渲染但在视口外**，而不是 `display:none`。
+   区别在于后者会让一部分宿主（以及 Chrome DevTools 协议的 setFileInputFiles）直接
+   忽略它——按钮点了没反应是最难查的那类问题。用户看到的是系统文件夹对话框，
+   这个元素本身永远不可见、也不参与键盘导航（tabIndex=-1、aria-hidden）。 */
+.cfg-file-input-proxy {
+  position:absolute;
+  width:1px;
+  height:1px;
+  opacity:0;
+  pointer-events:none;
+  clip-path:inset(50%)
+}

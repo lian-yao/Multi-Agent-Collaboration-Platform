@@ -40,7 +40,7 @@ import { entriesToRecord, recordToEntries, samePairs } from "../src/config/KeyVa
 import { McpImportModal } from "../src/config/McpImportModal";
 import { SandboxBoundary } from "../src/config/SandboxPanel";
 import { EgressBoundary } from "../src/config/EgressPanel";
-import { WorkspaceBoundary } from "../src/config/WorkspacePanel";
+import { WorkspaceBoundary, folderTargets } from "../src/config/WorkspacePanel";
 import type {
   Agent,
   ProviderRegistryDetail,
@@ -931,12 +931,34 @@ const configPanelSource = readFileSync(
   "utf8",
 );
 check(
-  "工作区面板：不做原生目录对话框、不出现 full_access、也不提供提权入口",
-  !/showDirectoryPicker|type="file"/.test(configPanelSource) &&
-    // 只看**渲染结果**：源码注释里解释「为什么不提供这一档 / 这个入口」是允许的，
-    // 断言源码会把解释本身判成违规（这一条就是被自己的注释绊倒过一次）。
+  "工作区面板：选择文件夹走「导入副本」，不用只在浏览器里有效的目录句柄",
+  // `webkitdirectory` 是**允许**的：浏览器给相对路径 + 内容，正好用来导入副本。
+  // `showDirectoryPicker`（Web File System Access API）则不行——句柄只存在于浏览器，
+  // 服务端 Agent 用不上，做了就是个只能看不能用的假入口。
+  /webkitdirectory/.test(configPanelSource) &&
+    !/showDirectoryPicker/.test(configPanelSource) &&
+    // 只看**渲染结果**：源码注释里解释「为什么不提供这一档 / 这个入口」是允许的。
     !/full_access|提权/.test(workspaceMarkup),
   workspaceMarkup.slice(0, 120),
+);
+check(
+  "工作区面板：写清「导入的是副本」，并给出宿主侧直连的出口",
+  workspaceMarkup.includes("复制") &&
+    workspaceMarkup.includes("pick_work_dir.ps1") &&
+    workspaceMarkup.includes("选择文件夹并导入"),
+  workspaceMarkup.slice(0, 160),
+);
+
+const folder = folderTargets([
+  { name: "a.md", webkitRelativePath: "myproject/docs/a.md", size: 10 } as File,
+  { name: "b.bin", webkitRelativePath: "myproject/b.bin", size: 30 * 1024 * 1024 } as File,
+  { name: "root.txt", webkitRelativePath: "myproject/root.txt", size: 5 } as File,
+]);
+check(
+  "选择文件夹：剥掉顶层目录名，超过单文件上限的单独挑出来",
+  folder.targets.map((item) => item.path).join(",") === "docs/a.md,root.txt" &&
+    folder.oversized.join(",") === "b.bin",
+  JSON.stringify(folder.targets.map((item) => item.path)) + " / " + folder.oversized.join(","),
 );
 check(
   "审批入口指向对话流而不是配置页（归属不重复）",

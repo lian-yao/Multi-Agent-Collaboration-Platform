@@ -2320,6 +2320,40 @@ class WorkspaceCreateRequest(BaseModel):
     name: str | None = Field(default=None, max_length=100)
 
 
+class WorkspaceFileUpload(BaseModel):
+    """一个待导入文件：**工作区相对路径 + base64 内容**。
+
+    浏览器不把本地路径交给后端（`<input type="file" webkitdirectory>` 只给相对路径与内容），
+    所以这里收的就是「路径 + 内容」，与附件上传同一思路（§5.16）——区别是它落到工作区目录里。
+    """
+
+    path: str = Field(min_length=1, max_length=500)
+    content_base64: str = Field(min_length=1)
+
+
+class WorkspaceImportRequest(BaseModel):
+    files: list[WorkspaceFileUpload] = Field(min_length=1)
+    overwrite: bool = False
+
+
+class WorkspaceImportItem(BaseModel):
+    path: str
+    status: Literal["imported", "skipped", "failed"]
+    reason: str | None = None
+    size_bytes: int | None = None
+    created_dirs: list[str] | None = None
+
+
+class WorkspaceImportResponse(BaseModel):
+    workspace_id: str
+    imported: int
+    skipped: int
+    failed: int
+    imported_bytes: int
+    items: list[WorkspaceImportItem]
+    usage: WorkspaceUsage | None = None
+
+
 class WorkspacePatchRequest(BaseModel):
     """`PATCH /api/v1/workspaces/{workspace_id}`（`doc/api.md` §5.19）。
 
@@ -2417,6 +2451,35 @@ def patch_workspace_registry(
         )
     )
     return WorkspaceResponse.model_validate(data)
+
+
+@app.post(
+    "/api/v1/workspaces/{workspace_id}/files",
+    response_model=WorkspaceImportResponse,
+)
+def import_workspace_files(
+    workspace_id: str,
+    payload: WorkspaceImportRequest,
+    request: Request,
+) -> WorkspaceImportResponse:
+    """把一批文件导入工作区（`doc/api.md` §5.19）；前端「选择文件夹」按钮的服务端一侧。
+
+    语义是**导入一份副本**：浏览器能给后端的是相对路径 + 内容，不是宿主绝对路径。
+    想让 Agent 直接操作你本机那个文件夹，走宿主侧脚本 + bind mount（§7.1）。
+
+    逐项返回 `imported` / `skipped`（已存在且未开覆盖）/ `failed`（越界、超限、写失败）。
+    整批的配额在**动盘之前**一次判掉：批量操作写到一半才发现超配额最难收拾。
+    """
+
+    data = _workspace_call(
+        lambda: workspace_service.import_files(
+            workspace_id,
+            [item.model_dump() for item in payload.files],
+            overwrite=payload.overwrite,
+            actor=request.headers.get("X-Request-ID"),
+        )
+    )
+    return WorkspaceImportResponse.model_validate(data)
 
 
 @app.delete("/api/v1/workspaces/{workspace_id}", status_code=204)

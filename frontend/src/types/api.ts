@@ -722,6 +722,35 @@ export interface WorkspacePatch {
   name?: string | null;
 }
 
+/**
+ * 一个待导入文件：**相对路径 + base64 内容**。
+ *
+ * 浏览器不把宿主绝对路径交给后端（`<input type="file" webkitdirectory>` 只给相对路径与
+ * 内容），所以「选择文件夹」这条路是**导入一份副本**，不是让 Agent 直接操作本机那个目录。
+ */
+export interface WorkspaceImportFile {
+  path: string;
+  content_base64: string;
+}
+
+export interface WorkspaceImportItem {
+  path: string;
+  status: "imported" | "skipped" | "failed";
+  reason?: string | null;
+  size_bytes?: number | null;
+  created_dirs?: string[] | null;
+}
+
+export interface WorkspaceImportResult {
+  workspace_id: string;
+  imported: number;
+  skipped: number;
+  failed: number;
+  imported_bytes: number;
+  items: WorkspaceImportItem[];
+  usage?: WorkspaceUsage | null;
+}
+
 /* -------------------------------------------------------------------------- */
 /* §5.20 工作区审批（覆盖 / 删除）                                             */
 /* -------------------------------------------------------------------------- */

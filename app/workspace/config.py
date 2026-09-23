@@ -54,6 +54,13 @@ class WorkspaceSettings(BaseSettings):
     approval_ttl_seconds: int = 900
     """审批的有效期。超时未决策的 `pending` 会被标成 `expired`：不放行，也不删记录。"""
 
+    import_max_files: int = 200
+    """单次导入的文件数上限（浏览器「选择文件夹」会按这个分片上传）。"""
+
+    import_max_file_bytes: int = 20 * 1024 * 1024
+    """单个导入文件的字节上限。比附件（5 MB）宽：导入是**存盘**而不是塞进模型上下文，
+    但要挡住"一个 2 GB 的视频把请求体和配额一起打爆"这种情况。"""
+
 
 @lru_cache
 def get_workspace_settings() -> WorkspaceSettings:

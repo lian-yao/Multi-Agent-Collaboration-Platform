@@ -1,10 +1,12 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { FolderTree, HardDrive, ShieldAlert } from "lucide-react";
 import { api } from "../api/client";
 import { InlineConfirm } from "../components/InlineConfirm";
+import { fileToBase64 } from "../workspace/attachments";
 import type {
   Workspace,
   WorkspaceEntry,
+  WorkspaceImportFile,
   WorkspaceMode,
   WorkspaceTree,
 } from "../types/api";
@@ -24,8 +26,10 @@ import {
  *
  * 三件刻意的事：
  *
- * 1. **没有「选择本地文件夹」按钮**：浏览器拿不到后端宿主路径，用户能选的是
- *    工作区根（`WORKSPACE_HOST_ROOT`）之下的相对路径。文案按这个写，避免误导。
+ * 1. **「选择文件夹」按钮导入的是副本**：浏览器能给的只有相对路径 + 内容
+ *    （`<input type="file" webkitdirectory>`），拿不到宿主绝对路径，所以这条路的语义是
+ *    「把这份文件夹导入工作区」。想让 Agent 直接操作你本机那个目录，走宿主侧脚本 +
+ *    bind mount（`scripts/pick_work_dir.ps1`）。界面文案必须写清这个区别。
  * 2. **档位只有两档**且提档是**人的动作**：`read_only` ⇄ `workspace_write`。
  *    不出现 `full_access`（没实现），也不做「Agent 申请提权」的入口（ADR-033 §3）。
  * 3. **目录树只读**：指向工作区之外的符号链接要标出来、且不可展开——它们不是可读内容，
@@ -69,6 +73,37 @@ const MODE_LABEL: Record<WorkspaceMode, string> = {
   workspace_write: "可写",
 };
 
+/** 单次请求最多带多少个文件：服务端 `WORKSPACE_IMPORT_MAX_FILES` 默认 200，这里更保守。 */
+export const IMPORT_CHUNK_FILES = 50;
+/** 与 `WORKSPACE_IMPORT_MAX_FILE_BYTES` 一致：20 MB。 */
+export const IMPORT_MAX_FILE_BYTES = 20 * 1024 * 1024;
+
+/**
+ * 把 `<input webkitdirectory>` 给的文件列表整理成导入项。
+ *
+ * 路径取 `webkitRelativePath`（形如 `myproject/docs/a.md`）并**剥掉第一段**：用户选的是
+ * 「我的工作文件夹」，其内容该落在工作区根下，而不是再套一层同名目录。
+ */
+export function folderTargets(files: readonly File[]): {
+  targets: { path: string; file: File }[];
+  oversized: string[];
+} {
+  const targets: { path: string; file: File }[] = [];
+  const oversized: string[] = [];
+  for (const file of files) {
+    const relative = (file.webkitRelativePath || file.name).replace(/\\/g, "/");
+    const segments = relative.split("/").filter(Boolean);
+    const path = (segments.length > 1 ? segments.slice(1) : segments).join("/");
+    if (!path) continue;
+    if (file.size > IMPORT_MAX_FILE_BYTES) {
+      oversized.push(path);
+      continue;
+    }
+    targets.push({ path, file });
+  }
+  return { targets, oversized };
+}
+
 function TreeList({ entries, depth = 0 }: { entries: WorkspaceEntry[]; depth?: number }) {
   return (
     <ul className="cfg-ws-tree" data-depth={depth}>
@@ -101,26 +136,33 @@ export function WorkspaceBoundary({
   tree,
   treeError,
   busy = false,
+  importBusy = false,
   notice,
   onCreate,
   onSelect,
   onToggleMode,
   onDelete,
+  onImportFolder,
 }: {
   workspaces: Workspace[];
   selectedId: string | null;
   tree: WorkspaceTree | null;
   treeError?: string;
   busy?: boolean;
+  importBusy?: boolean;
   notice?: NoticeState;
   onCreate?: (path: string, mode: WorkspaceMode) => void;
   onSelect?: (id: string) => void;
   onToggleMode?: (workspace: Workspace) => void;
   onDelete?: (workspace: Workspace) => void;
+  /** 「选择文件夹」：拿到浏览器给的 FileList（相对路径 + 内容），由容器上传。 */
+  onImportFolder?: (files: FileList, overwrite: boolean) => void;
 }) {
   const selected = workspaces.find((item) => item.id === selectedId) ?? null;
   const [path, setPath] = useState("");
   const [mode, setMode] = useState<WorkspaceMode>("read_only");
+  const [overwrite, setOverwrite] = useState(false);
+  const folderPicker = useRef<HTMLInputElement>(null);
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
@@ -217,6 +259,22 @@ export function WorkspaceBoundary({
               </div>
             </div>
             <div className="cfg-row-actions">
+              <label className="cfg-check" title="同名文件已存在时是否覆盖">
+                <input
+                  type="checkbox"
+                  checked={overwrite}
+                  onChange={(event) => setOverwrite(event.target.checked)}
+                />
+                覆盖同名
+              </label>
+              <button
+                type="button"
+                className="cfg-quiet"
+                disabled={busy || importBusy}
+                onClick={() => folderPicker.current?.click()}
+              >
+                {importBusy ? "导入中…" : "选择文件夹并导入"}
+              </button>
               <button
                 type="button"
                 className="cfg-quiet"
@@ -237,6 +295,23 @@ export function WorkspaceBoundary({
               </InlineConfirm>
             </div>
           </div>
+
+          {/* 浏览器只能给相对路径 + 内容，所以这里做的是**导入副本**；文案必须说清楚。 */}
+          <input
+            ref={folderPicker}
+            type="file"
+            multiple
+            tabIndex={-1}
+            aria-hidden="true"
+            className="cfg-file-input-proxy"
+            onChange={(event) => {
+              const files = event.target.files;
+              if (files && files.length) onImportFolder?.(files, overwrite);
+              // 允许重复选同一个目录（否则第二次 change 不触发）。
+              event.target.value = "";
+            }}
+            {...({ webkitdirectory: "true", directory: "true" } as Record<string, string>)}
+          />
 
           <dl className="cfg-facts">
             <div>
@@ -260,6 +335,11 @@ export function WorkspaceBoundary({
           <p className="cfg-hint">
             覆盖与删除需要人工审批：Agent 第一次调用只会提交申请，批准后它重试同一调用才执行。
             审批入口在对话流的执行过程里。
+          </p>
+          <p className="cfg-hint">
+            「选择文件夹并导入」把本机那个文件夹的内容**复制**进工作区（浏览器拿不到宿主路径，
+            所以只能传内容）；想让 Agent 直接操作你本机那个目录，用宿主侧脚本
+            <code> scripts/pick_work_dir.ps1</code> 把目录挂进来。
           </p>
 
           {treeError && <p className="cfg-alert">{treeError}</p>}
@@ -293,6 +373,7 @@ export function WorkspacePanel() {
   const [tree, setTree] = useState<WorkspaceTree | null>(null);
   const [treeError, setTreeError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [importBusy, setImportBusy] = useState(false);
   const [notice, setNotice] = useState<NoticeState>(null);
 
   const loadTree = useCallback(async (id: string) => {
@@ -380,6 +461,62 @@ export function WorkspacePanel() {
     }
   };
 
+  /**
+   * 「选择文件夹并导入」：把浏览器给的文件（相对路径 + 内容）分片传上去。
+   *
+   * 分片是为了不让一次请求带上成千上万个文件；单文件上限与配额由服务端兜底，
+   * 这里先做一遍**本地预筛**，让用户立刻看到"哪些没进来、为什么"。
+   */
+  const importFolder = async (files: FileList, overwrite: boolean) => {
+    if (!selectedId) return;
+    setImportBusy(true);
+    try {
+      const { targets, oversized } = folderTargets(Array.from(files));
+      if (!targets.length) {
+        setNotice({
+          tone: "bad",
+          text: oversized.length
+            ? `全部文件都超过 ${formatBytes(IMPORT_MAX_FILE_BYTES)}，没有可导入的内容`
+            : "这个文件夹里没有文件",
+        });
+        return;
+      }
+      let imported = 0;
+      let skipped = 0;
+      let failed = 0;
+      for (let index = 0; index < targets.length; index += IMPORT_CHUNK_FILES) {
+        const chunk = targets.slice(index, index + IMPORT_CHUNK_FILES);
+        const payload: WorkspaceImportFile[] = [];
+        for (const target of chunk) {
+          payload.push({
+            path: target.path,
+            content_base64: await fileToBase64(target.file),
+          });
+        }
+        const result = await api.importWorkspaceFiles(selectedId, payload, overwrite);
+        imported += result.imported;
+        skipped += result.skipped;
+        failed += result.failed;
+      }
+      const parts = [`已导入 ${imported} 个文件`];
+      if (skipped) {
+        parts.push(
+          `跳过 ${skipped} 个（同名已存在${overwrite ? "" : "；要覆盖请勾选「覆盖同名」"}）`,
+        );
+      }
+      if (failed) parts.push(`失败 ${failed} 个`);
+      if (oversized.length) {
+        parts.push(`超过 ${formatBytes(IMPORT_MAX_FILE_BYTES)} 的 ${oversized.length} 个未导入`);
+      }
+      setNotice({ tone: skipped || failed || oversized.length ? "info" : "ok", text: parts.join("；") });
+      await reload(selectedId);
+    } catch (cause) {
+      setNotice({ tone: "bad", text: describeError(cause, "导入失败") });
+    } finally {
+      setImportBusy(false);
+    }
+  };
+
   return (
     <WorkspaceBoundary
       workspaces={workspaces}
@@ -387,6 +524,7 @@ export function WorkspacePanel() {
       tree={tree}
       treeError={treeError}
       busy={busy}
+      importBusy={importBusy}
       notice={notice}
       onCreate={(path, mode) => void create(path, mode)}
       onSelect={(id) => {
@@ -395,6 +533,7 @@ export function WorkspacePanel() {
       }}
       onToggleMode={(workspace) => void toggleMode(workspace)}
       onDelete={(workspace) => void remove(workspace)}
+      onImportFolder={(files, overwrite) => void importFolder(files, overwrite)}
     />
   );
 }

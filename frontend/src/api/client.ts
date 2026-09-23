@@ -31,6 +31,8 @@ import type {
   ProviderConfigUpdate,
   Workspace,
   WorkspaceCreate,
+  WorkspaceImportFile,
+  WorkspaceImportResult,
   WorkspaceList,
   WorkspacePatch,
   WorkspaceTree,
@@ -322,6 +324,19 @@ export const api = {
   /** 解除登记；**不删宿主文件**。 */
   deleteWorkspace: (id: string) =>
     noContent(`/api/v1/workspaces/${encodeURIComponent(id)}`, { method: "DELETE" }),
+  /**
+   * 把一批文件导入工作区（§5.19）。浏览器「选择文件夹」按钮的服务端一侧——
+   * 语义是**导入副本**；宿主目录直连见 `scripts/pick_work_dir.ps1`。
+   */
+  importWorkspaceFiles: (
+    id: string,
+    files: WorkspaceImportFile[],
+    overwrite = false,
+  ) =>
+    json<WorkspaceImportResult>(
+      `/api/v1/workspaces/${encodeURIComponent(id)}/files`,
+      { method: "POST", body: JSON.stringify({ files, overwrite }) },
+    ),
 
   /* ---------------------------------------------------------------------- */
   /* §5.20 工作区审批                                                        */
